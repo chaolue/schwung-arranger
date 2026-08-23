@@ -1,0 +1,70 @@
+{
+  "id": "arranger",
+  "name": "Arranger",
+  "abbrev": "ARR",
+  "version": "0.1.0",
+  "description": "Build songs from a MIDI drum-clip library and perform them live",
+  "author": "chaolue",
+  "license": "MIT",
+  "ui": "ui.js",
+  "dsp": "dsp.so",
+  "api_version": 1,
+  "capabilities": {
+    "component_type": "overtake",
+    "suspend_keeps_js": true,
+    "suspend_self_managed": true,
+    "raw_midi": true,
+    "raw_ui": true
+  },
+  "settings-schema": {
+    "type": "object",
+    "properties": {
+      "midi_library_path": {
+        "type": "string",
+        "default": "/data/UserData/UserLibrary/Arranger/MidiLibrary",
+        "title": "MIDI Library Path"
+      },
+      "default_output": {
+        "type": "string",
+        "enum": ["external", "move", "schwung"],
+        "default": "schwung",
+        "title": "Default MIDI Output"
+      },
+      "default_output_channel": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 16,
+        "default": 10,
+        "title": "Default External Output Channel"
+      },
+      "default_move_channel": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 16,
+        "default": 10,
+        "title": "Default Move Output Channel"
+      },
+      "default_schwung_channel": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 16,
+        "default": 10,
+        "title": "Default Schwung Output Channel"
+      },
+      "default_click_note": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 127,
+        "default": 37,
+        "title": "Default Click Note"
+      },
+      "guard_fraction": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1,
+        "default": 0,
+        "title": "Boundary Guard Fraction (of a beat)"
+      }
+    }
+  }
+}
