@@ -161,6 +161,10 @@ let trimOriginalSnareNote = 38;
 let trimOriginalSnareVelocityScale = 1.0;
 let trimOriginalKickNote = 36;
 let trimOriginalKickTarget = 0;
+/* The clip object being edited in the trim view. Captured when the view opens
+ * so a section auto-advance during playback doesn't switch the edit to a clip
+ * in the new section. */
+let trimClip = null;
 
 let songSettingsFocus = 0;
 let songSettingsPendingBpm = 120;
@@ -216,6 +220,11 @@ let playbackSectionIndex = 0; /* section currently being played by DSP */
  * playing, show that section in the display and step LEDs instead of the
  * currently playing section. -1 = follow the playhead. */
 let builderDisplaySection = -1;
+/* Set to the source-folder NAME when the builder needs its clip pads loaded
+ * but the DSP folder scan isn't ready yet (e.g. an existing song opened on a
+ * fresh boot). The tick re-resolves the folder index (once libraryFolders is
+ * populated) and reloads the clips until they arrive. */
+let pendingFolderClipLoadName = null;
 let lastTransportBar = 0;     /* last bar number seen from DSP transport */
 let maxBeatThisBar = 0;       /* highest transport beat seen in current bar */
 let transportBeatsPerBar = 0; /* observed transport beats in last complete bar */
@@ -1226,6 +1235,8 @@ function stopPlayback() {
     builderDisplaySection = -1;
     previewBarOffset = 0;
     playbackSectionIndex = currentSectionIndex;
+    /* Select the first clip of the current section when stopped. */
+    builderCursor = 0;
     lastStepBeatKey = "";
     lastStepBarIndex = -1;
     lastBeatFlashMs = 0;
@@ -1539,6 +1550,10 @@ function updateDspState() {
                 stepScrollOffset = 0;
                 resetStepFlash();
                 stepRedrawAll = true;
+                /* Highlight the first clip of the newly playing section so the
+                 * jogwheel/trim operate on the live section, not the stale
+                 * cursor position from the previous section. */
+                builderCursor = 0;
                 logDebug("section follow: dspBarFrac=" + dspBarFrac.toFixed(2) + " fullBarFrac=" + fullSongBarFrac.toFixed(2) + " section=" + (playbackSectionIndex + 1));
                 needsRedraw = true;
                 stepLedsDirty = true;
@@ -1679,7 +1694,10 @@ function updateButtonLEDs() {
                 break;
             case VIEW_BUILDER: {
                 const ledLocked = songIsLocked();
-                const ledSec = currentSong ? currentSong.sections[currentSectionIndex] : null;
+                /* Use the displayed section (auto-followed/jumped during
+                 * playback) so copy/delete light up for the live section's
+                 * clips, not the stale currentSectionIndex. */
+                const ledSec = currentSong ? currentSong.sections[builderDisplaySectionIndex()] : null;
                 const ledOnClip = ledSec && builderCursor >= 0 && builderCursor < ledSec.clips.length;
                 const ledOnSection = builderCursor === -1;
                 const ledOnInsert = ledSec && ledSec.clips.length === 0 && builderCursor === 0;
@@ -3017,8 +3035,9 @@ function drawFolderList() {
 
 function drawBuilder() {
     const playingIdx = (playbackState === "playing" && builderDisplaySection >= 0) ? builderDisplaySection : playbackSectionIndex;
-    const sec = currentSong ? currentSong.sections[playbackState === "playing" ? playingIdx : currentSectionIndex] : null;
-    drawMenuHeader(scrollHeader("Edit: " + (currentSong ? shortSongName(currentSong.name) : ""), 21), songIsLocked() ? "^" : "");
+    const displayIdx = playbackState === "playing" ? playingIdx : currentSectionIndex;
+    const sec = currentSong ? currentSong.sections[displayIdx] : null;
+    drawMenuHeader(scrollHeader("Edit: " + (currentSong ? shortSongName(currentSong.name) : ""), songIsLocked() ? 20 : 21), songIsLocked() ? "*" : "");
     if (!sec) {
         print(2, LIST_TOP_Y, "No section.", 1);
         drawOverlay();
@@ -3041,7 +3060,7 @@ function drawBuilder() {
             return "(pads add clips)";
         },
         getValue: (item) => {
-            if (item.type === "section") return (currentSectionIndex + 1) + "/" + currentSong.sections.length;
+            if (item.type === "section") return (displayIdx + 1) + "/" + currentSong.sections.length;
             if (item.type === "clip") {
                 const c = sec.clips[item.index];
                 const s = (typeof c.speed === "number" && c.speed > 0) ? c.speed : 1.0;
@@ -3059,9 +3078,14 @@ function drawBuilder() {
 }
 
 function openTrimView() {
-    const sec = currentSong ? currentSong.sections[currentSectionIndex] : null;
+    /* Use the displayed section (auto-followed/jumped during playback) so the
+     * trim edits the live section's clip, not the stale currentSectionIndex. */
+    const sec = currentSong ? currentSong.sections[builderDisplaySectionIndex()] : null;
     const clip = sec ? sec.clips[builderCursor] : null;
     if (!clip) return;
+    /* Capture the clip reference so a section auto-advance during playback
+     * doesn't switch the edit to a clip in the new section. */
+    trimClip = clip;
     trimEditing = false;
     /* Advanced Trim persists per-clip so editing a clip again keeps the finer
      * bar/beat view on. It defaults off for clips that never used it. */
@@ -3122,9 +3146,8 @@ function trimToggleAdvanced() {
 }
 
 function drawTrim() {
-    const sec = currentSong ? currentSong.sections[currentSectionIndex] : null;
-    const clip = sec ? sec.clips[builderCursor] : null;
-    drawMenuHeader(scrollHeader("Edit: " + (clip ? clipShortName(clip) : "Clip Settings"), 21), trimAdvanced ? "A" : "");
+    const clip = trimClip;
+    drawMenuHeader(scrollHeader("Edit: " + (clip ? clipShortName(clip) : "Clip Settings"), songIsLocked() ? 20 : 21), trimAdvanced ? "A" : "");
     if (!clip) {
         print(2, LIST_TOP_Y, "No clip selected", 1);
         return;
@@ -3167,8 +3190,7 @@ function drawTrim() {
 }
 
 function commitTrim(pending) {
-    const sec = currentSong ? currentSong.sections[currentSectionIndex] : null;
-    const clip = sec ? sec.clips[builderCursor] : null;
+    const clip = trimClip;
     if (!clip) return;
     const p = pending || {
         start: trimPendingStart,
@@ -3227,8 +3249,7 @@ function commitTrim(pending) {
 }
 
 function handleTrimInput(cc, value) {
-    const sec = currentSong ? currentSong.sections[currentSectionIndex] : null;
-    const clip = sec ? sec.clips[builderCursor] : null;
+    const clip = trimClip;
     if (!clip) return;
     const maxBar = clipTrueBars(clip);
     const effMaxBar = Math.max(1, Math.round(maxBar / trimPendingSpeed));
@@ -3355,7 +3376,7 @@ function songIsLocked() {
 }
 
 function drawSongSettings() {
-    drawMenuHeader("Song Settings", songIsLocked() ? "^" : "");
+    drawMenuHeader("Song Settings", songIsLocked() ? "*" : "");
     const items = [
         { key: "name", label: "Name", value: currentSong ? shortSongName(currentSong.name) : "" },
         { key: "bpm", label: "Tempo", value: String(songSettingsPendingBpm) },
@@ -3463,7 +3484,7 @@ function handleSongSettingsInput(cc, value) {
 function drawSongBank() {
     drawMenuHeader("Song Bank", "");
     const items = [{ label: "+ New Song" }].concat(songFiles.map(f => ({ label: shortSongName(f.name || f) })));
-    /* Mark locked songs with "^" in the value column. */
+    /* Mark locked songs with "*" in the value column. */
     const lockMap = new Map();
     for (const f of songFiles) {
         const obj = readJson(f.path);
@@ -3473,7 +3494,7 @@ function drawSongBank() {
         items,
         selectedIndex: selectedSongIndex,
         getLabel: (item) => item.label,
-        getValue: (item) => (item.label && lockMap.has(item.label)) ? "^" : "",
+        getValue: (item) => (item.label && lockMap.has(item.label)) ? "*" : "",
         valueAlignRight: true,
         labelGap: 2,
         maxVisible: 5
@@ -3981,7 +4002,10 @@ function handleBuilderInput(cc, value) {
             openSongSettings();
             return;
         }
-        const sec = currentSong ? currentSong.sections[currentSectionIndex] : null;
+        /* Use the displayed section (the auto-followed/jumped one during
+         * playback), matching drawBuilder and moveCursor, so editing targets
+         * the live section rather than the stale currentSectionIndex. */
+        const sec = currentSong ? currentSong.sections[builderDisplaySectionIndex()] : null;
         if (!sec) return;
         if (builderCursor === -1) {
             /* Section header -> rename (blocked when locked). */
@@ -4128,7 +4152,9 @@ function startNewSong(folderName) {
     builderPage = 0;
     builderCursor = 0;
     loadFolderClips(selectedFolderIndex);
+    pendingFolderClipLoadName = (folderClips.length === 0) ? (libraryFolders[selectedFolderIndex] || null) : null;
     stepLedsDirty = true;
+    ledDirtyAll = true;
     needsRedraw = true;
 }
 
@@ -4299,8 +4325,14 @@ function loadSelectedSongIntoBuilder() {
     menuStack.push({ title: "Arrange", selectedIndex: 0 });
     builderPage = 0;
     builderCursor = 0;
-    loadFolderClips(libraryFolders.indexOf(currentSong.source_folder));
+    const srcFolder = currentSong.source_folder;
+    loadFolderClips(libraryFolders.indexOf(srcFolder));
+    /* If the DSP folder scan isn't ready yet (fresh boot), retry until the
+     * clips arrive, then repaint the pads. Track the folder NAME so the retry
+     * can re-resolve its index once libraryFolders is populated. */
+    pendingFolderClipLoadName = (folderClips.length === 0) ? srcFolder : null;
     stepLedsDirty = true;
+    ledDirtyAll = true;
     needsRedraw = true;
     logDebug("loadSelectedSongIntoBuilder: loaded " + (currentSong ? currentSong.name : "?"));
 }
@@ -5679,18 +5711,34 @@ function insertClipAtCursor(clip) {
     needsRedraw = true;
 }
 
+/* The section index the builder is currently showing. During playback this is
+ * the auto-followed section (or the one the user jumped to via
+ * builderDisplaySection), not the stale currentSectionIndex. */
+function builderDisplaySectionIndex() {
+    return playbackState === "playing"
+        ? (builderDisplaySection >= 0 ? builderDisplaySection : playbackSectionIndex)
+        : currentSectionIndex;
+}
+
 function deleteClipAtCursor() {
-    const sec = currentSong ? currentSong.sections[currentSectionIndex] : null;
+    const sec = currentSong ? currentSong.sections[builderDisplaySectionIndex()] : null;
     if (!sec || builderCursor < 0 || builderCursor >= sec.clips.length) return;
     sec.clips.splice(builderCursor, 1);
-    builderCursor = Math.max(0, Math.min(builderCursor, sec.clips.length));
+    /* Select the clip before the deleted one (or the first clip when deleting
+     * the first clip). */
+    builderCursor = Math.max(0, Math.min(builderCursor - 1, sec.clips.length - 1));
     unsavedChanges = true;
     stepLedsDirty = true;
     needsRedraw = true;
 }
 
 function moveCursor(delta) {
-    const sec = currentSong ? currentSong.sections[currentSectionIndex] : null;
+    /* During playback, the displayed section is the auto-followed one (or the
+     * section the user jumped to via builderDisplaySection), NOT the stale
+     * currentSectionIndex. Match drawBuilder so the scroll wheel moves through
+     * the clips of the section actually shown. */
+    const secIndex = builderDisplaySectionIndex();
+    const sec = currentSong ? currentSong.sections[secIndex] : null;
     if (!sec) return;
     const old = builderCursor;
     const len = sec.clips.length;
@@ -5727,7 +5775,7 @@ function moveCursor(delta) {
 }
 
 function duplicateClipAtCursor() {
-    const sec = currentSong ? currentSong.sections[currentSectionIndex] : null;
+    const sec = currentSong ? currentSong.sections[builderDisplaySectionIndex()] : null;
     const clip = sec ? sec.clips[builderCursor] : null;
     if (!clip) return;
     sec.clips.splice(builderCursor + 1, 0, JSON.parse(JSON.stringify(clip)));
@@ -5752,7 +5800,7 @@ function duplicateCurrentSection() {
 }
 
 function moveClipAtCursor(delta) {
-    const sec = currentSong ? currentSong.sections[currentSectionIndex] : null;
+    const sec = currentSong ? currentSong.sections[builderDisplaySectionIndex()] : null;
     if (!sec || builderCursor < 0 || builderCursor >= sec.clips.length) return;
     const newIdx = builderCursor + delta;
     if (newIdx < 0 || newIdx >= sec.clips.length) return;
@@ -5906,6 +5954,7 @@ function previewClip(clip, barOffset) {
     if (!clip) return;
     const base = currentSong || newSong(currentSong ? currentSong.source_folder : "");
     const temp = JSON.parse(JSON.stringify(base));
+    const bpb = (currentSong && currentSong.time_sig_num > 0) ? currentSong.time_sig_num : 4;
     temp.sections = [{
         id: "preview-" + Date.now(),
         name: "Preview",
@@ -5915,7 +5964,7 @@ function previewClip(clip, barOffset) {
             start_bar: clipStartBar(clip),
             start_beat: 1,
             end_bar: clip.bars || 1,
-            end_beat: 1,
+            end_beat: bpb,
             advanced: false,
             guard_fraction: 0,
             speed: 1.0,
@@ -6652,6 +6701,26 @@ globalThis.tick = function() {
             jamHoldBars = clipPlayBars(clip);
             jamHoldScroller.setSelected(jamHoldName);
             logJam("HOLD overlay -> " + (clip.name || clip.path) + " bars=" + jamHoldBars);
+        }
+    }
+
+    /* Retry loading the builder's clip pads if they weren't ready yet (e.g.
+     * a song opened on a fresh boot before the DSP folder scan finished).
+     * Ensure libraryFolders is populated, re-resolve the folder by name, then
+     * load the clips; once they arrive, force a pad repaint. */
+    if (pendingFolderClipLoadName) {
+        if (libraryFolders.length === 0) {
+            loadLibraryFolders();
+        }
+        const fi = libraryFolders.indexOf(pendingFolderClipLoadName);
+        if (fi >= 0) {
+            loadFolderClips(fi);
+            if (folderClips.length > 0) {
+                pendingFolderClipLoadName = null;
+                ledDirtyAll = true;
+                stepLedsDirty = true;
+                needsRedraw = true;
+            }
         }
     }
 

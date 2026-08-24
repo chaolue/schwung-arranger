@@ -1,0 +1,7 @@
+# Build outputs
+dist/
+build/
+test/
+spikes/
+examples/
+.DS_Store

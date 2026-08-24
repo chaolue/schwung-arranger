@@ -9,6 +9,15 @@
   "ui": "ui.js",
   "dsp": "dsp.so",
   "api_version": 1,
+  "assets": {
+    "path": "/data/UserData/UserLibrary/Arranger/MidiLibrary",
+    "label": "MIDI Library",
+    "extensions": [".mid"],
+    "description": "A collection of MIDI drum clips to build songs from. Clips appear in the slot's preset browser sorted alphabetically.",
+    "hint": "There are many free MIDIs at",
+    "hint_url": "https://groovemonkee.com/pages/beat-farm-free-midi-beats",
+    "hint_url_label": "groovemonkee.com"
+  },
   "capabilities": {
     "component_type": "overtake",
     "suspend_keeps_js": true,
