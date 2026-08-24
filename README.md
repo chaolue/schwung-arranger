@@ -18,7 +18,7 @@ and perform live — all from Move's pads, step buttons and jog wheel.
 - **Output routing** — send MIDI to External, Move tracks, or the Schwung
   synth chain, on a configurable channel.
 - **Overtake module** — runs on Move's hardware surface (pads, steps, jog
-  wheel, buttons), synced to Move's MIDI clock.
+  wheel, buttons).
 
 ## Prerequisites
 
@@ -41,8 +41,9 @@ Install via the Schwung module store, or manually copy the built module:
 
 ```bash
 ./scripts/build.sh
-# scp the built module to a Move on the network
-scp dist/arranger-module.tar.gz root@move.local:/data/UserData/schwung/modules/
+# scp the built module to a Move on the network, then extract it in place
+scp dist/arranger-module.tar.gz ableton@move.local:/tmp/
+ssh ableton@move.local 'tar -xzf /tmp/arranger-module.tar.gz -C /data/UserData/schwung/modules/'
 ```
 
 The module is loaded as an **overtake** module and takes over Move's surface
@@ -55,4 +56,4 @@ screen, button and pad.
 
 ## License
 
-MIT — see `LICENSE`.
+MIT.
