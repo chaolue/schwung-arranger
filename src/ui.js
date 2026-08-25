@@ -80,6 +80,13 @@ const VIEW_SETLIST_CLICK = "setlist_click";
 const VIEW_PERF_SETLIST = "perf_setlist";
 const VIEW_JAM_FOLDER = "jam_folder";
 const VIEW_JAM = "jam";
+const VIEW_SECTION_PICK = "section_pick";
+
+/* Section names offered when adding a new section via Shift + Loop. */
+const SECTION_NAMES = [
+    "Verse", "Prechorus", "Chorus", "Interlude", "Instrumental",
+    "Bridge", "Down Bridge", "Down Chorus", "Outro"
+];
 
 /* ── State ───────────────────────────────────────────────────────────── */
 
@@ -185,6 +192,7 @@ let setlistSongIndex = 0;
 let editingSetlist = false;
 let setlistPendingName = "My Setlist";
 let setlistPickIndex = 0; /* selected song in the add-song picker */
+let sectionPickIndex = 0; /* selected name in the add-section picker */
 let perfSetlistIndex = 0; /* selected setlist in the performance picker */
 let clickSettingsFocus = 0; /* 0 = bars, 1 = note */
 let clickSettingsEditing = false;
@@ -212,6 +220,11 @@ let padPreviewBars = 0;    /* bar length of the pad-previewed clip */
 let padPreviewTriggerTime = 0; /* when the pad press happened */
 let padPreviewScheduled = false; /* true once preview has been triggered */
 let padPreviewStopping = false;  /* true for a few ticks after a pad preview is released */
+/* Custom scrolling overlay for the builder pad preview, so long clip names
+ * marquee instead of being hard-truncated by the shared drawOverlay(). */
+let builderPreviewScroller = createTextScroller({ scrollInterval: 8, delayFrames: 12 });
+let builderPreviewName = "";
+let builderPreviewBars = 0;
 let wasTextEntryActive = false;  /* previous tick's text-entry state, to detect close */
 let stepScrollOffset = 0;   /* bar offset for the step-LED window when a section has more than NUM_STEPS bars */
 let stepRedrawAll = false;  /* true for one tick after a section change, to force a full step redraw */
@@ -347,7 +360,7 @@ const SCROLLABLE_MENU_VIEWS = new Set([
     VIEW_ROOT, VIEW_FOLDER_LIST, VIEW_BUILDER, VIEW_TRIM, VIEW_SONG_SETTINGS,
     VIEW_SONG_BANK, VIEW_OPTIONS, VIEW_SETLIST_BANK, VIEW_SETLIST_EDIT,
     VIEW_SETLIST_PICK, VIEW_SETLIST_CLICK, VIEW_PERF_SETLIST, VIEW_PERFORMANCE,
-    VIEW_JAM_FOLDER, VIEW_JAM
+    VIEW_JAM_FOLDER, VIEW_JAM, VIEW_SECTION_PICK
 ]);
 const MENU_SCROLL_TICK_MS = 30; /* ~25fps redraw for marquee animation (halves the ~2s scroll-start delay) */
 let lastMenuScrollTick = 0;
@@ -474,6 +487,7 @@ const CLICK_LOG_PATH = "/data/UserData/UserLibrary/Arranger/.clickflash_log";
 const JAM_LOG_PATH = "/data/UserData/UserLibrary/Arranger/.jam_log";
 
 function logJam(msg) {
+    if (!dspDebugEnabled) return;
     if (typeof host_write_file !== "function") return;
     try {
         const line = new Date().toISOString() + " " + msg + "\n";
@@ -489,6 +503,7 @@ function logJam(msg) {
 }
 
 function logDebug(msg) {
+    if (!dspDebugEnabled) return;
     if (typeof host_write_file !== "function") return;
     try {
         const line = new Date().toISOString() + " " + msg + "\n";
@@ -506,6 +521,7 @@ function logDebug(msg) {
 const TIMING_LOG_PATH = "/data/UserData/UserLibrary/Arranger/.timing_log";
 
 function logTiming(msg) {
+    if (!dspDebugEnabled) return;
     if (typeof host_write_file !== "function") return;
     try {
         const line = new Date().toISOString() + " " + msg + "\n";
@@ -521,6 +537,7 @@ function logTiming(msg) {
 }
 
 function logClick(msg) {
+    if (!dspDebugEnabled) return;
     if (typeof host_write_file !== "function") return;
     try {
         const line = new Date().toISOString() + " " + msg + "\n";
@@ -714,7 +731,7 @@ function newSong(folderName) {
         locked: false,
         created: new Date().toISOString(),
         modified: new Date().toISOString(),
-        sections: [newSection("Section 1")]
+        sections: [newSection("Intro")]
     };
 }
 
@@ -1802,6 +1819,10 @@ function updateButtonLEDs() {
                 active.set(MoveMainButton, WhiteLedBright);
                 break;
             case VIEW_SETLIST_CLICK:
+                active.set(MoveBack, WhiteLedBright);
+                active.set(MoveMainButton, WhiteLedBright);
+                break;
+            case VIEW_SECTION_PICK:
                 active.set(MoveBack, WhiteLedBright);
                 active.set(MoveMainButton, WhiteLedBright);
                 break;
@@ -3074,7 +3095,33 @@ function drawBuilder() {
     const bpm = currentSong ? currentSong.tempo_bpm : 120;
     const num = currentSong ? currentSong.time_sig_num : 4;
     const den = currentSong ? currentSong.time_sig_den : 4;
-    drawOverlay();
+    drawBuilderPreviewOverlay();
+}
+
+/* Shared scrolling overlay: draws the centered 120x28 box with a marquee-
+ * scrolling clip name and a value line. Used by both the Song Builder pad
+ * preview and the Jam hold overlay, so long names aren't hard-truncated. */
+function drawScrollingOverlay(scroller, name, bars) {
+    if (!name) return;
+    const boxX = (SCREEN_WIDTH - 120) / 2;
+    const boxY = (SCREEN_HEIGHT - 28) / 2;
+    fill_rect(boxX, boxY, 120, 28, 0);
+    fill_rect(boxX, boxY, 120, 1, 1);
+    fill_rect(boxX, boxY + 27, 120, 1, 1);
+    fill_rect(boxX, boxY, 1, 28, 1);
+    fill_rect(boxX + 119, boxY, 1, 28, 1);
+    scroller.tick();
+    let display = name;
+    if (display.length > 18) display = scroller.getScrolledText(display, 18);
+    print(boxX + 4, boxY + 2, display, 1);
+    print(boxX + 4, boxY + 14, "Value: " + bars + " bar" + (bars > 1 ? "s" : ""), 1);
+}
+
+/* Custom overlay for the Song Builder pad preview, using the shared scrolling
+ * overlay helper. */
+function drawBuilderPreviewOverlay() {
+    if (!padPreviewScheduled || !builderPreviewName) return;
+    drawScrollingOverlay(builderPreviewScroller, builderPreviewName, builderPreviewBars);
 }
 
 function openTrimView() {
@@ -3569,6 +3616,18 @@ function drawSetlistPick() {
     });
 }
 
+function drawSectionPick() {
+    drawMenuHeader("New Section Name", "");
+    const items = SECTION_NAMES.map(n => ({ label: n }));
+    drawMenuList({
+        items,
+        selectedIndex: sectionPickIndex,
+        getLabel: (item) => item.label,
+        getValue: () => "",
+        maxVisible: 5
+    });
+}
+
 function drawSetlistClick() {
     const entry = currentSetlist ? currentSetlist.songs[setlistSongIndex] : null;
     drawMenuHeader(scrollHeader("Edit: " + (entry ? shortSongName(entry.name) : ""), 21), "");
@@ -3826,22 +3885,11 @@ function drawJam() {
 }
 
 /* Draw a centered overlay showing the held jam clip's name, marquee-scrolling
- * long names instead of hard-truncating them. Mirrors the shared overlay
- * layout (120x28 box) but scrolls the name. */
+ * long names instead of hard-truncating them. Uses the shared scrolling
+ * overlay helper. */
 function drawJamHoldOverlay() {
     if (!jamHoldOverlayShown || !jamHoldName) return;
-    const boxX = (SCREEN_WIDTH - 120) / 2;
-    const boxY = (SCREEN_HEIGHT - 28) / 2;
-    fill_rect(boxX, boxY, 120, 28, 0);
-    fill_rect(boxX, boxY, 120, 1, 1);
-    fill_rect(boxX, boxY + 27, 120, 1, 1);
-    fill_rect(boxX, boxY, 1, 28, 1);
-    fill_rect(boxX + 119, boxY, 1, 28, 1);
-    jamHoldScroller.tick();
-    let name = jamHoldName;
-    if (name.length > 18) name = jamHoldScroller.getScrolledText(name, 18);
-    print(boxX + 4, boxY + 2, name, 1);
-    print(boxX + 4, boxY + 14, "Value: " + jamHoldBars + " bar" + (jamHoldBars > 1 ? "s" : ""), 1);
+    drawScrollingOverlay(jamHoldScroller, jamHoldName, jamHoldBars);
 }
 
 /* ── Input handling ─────────────────────────────────────────────────── */
@@ -4076,13 +4124,11 @@ function handleBuilderInput(cc, value) {
     } else if (cc === MoveLoop && value > 0) {
         if (locked) return; /* cannot add sections in a locked song */
         if (shiftHeld) {
-            /* Shift + Loop adds a new empty section after the current one. */
-            const newSec = newSection("Section " + (currentSong.sections.length + 1));
-            currentSong.sections.splice(currentSectionIndex + 1, 0, newSec);
-            currentSectionIndex++;
-            builderCursor = 0;
-            unsavedChanges = true;
-            stepLedsDirty = true;
+            /* Shift + Loop opens a picker of common section names, then adds
+             * a new empty section with the chosen name after the current one. */
+            sectionPickIndex = 0;
+            menuStack.push({ title: "New Section", selectedIndex: 0 });
+            currentView = VIEW_SECTION_PICK;
             needsRedraw = true;
         }
     } else if (cc === MoveUp && value > 0) {
@@ -4601,6 +4647,34 @@ function handleSetlistPickInput(cc, value) {
     } else if (cc === MoveBack && value > 0) {
         menuStack.pop();
         currentView = VIEW_SETLIST_EDIT;
+        needsRedraw = true;
+    }
+}
+
+function handleSectionPickInput(cc, value) {
+    if (cc === MoveMainKnob) {
+        const delta = decodeDelta(value);
+        const newIdx = Math.max(0, Math.min(SECTION_NAMES.length - 1, sectionPickIndex + delta));
+        if (newIdx !== sectionPickIndex) {
+            sectionPickIndex = newIdx;
+            needsRedraw = true;
+        }
+    } else if (cc === MoveMainButton && value > 0) {
+        const name = SECTION_NAMES[sectionPickIndex];
+        if (name && currentSong) {
+            const newSec = newSection(name);
+            currentSong.sections.splice(currentSectionIndex + 1, 0, newSec);
+            currentSectionIndex++;
+            builderCursor = 0;
+            unsavedChanges = true;
+            stepLedsDirty = true;
+        }
+        menuStack.pop();
+        currentView = VIEW_BUILDER;
+        needsRedraw = true;
+    } else if (cc === MoveBack && value > 0) {
+        menuStack.pop();
+        currentView = VIEW_BUILDER;
         needsRedraw = true;
     }
 }
@@ -5790,13 +5864,28 @@ function duplicateCurrentSection() {
     const original = currentSong.sections[currentSectionIndex];
     const copy = JSON.parse(JSON.stringify(original));
     copy.id = "sec-" + Date.now();
-    copy.name = (original.name || "Section") + " Copy";
+    copy.name = incrementSectionName(original.name || "Section");
     currentSong.sections.splice(currentSectionIndex + 1, 0, copy);
     currentSectionIndex++;
     builderCursor = 0;
     unsavedChanges = true;
     stepLedsDirty = true;
     needsRedraw = true;
+}
+
+/* Increment a trailing number in a section name for duplication. "Verse 1" ->
+ * "Verse 2". If the name ends in a number without a trailing space, insert a
+ * space ("Verse1" -> "Verse 2"). If there's no trailing number, append " 2".
+ */
+function incrementSectionName(name) {
+    const base = name || "Section";
+    const m = base.match(/^(.*?)(\s*)(\d+)$/);
+    if (m) {
+        const prefix = m[1];
+        const num = parseInt(m[3], 10) + 1;
+        return prefix.trimEnd() + " " + num;
+    }
+    return base + " 2";
 }
 
 function moveClipAtCursor(delta) {
@@ -5878,6 +5967,8 @@ function handleBuilderPad(note, velocity) {
         if (padPreviewClip) {
             padPreviewClip = null;
             padPreviewBars = 0;
+            builderPreviewName = "";
+            builderPreviewBars = 0;
             stepLedsDirty = true;
         }
         padPreviewScheduled = false;
@@ -6658,8 +6749,12 @@ globalThis.tick = function() {
             previewingClip = padPreviewClip;
             previewStartTime = Date.now();
             const bars = padPreviewBars;
-            const shortName = clipShortName(previewingClip);
-            showOverlay(shortName, bars + " bar" + (bars > 1 ? "s" : ""), 0x7FFFFFFF);
+            /* Use the custom scrolling overlay so long clip names marquee
+             * instead of being truncated by the shared drawOverlay(). */
+            builderPreviewName = clipShortName(previewingClip);
+            builderPreviewBars = bars;
+            builderPreviewScroller.setSelected(builderPreviewName);
+            showOverlay("", bars + " bar" + (bars > 1 ? "s" : ""), 0x7FFFFFFF);
             previewClip(previewingClip);
             stepLedsDirty = true;
         }
@@ -6792,6 +6887,7 @@ globalThis.tick = function() {
                 case VIEW_SETLIST_EDIT: drawSetlistEdit(); break;
                 case VIEW_SETLIST_PICK: drawSetlistPick(); break;
                 case VIEW_SETLIST_CLICK: drawSetlistClick(); break;
+                case VIEW_SECTION_PICK: drawSectionPick(); break;
                 case VIEW_PERF_SETLIST: drawPerfSetlist(); break;
                 case VIEW_PERFORMANCE: drawPerformance(); break;
                 case VIEW_JAM_FOLDER: drawJamFolder(); break;
@@ -6857,6 +6953,7 @@ globalThis.onMidiMessageInternal = function(data) {
             case VIEW_SETLIST_EDIT: handleSetlistEditInput(cc, value); break;
             case VIEW_SETLIST_PICK: handleSetlistPickInput(cc, value); break;
             case VIEW_SETLIST_CLICK: handleSetlistClickInput(cc, value); break;
+            case VIEW_SECTION_PICK: handleSectionPickInput(cc, value); break;
             case VIEW_PERF_SETLIST: handlePerfSetlistInput(cc, value); break;
             case VIEW_PERFORMANCE: handlePerformanceInput(cc, value); break;
             case VIEW_JAM_FOLDER: handleJamFolderInput(cc, value); break;

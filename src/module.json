@@ -2,7 +2,7 @@
   "id": "arranger",
   "name": "Arranger",
   "abbrev": "ARR",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Build songs from a MIDI drum-clip library and perform them live",
   "author": "chaolue",
   "license": "MIT",
