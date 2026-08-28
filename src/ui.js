@@ -8,7 +8,7 @@
  * confirmed from the logs (see init()/playCurrentSong()) instead of guessing
  * whether a new file actually loaded. Keep the DSP dsp_build_version in
  * arranger_engine.c in sync so both sides are verifiable. */
-const UI_BUILD_VERSION = "arranger-ui-2026-08-28e";
+const UI_BUILD_VERSION = "arranger-ui-2026-08-28h";
 
 import {
     MidiNoteOn, MidiNoteOff, MidiCC,
@@ -97,8 +97,8 @@ const VIEW_SECTION_PICK = "section_pick";
 
 /* Section names offered when adding a new section via Shift + Loop. */
 const SECTION_NAMES = [
-    "Verse", "Prechorus", "Chorus", "Interlude", "Instrumental",
-    "Bridge", "Down Bridge", "Down Chorus", "Outro"
+    "Intro", "Verse", "Prechorus", "Chorus", "Interlude", "Instrumental",
+    "Turn", "Bridge", "Down Bridge", "Down Chorus", "Outro"
 ];
 
 /* ── State ───────────────────────────────────────────────────────────── */
@@ -493,6 +493,7 @@ let clickMidiPath = "/data/UserData/UserLibrary/Arranger/.click.mid";
 const DEBUG_LOG_PATH = "/data/UserData/UserLibrary/Arranger/.arranger_log";
 const CLICK_LOG_PATH = "/data/UserData/UserLibrary/Arranger/.clickflash_log";
 const JAM_LOG_PATH = "/data/UserData/UserLibrary/Arranger/.jam_log";
+const LOG_STEPLED = false;
 
 function logJam(msg) {
     if (!dspDebugEnabled) return;
@@ -2476,10 +2477,21 @@ function drawBuilderStepLEDs(force) {
         ? stepSong.sections[secIndex]
         : null;
     if (currentView === VIEW_PERFORMANCE) {
-        logDebug("STEPLED perf stepSong=" + (stepSong ? stepSong.name : "null") +
-            " secIndex=" + secIndex + " perfSelected=" + perfSelectedSection +
-            " playbackSection=" + playbackSectionIndex + " perfPlaying=" + perfPlaying +
-            " playbackState=" + playbackState + " sec=" + (sec ? sec.name : "null"));
+        if (LOG_STEPLED) {
+            logDebug("STEPLED perf stepSong=" + (stepSong ? stepSong.name : "null") +
+                " secIndex=" + secIndex + " perfSelected=" + perfSelectedSection +
+                " playbackSection=" + playbackSectionIndex + " perfPlaying=" + perfPlaying +
+                " playbackState=" + playbackState + " sec=" + (sec ? sec.name : "null"));
+        }
+    } else {
+        if (LOG_STEPLED) {
+            logDebug("STEPLED builder stepSong=" + (stepSong ? stepSong.name : "null") +
+                " secIndex=" + secIndex + " currentSection=" + currentSectionIndex +
+                " playbackSection=" + playbackSectionIndex + " builderDisplay=" + builderDisplaySection +
+                " playbackState=" + playbackState + " secEmpty=" + (!sec || !sec.clips || sec.clips.length === 0) +
+                " padPreview=" + (padPreviewClip ? padPreviewClip.name : "null") +
+                " previewBars=" + padPreviewBars + " previewScheduled=" + padPreviewScheduled);
+        }
     }
 
     /* Pad preview: show the held clip's colour/length on the first N steps. */
@@ -2493,10 +2505,14 @@ function drawBuilderStepLEDs(force) {
             const beatsPerBar = (lastDspTransport && lastDspTransport.time_sig_num) ? lastDspTransport.time_sig_num : (stepSong ? stepSong.time_sig_num : 4);
             flashOn = updateStepFlash(previewBar, previewBeat, bpm, beatsPerBar);
         }
+        logDebug("STEPLED preview draw clip=" + padPreviewClip.name + " bars=" + padPreviewBars +
+            " transport=" + (lastDspTransport ? (lastDspTransport.running ? "running" : "stopped") : "null") +
+            " flashOn=" + flashOn + " color=" + color);
         for (let s = 0; s < NUM_STEPS; s++) {
             if (s >= padPreviewBars) {
                 stepColor(s, Black, force);
-            } else if (s === (lastDspTransport ? (lastDspTransport.bar || 1) - 1 : 0)) {
+            } else if (lastDspTransport && lastDspTransport.running &&
+                       s === ((lastDspTransport.bar || 1) - 1)) {
                 /* Active preview bar: flash white to black, then return to the
                  * clip colour when the playhead moves on to the next bar. */
                 stepColor(s, flashOn ? White : Black, force);
@@ -2508,7 +2524,14 @@ function drawBuilderStepLEDs(force) {
     }
 
     if (!sec || !sec.clips || sec.clips.length === 0) {
-        if (force) clearStepLEDs();
+        /* An empty section has no bars to show, so every step must be black.
+         * Use the non-forced stepColor so each step is only queued when it
+         * actually changes from its current colour to black. This clears the
+         * steps exactly once (on the transition) instead of flooding the LED
+         * queue with 16 black messages every tick (which starves the button
+         * LEDs). The per-tick call passes force=false, so once the steps are
+         * already black these are no-ops. */
+        for (let i = 0; i < NUM_STEPS; i++) stepColor(i, Black, force);
         return;
     }
 
@@ -2519,27 +2542,25 @@ function drawBuilderStepLEDs(force) {
      * there are additional bars to scroll to. */
     const totalSectionBars = sectionBars(sec);
     const bpb = (stepSong && stepSong.time_sig_num > 0) ? stepSong.time_sig_num : 4;
-    const totalClips = [];
-    /* For each step (bar) in the section, the clip that owns it. The step LED
-     * always flashes the full beatsPerBar times (in time with the beat); the
-     * trim (start_beat/end_beat) affects the audio and section advance, not
-     * the flash count. */
+    /* For each step (bar) in the section, the clip that owns it. Each step
+     * represents one bar of the section's total; a clip's effective (beat-
+     * trimmed) length is mapped onto the steps it covers, so two half-bar
+     * clips combine into a single step rather than two. The step LED always
+     * flashes the full beatsPerBar times (in time with the beat); the trim
+     * (start_beat/end_beat) affects the audio and section advance, not the
+     * flash count. */
+    const totalClips = new Array(Math.max(1, Math.ceil(totalSectionBars))).fill(null);
+    let cursor = 0; /* cumulative fractional bar position across clips */
     for (let i = 0; i < sec.clips.length; i++) {
         const clip = sec.clips[i];
-        const speed = (typeof clip.speed === "number" && clip.speed > 0) ? clip.speed : 1.0;
-        const startBeat = (clip.start_beat !== undefined && clip.start_beat > 0) ? clip.start_beat : 1;
-        const endBeat = (clip.end_beat !== undefined && clip.end_beat > 0) ? clip.end_beat : bpb;
-        /* Fractional bar count, matching sectionBars: the clip plays fewer
-         * bars than (end_bar - start_bar) when its first/last bar is trimmed
-         * to a partial beat range. */
-        const startFrac = (startBeat - 1) / bpb;
-        const endFrac = (bpb - endBeat) / bpb;
-        const fracBars = (clip.end_bar - clip.start_bar) - startFrac - endFrac;
-        const effBars = Math.max(0.25, fracBars / speed);
-        const steps = Math.max(1, Math.ceil(effBars));
-        for (let b = 0; b < steps; b++) {
-            totalClips.push(clip);
+        const effBars = clipEffBars(clip);
+        const start = cursor;
+        const end = cursor + effBars;
+        /* Assign every step whose bar range [s, s+1) overlaps this clip. */
+        for (let s = Math.floor(start); s < end; s++) {
+            if (s >= 0 && s < totalClips.length) totalClips[s] = clip;
         }
+        cursor = end;
     }
     const maxScroll = totalSectionBars > NUM_STEPS ? totalSectionBars - NUM_STEPS : 0;
     if (stepScrollOffset > maxScroll) stepScrollOffset = maxScroll;
@@ -2625,11 +2646,12 @@ function drawBuilderStepLEDs(force) {
         let targetBar = currentBar >= 0 ? currentBar : 0;
         if (playbackState !== "playing" && currentView === VIEW_BUILDER &&
             builderCursor >= 0 && builderCursor < sec.clips.length) {
-            /* Find the bar index of the start of the selected clip. */
+            /* Find the bar index of the start of the selected clip, using the
+             * same effective (beat-trimmed) bar counts as the step mapping so
+             * the scroll window lands on the right step. */
             let cursorBar = 0;
             for (let i = 0; i < builderCursor; i++) {
-                const s = (typeof sec.clips[i].speed === "number" && sec.clips[i].speed > 0) ? sec.clips[i].speed : 1.0;
-                cursorBar += Math.max(1, Math.round((sec.clips[i].end_bar - sec.clips[i].start_bar) / s));
+                cursorBar += Math.max(1, Math.round(clipEffBars(sec.clips[i])));
             }
             targetBar = cursorBar;
         }
@@ -3181,12 +3203,21 @@ function drawBuilder() {
             if (item.type === "section") return (displayIdx + 1) + "/" + currentSong.sections.length;
             if (item.type === "clip") {
                 const c = sec.clips[item.index];
-                const s = (typeof c.speed === "number" && c.speed > 0) ? c.speed : 1.0;
-                return Math.max(1, Math.round((c.end_bar - c.start_bar) / s)) + "b";
+                /* Show the effective (beat-trimmed) bar count as a mixed
+                 * fraction, so a clip shortened with Advanced Trim displays
+                 * its real length (e.g. 3 2/4b) rather than a rounded whole
+                 * bar. */
+                return formatBars(Math.max(0.25, clipEffBars(c))) + "b";
             }
             return "";
         },
         valueAlignRight: true,
+        /* The right-aligned value is clamped to this left edge. The global
+         * LIST_VALUE_X (92) only leaves ~5 chars for a fractional bar count
+         * like "3 2/4b"; lowering it lets up to 6+ chars fit while the
+         * label-floor still protects long clip names from being overlapped. */
+        valueX: 44,
+        labelGap: 1,
         listArea: { topY: LIST_TOP_Y, bottomY: LIST_INDICATOR_BOTTOM_Y }
     });
     const bpm = currentSong ? currentSong.tempo_bpm : 120;
@@ -6105,6 +6136,7 @@ function handleBuilderPad(note, velocity) {
         padPreviewTriggerTime = Date.now();
         padPreviewScheduled = false;
         previewStartTime = 0;
+        logDebug("handleBuilderPad press clip=" + clip.name + " bars=" + padPreviewBars + " pad=" + padIndex);
         /* Light only the pressed pad; do not trigger a full redraw. */
         const dimColour = clipColor(clip, true);
         padColor(padIndex, dimColour, true);
@@ -6149,23 +6181,43 @@ function changeBuilderPage(delta) {
     }
 }
 
+/* Effective playable bar count for a single clip, accounting for sub-bar
+ * (beat) trims and speed. A clip starting at beat 2 of its first bar and
+ * ending at beat 4 of its last bar plays fewer bars than (end_bar -
+ * start_bar). The DSP trims at the source tick level, so the effective bar
+ * count must reflect the partial first/last bars. Used for the builder
+ * clip-length display and the step-LED bar mapping so a shortened clip shows
+ * its real (fractional) length. */
+/* Format a fractional bar count as a mixed fraction for display, e.g.
+ * 3.5 -> "3 2/4", 0.5 -> "2/4", 4 -> "4". The denominator is the song's
+ * beats-per-bar, so a half-bar trim shows as "2/4" in 4/4 time. */
+function formatBars(bars) {
+    const bpb = (currentSong && currentSong.time_sig_num > 0) ? currentSong.time_sig_num : 4;
+    const whole = Math.floor(bars);
+    const frac = bars - whole;
+    if (frac < 0.01) return String(whole);
+    const num = Math.round(frac * bpb);
+    const den = bpb;
+    if (num >= den) return String(whole + 1);
+    return whole > 0 ? (whole + " " + num + "/" + den) : (num + "/" + den);
+}
+
+function clipEffBars(clip) {
+    if (!clip) return 1;
+    const bpb = (currentSong && currentSong.time_sig_num > 0) ? currentSong.time_sig_num : 4;
+    const speed = (typeof clip.speed === "number" && clip.speed > 0) ? clip.speed : 1.0;
+    const startBeat = (clip.start_beat !== undefined && clip.start_beat > 0) ? clip.start_beat : 1;
+    const endBeat = (clip.end_beat !== undefined && clip.end_beat > 0) ? clip.end_beat : bpb;
+    const startFrac = (startBeat - 1) / bpb;
+    const endFrac = (bpb - endBeat) / bpb;
+    return Math.max(0.25, ((clip.end_bar - clip.start_bar) - startFrac - endFrac) / speed);
+}
+
 function sectionBars(sec) {
     if (!sec || !sec.clips) return 0;
-    const bpb = (currentSong && currentSong.time_sig_num > 0) ? currentSong.time_sig_num : 4;
     let bars = 0;
     for (const c of sec.clips) {
-        const speed = (typeof c.speed === "number" && c.speed > 0) ? c.speed : 1.0;
-        /* Account for sub-bar beat trims: a clip starting at beat 2 of its
-         * first bar and ending at beat 4 of its last bar plays fewer bars than
-         * (end_bar - start_bar). The DSP trims at the source tick level, so the
-         * effective bar count must reflect the partial first/last bars. Return
-         * the exact fractional count so section boundaries match the DSP. */
-        const startBeat = (c.start_beat !== undefined && c.start_beat > 0) ? c.start_beat : 1;
-        const endBeat = (c.end_beat !== undefined && c.end_beat > 0) ? c.end_beat : bpb;
-        const startFrac = (startBeat - 1) / bpb;
-        const endFrac = (bpb - endBeat) / bpb;
-        const rawBars = (c.end_bar - c.start_bar) - startFrac - endFrac;
-        bars += Math.max(0.25, rawBars / speed);
+        bars += clipEffBars(c);
     }
     return bars;
 }
@@ -7026,6 +7078,7 @@ globalThis.tick = function() {
             previewingClip = padPreviewClip;
             previewStartTime = Date.now();
             const bars = padPreviewBars;
+            logDebug("preview trigger clip=" + previewingClip.name + " bars=" + bars + " elapsed=" + elapsed);
             /* Use the custom scrolling overlay so long clip names marquee
              * instead of being truncated by the shared drawOverlay(). */
             builderPreviewName = clipShortName(previewingClip);
