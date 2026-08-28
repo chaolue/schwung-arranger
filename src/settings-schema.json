@@ -1,0 +1,62 @@
+{
+    "id": "arranger",
+    "label": "Arranger",
+    "items": [
+        {
+            "key": "output",
+            "label": "Default MIDI Output",
+            "type": "enum",
+            "options": ["External", "Move", "Schwung"],
+            "values": ["external", "move", "schwung"],
+            "default": "schwung"
+        },
+        {
+            "key": "output_channel",
+            "label": "Default External Output Channel",
+            "type": "int",
+            "min": 1,
+            "max": 16,
+            "default": 10
+        },
+        {
+            "key": "move_channel",
+            "label": "Default Move Output Channel",
+            "type": "int",
+            "min": 1,
+            "max": 16,
+            "default": 10
+        },
+        {
+            "key": "schwung_channel",
+            "label": "Default Schwung Output Channel",
+            "type": "int",
+            "min": 1,
+            "max": 16,
+            "default": 10
+        },
+        {
+            "key": "click_channel",
+            "label": "Default Click Output Channel",
+            "type": "int",
+            "min": 0,
+            "max": 16,
+            "default": 0,
+            "help": "0 follows the primary output channel; 1-16 is an explicit channel."
+        },
+        {
+            "key": "swap_guard_fraction",
+            "label": "Boundary Guard Fraction (of a beat)",
+            "type": "float",
+            "min": 0,
+            "max": 1,
+            "step": 0.01,
+            "default": 0.25
+        },
+        {
+            "key": "dsp_debug",
+            "label": "DSP Debug Logging",
+            "type": "bool",
+            "default": false
+        }
+    ]
+}

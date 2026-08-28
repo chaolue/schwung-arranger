@@ -40,10 +40,7 @@ and perform live — all from Move's pads, step buttons and jog wheel.
 Install via the Schwung module store, or manually copy the built module:
 
 ```bash
-./scripts/build.sh
-# scp the built module to a Move on the network, then extract it in place
-scp dist/arranger-module.tar.gz ableton@move.local:/tmp/
-ssh ableton@move.local 'tar -xzf /tmp/arranger-module.tar.gz -C /data/UserData/schwung/modules/'
+./scripts/install.sh
 ```
 
 The module is loaded as an **overtake** module and takes over Move's surface

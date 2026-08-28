@@ -108,6 +108,7 @@ typedef struct {
     uint8_t  track;
     uint8_t  was_note_on;  /* 1 if this event was originally a note-on */
     uint8_t  note_off_generated; /* 1 if we generated a matching note-off */
+    int8_t   channel_override; /* -1 = use engine output channel; else 0-15 */
 } smf_event_t;
 
 typedef struct {
@@ -137,6 +138,7 @@ typedef struct {
     double snare_velocity_scale; /* applied to snare note-on velocity; 0 = drop snare hits */
     uint8_t kick_note;           /* bass kick note to thin (36 = GM kick; 0 = disabled) */
     uint8_t kick_target;         /* max kick hits per bar; 0 = disabled */
+    int8_t  channel;             /* MIDI channel override for this clip; -1 = engine output channel */
 } section_clip_t;
 
 typedef struct {
@@ -215,6 +217,15 @@ typedef struct engine {
      * the bar boundary), where active_source and bar/wrap counters do not
      * change. */
     uint32_t swap_counter;
+
+    /* Seek counter: incremented every time a pending_seek is applied (a
+     * performance section jump/repeat). The seek's target bar may equal the
+     * current section (a repeat), where the playhead stays in the same section
+     * and neither bar_counter's bar nor the section index changes — so the UI
+     * uses this monotonic counter to detect that the repeat actually fired and
+     * clear its queued state, instead of remaining stuck on the section being
+     * shown as "next". */
+    uint32_t seek_counter;
 
     /* Number of note-ons suppressed by the mid-clip swap guard. Exposed via
      * get_param("swap_guard_suppressed") so the UI can confirm the guard is
@@ -308,6 +319,11 @@ typedef struct engine {
      * audible timing. */
     int emit_directly;
 
+    /* Channel override of the most recently drained event, used by
+     * emit_direct_event when a per-clip channel (e.g. a dedicated click
+     * channel) should take precedence over the output-target channel. */
+    int8_t last_event_channel_override;
+
     /* Beat flash trigger: toggled at exact beat boundaries and held for a
      * fraction of each beat. The UI reads this as part of the transport JSON
      * for sample-accurate LED flashing. */
@@ -400,6 +416,11 @@ static void emit_direct_event(engine_t *e, uint8_t status, uint8_t d1, uint8_t d
         cable = 0;
     }
 
+    /* A per-event channel override (e.g. a click routed to a dedicated MIDI
+     * channel) takes precedence over the output-target channel. */
+    int8_t override = e->last_event_channel_override;
+    if (override >= 0 && override <= 15) ch = (uint8_t)override;
+
     uint8_t msg[4] = { (cable << 4) | cin, high | ch, d1, d2 };
     int sent = 0;
     const char *route = "external";
@@ -438,7 +459,18 @@ static int event_cmp(const void *a, const void *b) {
 }
 
 static void emit_all_notes_off(engine_t *e) {
-    queue_push(e, 0xB0 | e->output_channel, 123, 0, 3);
+    /* A clip may use a per-clip channel override (e.g. the count-in click on
+     * a dedicated channel). Sending CC 123 only on the primary output_channel
+     * leaves stale notes sounding on those override channels, so the next
+     * play can start with a note already on and sound like a blip/partial
+     * note. Send CC 123 on every MIDI channel to be safe. */
+    for (int ch = 0; ch < 16; ch++) {
+        if (e->emit_directly) {
+            emit_direct_event(e, 0xB0 | ch, 123, 0, 3);
+        } else {
+            queue_push(e, 0xB0 | ch, 123, 0, 3);
+        }
+    }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1106,6 +1138,10 @@ static int build_timeline_targeted(engine_t *e, song_t *song, double tempo_bpm,
                 *dst = *src;
                 dst->tick = abs_tick;
                 dst->status = (src->status & 0xF0) | e->output_channel;
+                /* Carry the per-clip channel override (e.g. a dedicated click
+                 * channel) into the assembled event. -1 means use the engine's
+                 * output-target channel. */
+                dst->channel_override = sc->channel;
 
                 /* Apply per-clip velocity scaling to real note-ons.
                  * Generated note-offs and zero-velocity events are left as-is.
@@ -1397,6 +1433,15 @@ static int parse_song_json(engine_t *e, const char *json, song_t *song,
                     int v; if (json_get_int_at(p, "kick_note", &v)) sc->kick_note = (uint8_t)v;
                 } else if (strncmp(key_start, "kick_target\"", 12) == 0) {
                     int v; if (json_get_int_at(p, "kick_target", &v)) sc->kick_target = (uint8_t)v;
+                } else if (strncmp(key_start, "channel\"", 8) == 0) {
+                    int v;
+                    if (json_get_int_at(p, "channel", &v)) {
+                        /* Per-clip MIDI channel override. 0 = no override (use
+                         * the engine's output-target channel); else 1-16 stored
+                         * as the channel number and converted to 0-based. */
+                        if (v >= 1 && v <= 16) sc->channel = (int8_t)(v - 1);
+                        else sc->channel = -1;
+                    }
                 }
             }
             p++;
@@ -1431,6 +1476,7 @@ static int parse_song_json(engine_t *e, const char *json, song_t *song,
                 sc->snare_velocity_scale = 1.0;   /* unchanged by default */
                 sc->kick_note = 36;               /* GM kick default */
                 sc->kick_target = 0;              /* disabled by default */
+                sc->channel = -1;                 /* use engine output channel by default */
             }
             p++;
             continue;
@@ -1942,15 +1988,30 @@ static void retrigger_beat_flash(engine_t *e, uint32_t prev_tick, uint32_t new_t
     }
 }
 
+/* Apply a per-clip channel override to a status byte. The timeline status was
+ * baked with the engine's output channel at build time; a per-clip override
+ * (e.g. a dedicated count-in click channel) must replace the low nibble before
+ * the event is queued, otherwise the override is silently lost in the
+ * non-direct (queued) path. Returns the status byte with the override applied
+ * (or unchanged when there is no override). */
+static uint8_t apply_channel_override(uint8_t status, int8_t channel_override) {
+    if (channel_override >= 0 && channel_override <= 15) {
+        return (status & 0xF0) | (uint8_t)channel_override;
+    }
+    return status;
+}
+
 static void drain_events_up_to(engine_t *e, uint32_t target) {
     if (!e->running || e->timeline_count == 0) return;
     while (e->event_cursor < e->timeline_count) {
         const smf_event_t *ev = &e->timeline[e->event_cursor];
         if (ev->tick >= target) break;
+        e->last_event_channel_override = ev->channel_override;
         if (e->emit_directly) {
             emit_direct_event(e, ev->status, ev->data1, ev->data2, ev->len);
         } else {
-            queue_push(e, ev->status, ev->data1, ev->data2, ev->len);
+            uint8_t status = apply_channel_override(ev->status, ev->channel_override);
+            queue_push(e, status, ev->data1, ev->data2, ev->len);
         }
         e->event_cursor++;
     }
@@ -1976,10 +2037,12 @@ static void drain_events_up_to_guarded(engine_t *e, uint32_t target, uint32_t gu
             e->event_cursor++;
             continue;
         }
+        e->last_event_channel_override = ev->channel_override;
         if (e->emit_directly) {
             emit_direct_event(e, ev->status, ev->data1, ev->data2, ev->len);
         } else {
-            queue_push(e, ev->status, ev->data1, ev->data2, ev->len);
+            uint8_t status = apply_channel_override(ev->status, ev->channel_override);
+            queue_push(e, status, ev->data1, ev->data2, ev->len);
         }
         e->event_cursor++;
     }
@@ -2059,10 +2122,22 @@ static void handle_loop_or_stop(engine_t *e, uint32_t *target) {
                 e->stopped_at_end = 0;
             }
         } else {
-            e->running = 0;
-            e->stopped_at_end = 1;
-            emit_all_notes_off(e);
-            if (e->playhead_tick > e->timeline_end_tick) e->playhead_tick = e->timeline_end_tick;
+            /* A non-looping song with no staged clip. Events may drain before
+             * the playhead reaches the timeline's full bar boundary (e.g. a
+             * ritard outro whose last MIDI note lands before the bar end).
+             * Stopping as soon as events run out would cut the ending short
+             * and make the transition into the next clip start ~a bar early.
+             * Keep the playhead running through the (silent) tail until it
+             * reaches timeline_end_tick, then stop. */
+            if (e->timeline_end_tick > 0 && *target < e->timeline_end_tick) {
+                e->running = 1;
+                e->stopped_at_end = 0;
+            } else {
+                e->running = 0;
+                e->stopped_at_end = 1;
+                emit_all_notes_off(e);
+                if (e->playhead_tick > e->timeline_end_tick) e->playhead_tick = e->timeline_end_tick;
+            }
         }
     }
 }
@@ -2157,6 +2232,10 @@ static void advance_playhead(engine_t *e, int frames, int sample_rate) {
         uint32_t seek_bar = e->pending_seek_bar;
         e->pending_seek = 0;
         e->pending_seek_tick = 0;
+        /* Expose the seek to the UI (via seek_counter in the transport JSON) so
+         * it can detect a repeat of the current section, where the playhead
+         * stays in the same section and bar_counter's bar does not change. */
+        e->seek_counter++;
         /* Seek to the start of the target bar. */
         e->playhead_tick = seek_bar * e->ticks_per_bar;
         e->event_cursor = 0;
@@ -2292,11 +2371,22 @@ static void engine_clear_error(engine_t *e) {
     e->error_msg[0] = '\0';
 }
 
+/* DSP build version stamp. Keep in sync with UI_BUILD_VERSION in ui.js so the
+ * running dsp.so can be confirmed from .dsp_log on module load. */
+static const char *const DSP_BUILD_VERSION = "arranger-dsp-2026-08-28b";
+
 static void* arr_create_instance(const char *module_dir, const char *config_json) {
     (void)module_dir;
     (void)config_json;
     engine_t *e = calloc(1, sizeof(engine_t));
     if (!e) return NULL;
+    /* Log the build version unconditionally (not gated behind g_dsp_debug) so
+     * a fresh module load always records which dsp.so is in memory. */
+    {
+        char ver[64];
+        snprintf(ver, sizeof(ver), "%s", DSP_BUILD_VERSION);
+        if (g_host && g_host->log) g_host->log(ver);
+    }
     snprintf(e->library_root, sizeof(e->library_root),
              "/data/UserData/UserLibrary/Arranger/MidiLibrary");
     e->guard_fraction = 0.125;
@@ -2305,6 +2395,7 @@ static void* arr_create_instance(const char *module_dir, const char *config_json
     e->output_target = OUTPUT_TARGET_EXTERNAL;
     e->move_channel = 9;     /* channel 10 for GM drums */
     e->schwung_channel = 9;  /* channel 10 for GM drums */
+    e->last_event_channel_override = -1; /* no per-event override by default */
     e->loop = 1;          /* default to looping for performance mode */
     return e;
 }
@@ -2631,24 +2722,38 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
          * fire on and targetBar is the destination. This lets a performance
          * section jump land exactly on the musical boundary instead of a
          * polling-latency later. */
-        int bar = atoi(val);
-        int target_bar = bar; /* default: same bar (seek to start of next bar) */
+        /* The boundary bar may be fractional (a section seam in the middle of
+         * a bar, from beat-level trims). Parse it as a float and convert to
+         * ticks so the seek fires exactly at the section seam — not at the
+         * truncated whole bar (which cuts the current section short) nor at
+         * the next whole bar (which bleeds into the next section). */
+        double bar = atof(val);
+        int target_bar = (int)bar; /* default: same bar */
         const char *colon = strchr(val, ':');
         if (colon) {
-            bar = atoi(val);
+            bar = atof(val);
             target_bar = atoi(colon + 1);
         }
         if (e->timeline_count > 0 && e->timeline_end_tick > 0) {
             uint32_t max_bar = e->timeline_end_tick / e->ticks_per_bar;
             if (max_bar < 1) max_bar = 1;
-            if (bar < 0) bar = 0;
-            if ((uint32_t)bar > max_bar) bar = (int)max_bar;
+            if (bar < 0.0) bar = 0.0;
+            /* Clamp the fractional boundary against the timeline's real end in
+             * ticks (not a truncated whole-bar count), so a fractional value
+             * like 4.9 against a true end of 4.5 bars is clamped to the end
+             * rather than passing through and scheduling a seek that never
+             * fires. */
+            double max_bar_ticks = (double)e->timeline_end_tick;
+            if (bar * (double)e->ticks_per_bar > max_bar_ticks) {
+                bar = max_bar_ticks / (double)e->ticks_per_bar;
+            }
             if (target_bar < 0) target_bar = 0;
             if ((uint32_t)target_bar > max_bar) target_bar = (int)max_bar;
         }
-        /* The boundary tick is the start of `bar` (0-based). If it has already
-         * passed, use the next bar. */
-        uint32_t boundary = (uint32_t)bar * e->ticks_per_bar;
+        /* The boundary tick is the start of `bar` (0-based), converted to ticks
+         * so fractional bars land at the exact seam. If it has already passed,
+         * use the next bar. */
+        uint32_t boundary = (uint32_t)(bar * (double)e->ticks_per_bar);
         if (boundary <= e->playhead_tick) {
             boundary = ((e->playhead_tick / e->ticks_per_bar) + 1) * e->ticks_per_bar;
         }
@@ -2668,7 +2773,7 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
             e->pending_seek_guard_start = (boundary > guard) ? (boundary - guard) : 0;
             e->pending_seek_guard_active = 0;
         }
-        dsp_host_log("SEEK_SCHEDULED boundary=%u bar=%d target=%u playhead=%u",
+        dsp_host_log("SEEK_SCHEDULED boundary=%u bar=%.3f target=%u playhead=%u",
                      boundary, bar, (uint32_t)target_bar, e->playhead_tick);
         return;
     }
@@ -2741,7 +2846,7 @@ static int arr_get_param(void *instance, const char *key, char *buf, int buf_len
             : (double)bar;
         int beat_flash = e->running && e->playhead_tick < e->flash_end_tick ? 1 : 0;
         return snprintf(buf, buf_len,
-                        "{\"running\":%d,\"bar\":%u,\"beat\":%u,\"beat_progress\":%.4f,\"bar_frac\":%.4f,\"beat_flash\":%d,\"bar_counter\":%u,\"wrap_counter\":%u,\"swap_counter\":%u,\"time_sig_num\":%d,\"time_sig_den\":%d,\"ticks_per_beat\":%u,\"ticks_per_bar\":%u,\"bpm\":%.2f}",
+                        "{\"running\":%d,\"bar\":%u,\"beat\":%u,\"beat_progress\":%.4f,\"bar_frac\":%.4f,\"beat_flash\":%d,\"bar_counter\":%u,\"wrap_counter\":%u,\"swap_counter\":%u,\"seek_counter\":%u,\"time_sig_num\":%d,\"time_sig_den\":%d,\"ticks_per_beat\":%u,\"ticks_per_bar\":%u,\"bpm\":%.2f}",
                         e->running,
                         bar + 1,
                         beat + 1,
@@ -2751,6 +2856,7 @@ static int arr_get_param(void *instance, const char *key, char *buf, int buf_len
                         e->bar_counter,
                         e->wrap_counter,
                         e->swap_counter,
+                        e->seek_counter,
                         e->time_sig_num,
                         e->time_sig_den,
                         e->ticks_per_beat,

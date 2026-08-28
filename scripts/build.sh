@@ -40,6 +40,9 @@ chmod +x dist/arranger/dsp.so
 # UI ships as-is; host copies it at load time.
 cp src/ui.js dist/arranger/ui.js || true
 
+# Per-module settings schema for the Schwung Manager web UI (host >= 0.9.8).
+cp src/settings-schema.json dist/arranger/settings-schema.json || true
+
 [ -f LICENSE ] && cp LICENSE dist/arranger/LICENSE || true
 
 cd dist

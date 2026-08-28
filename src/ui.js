@@ -4,6 +4,12 @@
  * Song Builder + Performance/Setlist mode for arranging GM drum MIDI clips.
  */
 
+/* Build version stamp. Bump this on every deploy so the running JS can be
+ * confirmed from the logs (see init()/playCurrentSong()) instead of guessing
+ * whether a new file actually loaded. Keep the DSP dsp_build_version in
+ * arranger_engine.c in sync so both sides are verifiable. */
+const UI_BUILD_VERSION = "arranger-ui-2026-08-28e";
+
 import {
     MidiNoteOn, MidiNoteOff, MidiCC,
     MoveMainKnob, MoveMainButton, MoveBack, MoveMenu, MoveShift,
@@ -54,6 +60,13 @@ const LIBRARY_ROOT = "/data/UserData/UserLibrary/Arranger/MidiLibrary";
 const SONGS_DIR = "/data/UserData/UserLibrary/Arranger/Songs";
 const SETLISTS_DIR = "/data/UserData/UserLibrary/Arranger/Setlists";
 const SETTINGS_PATH = "/data/UserData/UserLibrary/Arranger/settings.json";
+/* Per-module settings persisted by Schwung Manager (the web UI) via
+ * settings-schema.json. Schwung Manager writes saved values to this
+ * config.json, so it is the source of truth for Options; the legacy
+ * SETTINGS_PATH above is retained only as a fallback for values not yet
+ * present in config.json. See schwung docs/MODULES.md "Per-Module Settings". */
+const MODULE_DIR = "/data/UserData/schwung/modules/overtake/arranger";
+const CONFIG_PATH = MODULE_DIR + "/config.json";
 
 const NUM_PADS = 32;
 const NUM_STEPS = 16;
@@ -124,6 +137,7 @@ let outputTarget = "schwung";
 let outputChannel = 10;   /* external/Move/Schwung channel: 1-16 */
 let moveChannel = 10;       /* 1-16 */
 let schwungChannel = 10;    /* 1-16 */
+let clickChannel = 0;       /* count-in click channel: 0 = follow primary output channel, else 1-16 */
 let dspDirectEmit = false;
 let pendingSongJson = null;
 let dspTimelineInfo = null;
@@ -180,7 +194,7 @@ let songSettingsPendingDen = 4;
 let songSettingsEditing = false;
 
 let selectedOutputIndex = 0;
-let optionsFocus = 0;      /* 0 = Output, 1 = MIDI channel, 2 = Swap guard, 3 = DSP debug */
+let optionsFocus = 0;      /* 0 = Output, 1 = MIDI channel, 2 = Click channel, 3 = Swap guard, 4 = DSP debug */
 let optionsEditing = false;
 let swapGuardFraction = 0.25;  /* guard window (fraction of a beat) at mid-clip swap boundaries */
 let dspDebugEnabled = false;   /* runtime toggle for the DSP debug log (.dsp_log) */
@@ -259,6 +273,7 @@ let perfAdvanceStartMs = 0;         /* timestamp of last advance (debounce) */
 let perfFullSongLoaded = false;     /* true once the full song timeline is in the DSP */
 let perfFullSong = null;            /* original full song for the current setlist entry */
 let perfSeekScheduled = false;      /* true when a seek_bar_scheduled was sent to the DSP */
+let perfLastSeekCounter = -1;       /* last DSP seek_counter, to detect a repeat/seek firing */
 let perfSongSections = [];          /* per-setlist-song section info: { name, sections:[{hasClips}], click } */
 let perfClickBars = 0;              /* click bars for the current song (0 = none) */
 let perfClickPlaying = false;       /* true while the count-in click timeline is playing */
@@ -266,8 +281,14 @@ let perfClickDsp = false;           /* true if the click is a DSP timeline (MIDI
 let perfClickMute = false;          /* true to suppress MIDI output during a pad-flash click */
 let perfClickStartMs = 0;           /* when the JS count-in started */
 let perfClickTotalMs = 0;           /* total duration of the JS count-in */
+let perfClickSwapCounter = -1;      /* last DSP swap_counter during the click-to-song preload */
+let perfClickSongStaged = false;    /* true once the real song has been preloaded into DSP staging */
 let perfDisplayIndex = 0;           /* scroll index for the performance info display */
 let perfScrollRow = 0;              /* row offset of the bottom visible pad row (0-based) */
+let perfManualScroll = false;               /* user has manually scrolled during playback; disables auto-follow until a song change */
+let perfLastPadSongIdx = -2;        /* last song index the pad grid was fully drawn for */
+let perfLastPadScrollRow = 0;       /* last scroll row the pad grid was fully drawn for */
+let perfLastUpDownScrollRow = -1;   /* last scroll row the up/down button LEDs were drawn for (-1 = force first draw) */
 let perfSelectedSection = -1;       /* section selected while stopped in performance view */
 let perfSelectedSong = -1;          /* song selected while stopped in performance view */
 let perfStoppedKeepSelection = false; /* if true, perfStop() preserves perfSelectedSection/perfSelectedSong */
@@ -342,15 +363,6 @@ const perfLineScrollers = [0, 1, 2, 3].map(() => createTextScroller());
  * chars, leaving 14 for the name. The scroller scrolls the full name. */
 const PERF_LINE_MAX_CHARS = 14;
 
-/* Independent beat-flash state for the performance active pad, so it does not
- * collide with the step-LED flash state (which uses different bar/beat values
- * and would otherwise reset each other on the first beat). */
-let perfFlashBeatKey = "";
-let perfFlashMs = 0;
-let lastLoggedFlashBeat = -1;
-let lastLoggedFlashOn = -1;
-let lastLoggedClickpadKey = "";
-
 const PAD_PREVIEW_DELAY_MS = 250; /* delay before pad tap triggers insert preview */
 
 /* Menu views that show scrollable lists. While one of these is active we
@@ -418,31 +430,27 @@ function writeClickMidi(path, note, beatsPerBar, division, bars) {
     push(0x4D); push(0x54); push(0x72); push(0x6B);
     const trackStart = bytes.length;
     push32(0); /* length placeholder */
-    /* For each beat, a short note-on then note-off. The note-off is 1 tick
-     * long, so the gap from the note-off to the next note-on must be
-     * ticksPerBeat - 1 to keep each downbeat exactly ticksPerBeat apart.
-     * Without the -1 compensation the click drifts 1 tick per beat and the
-     * trailing tail event can land past the final bar boundary. */
+    /* For each beat, a note-on then note-off. The note lasts a sensible
+     * fraction of a beat so it sounds like a real click rather than a 1-tick
+     * blip. The gap from note-off to the next note-on is shortened by the
+     * same duration so each downbeat stays exactly ticksPerBeat apart. The
+     * final click is held almost to the next downbeat so the DSP clip ends
+     * exactly at the bar boundary without needing an extra silent tail event. */
+    const clickDuration = Math.min(ticksPerBeat - 1, Math.max(24, Math.floor(ticksPerBeat / 4)));
+    const finalBarTick = totalBeats * ticksPerBeat;
+    /* Accent (louder) velocity for the first beat of each bar (downbeat), so
+     * the count-in helps the player feel the bar grouping. Regular beats use
+     * a quieter velocity. */
+    const ACCENT_VELOCITY = 120;
+    const BEAT_VELOCITY = 92;
     for (let b = 0; b < totalBeats; b++) {
-        const delta = (b === 0) ? 0 : Math.max(1, ticksPerBeat - 1);
+        const delta = (b === 0) ? 0 : Math.max(1, ticksPerBeat - clickDuration);
         pushVlq(delta);
-        push(0x90); push(note); push(100); /* note-on */
-        pushVlq(1);
+        const isDownbeat = (b % beatsPerBar === 0);
+        push(0x90); push(note); push(isDownbeat ? ACCENT_VELOCITY : BEAT_VELOCITY); /* note-on */
+        const duration = (b === totalBeats - 1) ? Math.max(1, finalBarTick - b * ticksPerBeat - 1) : clickDuration;
+        pushVlq(duration);
         push(0x80); push(note); push(0);   /* note-off */
-    }
-    /* Extend the track to the end of the final bar with a real note event
-     * on a high, unused note (127). The host's timeline length is determined
-     * by the last note event, not by End-of-Track markers or CC events. A
-     * silent note-on/note-off pair at the final bar boundary forces the DSP
-     * to keep the click timeline running right up to the next downbeat. */
-    const lastNoteOffTick = (totalBeats - 1) * ticksPerBeat + 1;
-    const finalBarTick = (bars || 1) * beatsPerBar * ticksPerBeat;
-    const tailTicks = Math.max(0, finalBarTick - lastNoteOffTick);
-    if (tailTicks > 1) {
-        pushVlq(tailTicks - 2);
-        push(0x90); push(127); push(1);  /* note-on, note 127, velocity 1 */
-        pushVlq(1);
-        push(0x80); push(127); push(0); /* note-off at finalBarTick - 1 */
     }
     /* End of track at the exact boundary (excluded from timeline events). */
     pushVlq(0); push(0xFF); push(0x2F); push(0x00);
@@ -775,7 +783,11 @@ function toEngineSongJson(song) {
                 snare_note: (typeof c.snare_note === "number") ? c.snare_note : 38,
                 snare_velocity_scale: (typeof c.snare_velocity_scale === "number" && c.snare_velocity_scale >= 0) ? c.snare_velocity_scale : 1,
                 kick_note: (typeof c.kick_note === "number") ? c.kick_note : 36,
-                kick_target: (typeof c.kick_target === "number") ? c.kick_target : 0
+                kick_target: (typeof c.kick_target === "number") ? c.kick_target : 0,
+                /* Per-clip MIDI channel override: 0 = follow the engine's
+                 * output-target channel; 1-16 = explicit channel (used for the
+                 * count-in click). */
+                channel: (typeof c.channel === "number" && c.channel > 0) ? c.channel : 0
             });
         }
         secOut.push({ name: sec.name || "Section", clips: clipsOut });
@@ -822,6 +834,7 @@ function toUiSong(engineLike) {
                 snare_velocity_scale: c.snare_velocity_scale !== undefined ? c.snare_velocity_scale : 1.0,
                 kick_note: c.kick_note !== undefined ? c.kick_note : 36,
                 kick_target: c.kick_target !== undefined ? c.kick_target : 0,
+                channel: c.channel !== undefined ? c.channel : 0,
                 advanced: !!(c.advanced)
             }))
         }))
@@ -922,22 +935,38 @@ function loadSongFile(path) {
 function loadSettings() {
     /* The host's host_get_setting only knows a fixed set of keys and ignores
      * module-specific ones, so we persist the Options settings to a file and
-     * restore them here. */
-    const saved = readJson(SETTINGS_PATH);
-    if (saved) {
-        if (typeof saved.output === "string") outputTarget = saved.output;
-        if (typeof saved.output_channel === "number") outputChannel = saved.output_channel;
-        if (typeof saved.move_channel === "number") moveChannel = saved.move_channel;
-        if (typeof saved.schwung_channel === "number") schwungChannel = saved.schwung_channel;
-        if (typeof saved.swap_guard_fraction === "number") swapGuardFraction = saved.swap_guard_fraction;
-        if (typeof saved.dsp_debug === "boolean") dspDebugEnabled = saved.dsp_debug;
-    }
+     * restore them here. Schwung Manager (the web UI) writes our Options to
+     * CONFIG_PATH via settings-schema.json, so that is the source of truth;
+     * the legacy SETTINGS_PATH only supplies values not yet saved there. */
+    const saved = readJson(CONFIG_PATH) || {};
+    const legacy = readJson(SETTINGS_PATH);
+    const pick = (key, type) => {
+        let v = saved[key];
+        if (v === undefined && legacy !== null) v = legacy[key];
+        return v;
+    };
+    const s = pick("output", "string");
+    if (typeof s === "string") outputTarget = s;
+    const oc = pick("output_channel", "number");
+    if (typeof oc === "number") outputChannel = oc;
+    const mc = pick("move_channel", "number");
+    if (typeof mc === "number") moveChannel = mc;
+    const sc = pick("schwung_channel", "number");
+    if (typeof sc === "number") schwungChannel = sc;
+    const cc = pick("click_channel", "number");
+    if (typeof cc === "number") clickChannel = cc;
+    const sg = pick("swap_guard_fraction", "number");
+    if (typeof sg === "number") swapGuardFraction = sg;
+    const dd = pick("dsp_debug", "boolean");
+    if (typeof dd === "boolean") dspDebugEnabled = dd;
     if (outputChannel < 1) outputChannel = 1;
     if (outputChannel > 16) outputChannel = 16;
     if (moveChannel < 1) moveChannel = 1;
     if (moveChannel > 16) moveChannel = 16;
     if (schwungChannel < 1) schwungChannel = 1;
     if (schwungChannel > 16) schwungChannel = 16;
+    if (clickChannel < 0) clickChannel = 0;
+    if (clickChannel > 16) clickChannel = 16;
     if (swapGuardFraction < 0) swapGuardFraction = 0;
     if (swapGuardFraction > 1) swapGuardFraction = 1;
     selectedOutputIndex = OUTPUT_TARGETS.indexOf(outputTarget);
@@ -945,14 +974,29 @@ function loadSettings() {
 }
 
 function saveOutputSettings() {
-    writeJson(SETTINGS_PATH, {
+    const values = {
         output: outputTarget,
         output_channel: outputChannel,
         move_channel: moveChannel,
         schwung_channel: schwungChannel,
+        click_channel: clickChannel,
         swap_guard_fraction: swapGuardFraction,
         dsp_debug: dspDebugEnabled
-    });
+    };
+    /* Keep the legacy file for backwards compatibility. */
+    writeJson(SETTINGS_PATH, values);
+    /* Also write to the Schwung Manager config.json so the web UI and the
+     * on-device Options view stay in sync (Schwung Manager reads config.json
+     * when rendering the module's Settings page). Merge over the existing
+     * file so we preserve any other fields Schwung Manager (or a future
+     * settings page) has written that this module doesn't manage — a plain
+     * full-file overwrite would silently wipe them. */
+    try {
+        const existing = readJson(CONFIG_PATH) || {};
+        writeJson(CONFIG_PATH, Object.assign({}, existing, values));
+    } catch (e) {
+        logDebug("saveOutputSettings: writeJson(CONFIG_PATH) failed " + e);
+    }
 }
 
 function currentOutputLabel() {
@@ -964,6 +1008,12 @@ function activeOutputChannel() {
     if (outputTarget === "move") return moveChannel;
     if (outputTarget === "schwung") return schwungChannel;
     return outputChannel;
+}
+
+/* Effective MIDI channel for the count-in click. clickChannel 0 means follow
+ * the primary output channel; otherwise it is an explicit 1-16 channel. */
+function activeClickChannel() {
+    return clickChannel > 0 ? clickChannel : activeOutputChannel();
 }
 
 /* Push the full output-routing state to the DSP. In co-run/overtake mode,
@@ -1128,9 +1178,21 @@ function generateClickForEntry(entry) {
     const beatsPerBar = song.time_sig_num || 4;
     const ppq = song.ppq || 240;
     const note = (entry.click_note || 0) > 0 ? entry.click_note : 1;
-    /* Unique per-edit path so the DSP reloads the clip on click changes. */
+    /* Unique per-edit path so the DSP reloads the clip on click changes. When
+     * the click settings change, entryClickRevision bumps click_rev -> a new
+     * path -> this regenerates. The file's content also depends on the song's
+     * time signature (beatsPerBar) and division (ppq), both baked into the
+     * MIDI header/beat count, so those are folded into the path too — editing
+     * a song's time signature/division in the Builder (without touching the
+     * setlist click settings) becomes a cache miss and regenerates. If the
+     * current-revision file already exists (unchanged settings, already
+     * written), reuse it instead of rewriting. */
     const path = "/data/UserData/UserLibrary/Arranger/.click-" + (entry.id || "setlist") +
-        "-" + (entry.click_rev || 0) + ".mid";
+        "-" + (entry.click_rev || 0) + "-" + beatsPerBar + "x" + ppq + ".mid";
+    if (typeof host_file_exists === "function" && host_file_exists(path)) {
+        entry.click_path = path;
+        return path;
+    }
     if (writeClickMidi(path, note, beatsPerBar, ppq, bars)) {
         entry.click_path = path;
         return path;
@@ -1195,7 +1257,7 @@ function deleteSetlist(setlist) {
 
 /* ── MIDI output routing ────────────────────────────────────────────── */
 
-function playCurrentSong() {
+function playCurrentSong(preloadStaged) {
     if (!currentSong) { logDebug("playCurrentSong: no currentSong"); return; }
     lastLoggedDspError = null;
     const json = toEngineSongJson(currentSong);
@@ -1203,10 +1265,10 @@ function playCurrentSong() {
     const secCount = currentSong.sections ? currentSong.sections.length : 0;
     const clipCount = currentSong.sections ? currentSong.sections.reduce((a, s) => a + (s.clips ? s.clips.length : 0), 0) : 0;
     if (typeof host_module_set_param === "function") {
-        logTiming("START song=" + currentSong.name + " sections=" + secCount + " clips=" + clipCount +
+        logTiming("START BUILD=" + UI_BUILD_VERSION + " song=" + currentSong.name + " sections=" + secCount + " clips=" + clipCount +
             " bpm=" + (currentSong.tempo_bpm || "?") + " ts=" + (currentSong.time_sig_num || "?") + "/" + (currentSong.time_sig_den || "?") +
             " bars=" + (dspTimelineInfo ? dspTimelineInfo.total_bars : "?") + " t=" + Date.now());
-        logDebug("playCurrentSong: song=" + currentSong.name + " sections=" + secCount + " clips=" + clipCount + " json_len=" + json.length + " output=" + outputTarget);
+        logDebug("playCurrentSong: BUILD=" + UI_BUILD_VERSION + " song=" + currentSong.name + " sections=" + secCount + " clips=" + clipCount + " json_len=" + json.length + " output=" + outputTarget);
         logDebug("playCurrentSong json=" + json.slice(0, 600));
         /* Ensure library_root is set first so clip resolution works. */
         host_module_set_param("library_root", LIBRARY_ROOT);
@@ -1217,6 +1279,15 @@ function playCurrentSong() {
             const afterJsonErr = host_module_get_param("error");
             const afterJsonInfo = host_module_get_param("timeline_info");
             logDebug("playCurrentSong after song_json: error=" + (afterJsonErr || "null") + " timeline_info=" + (afterJsonInfo || "null"));
+        }
+        /* Optional: preload the full song into DSP staging AFTER the current
+         * (click) song_json has loaded. Loading song_json clears staging, so
+         * preloading first would wipe the staged full song and the click→song
+         * swap would never fire. Preloading here, before play=1, keeps the
+         * blocking build off the audio path (no first-note blip) while leaving
+         * the staged full song intact for a sample-accurate swap. */
+        if (preloadStaged) {
+            preloadPerfSongToStaging();
         }
         host_module_set_param("loop", dspLoopEnabled ? "1" : "0");
         host_module_set_param("play", "1");
@@ -1579,8 +1650,10 @@ function updateDspState() {
         /* Auto-scroll: when the currently playing item reaches the top visible
          * row (row 3), scroll the window down one row so the playing section
          * moves to row 2 and the next row of sections becomes visible at the
-         * top. */
-        if (currentView === VIEW_PERFORMANCE && perfSongSections.length > 0) {
+         * top. Skipped once the user has manually scrolled, so the auto-follow
+         * doesn't yank the view back to the current song against the user's
+         * explicit scroll. */
+        if (!perfManualScroll && currentView === VIEW_PERFORMANCE && perfSongSections.length > 0) {
             const playingIdx = perfSongSections.findIndex(it =>
                 it.kind === "section" && it.songIndex === perfSongIndex && it.sectionIndex === playbackSectionIndex);
             if (playingIdx >= 0) {
@@ -1626,6 +1699,20 @@ function flushLedQueue() {
             setButtonLED(msg[0], msg[1]);
         }
         n++;
+    }
+}
+
+/* Send all 32 pads to the host immediately, bypassing the per-tick throttle.
+ * Used after a forced grid redraw (song change / autoscroll). The normal
+ * ledQueue path drains only LEDS_PER_TICK (8) messages per tick, so a 32-pad
+ * forced send would need 4 ticks — and updateLEDs wipes the queue on every
+ * ledDirtyAll (which fires on section changes / bar boundaries), dropping the
+ * rest. Sending here guarantees the whole grid lands. */
+function flushPadGridImmediate() {
+    for (let p = 0; p < NUM_PADS; p++) {
+        const note = MovePad1 + p;
+        const msg = [0x09, MidiNoteOn, note, lastPadState[p]];
+        move_midi_internal_send(msg);
     }
 }
 
@@ -1748,24 +1835,30 @@ function updateButtonLEDs() {
                 } else if (ledSec && ledSec.clips.length > 0) {
                     active.set(MovePlay, PureGreen);
                 }
-                active.set(MoveShift, WhiteLedDim);
-                if (shiftHeld) {
-                    active.set(MoveShift, WhiteLedBright);
-                    active.set(MoveMainButton, WhiteLedBright);
-                    if (ledLocked) {
-                        /* Shift+Copy / Shift+Delete / Shift+Loop are inert on a
-                         * locked song, so leave them black. Shift+Left/Right
-                         * (reorder sections) are also blocked but keep their
-                         * dim/bright hints per section availability. */
-                    } else {
-                        /* Shift+Copy / Shift+Delete / Shift+Left / Shift+Right act
-                         * on the whole section, so they stay lit anywhere. */
+                if (!ledLocked) {
+                    /* Shift does nothing on a locked song (all its alternate
+                     * actions are blocked), so leave it black. */
+                    active.set(MoveShift, WhiteLedDim);
+                    if (shiftHeld) {
+                        active.set(MoveShift, WhiteLedBright);
+                        active.set(MoveMainButton, WhiteLedBright);
+                        /* Shift+Copy / Shift+Delete / Shift+Loop / Shift+Left /
+                         * Shift+Right act on the whole section, so they stay
+                         * lit anywhere. */
                         active.set(MoveCopy, WhiteLedBright);
                         active.set(MoveLoop, WhiteLedBright);
                         if (ledHasLeftSection) active.set(MoveLeft, WhiteLedBright);
                         if (ledHasRightSection) active.set(MoveRight, WhiteLedBright);
                         active.set(MoveDelete, WhiteLedBright);
+                        active.set(MovePlay, PureGreen);
                     }
+                } else if (shiftHeld) {
+                    active.set(MoveShift, WhiteLedBright);
+                    active.set(MoveMainButton, WhiteLedBright);
+                    /* Shift+Copy / Shift+Delete / Shift+Loop are inert on a
+                     * locked song, so leave them black. Shift+Left/Right
+                     * (reorder sections) are also blocked but keep their
+                     * dim/bright hints per section availability. */
                     active.set(MovePlay, PureGreen);
                 }
                 break;
@@ -1782,14 +1875,18 @@ function updateButtonLEDs() {
                 active.set(MoveBack, WhiteLedBright);
                 active.set(MoveMainButton, WhiteLedBright);
                 if (selectedSongIndex > 0) {
-                    /* A locked song cannot be deleted: leave the Delete button
-                     * black (omit from the active map). */
+                    /* A locked song cannot be deleted or renamed: leave the
+                     * Delete and Shift buttons black (omit from active map). */
                     const entry = songFiles[selectedSongIndex - 1];
                     const locked = entry ? !!(readJson(entry.path)?.locked) : false;
                     if (!locked) active.set(MoveDelete, WhiteLedBright);
+                    if (!locked) {
+                        /* Shift (rename) only applies to an existing, unlocked
+                         * song — not the "+ New Song" row nor a locked one. */
+                        active.set(MoveShift, WhiteLedDim);
+                        if (shiftHeld) active.set(MoveShift, WhiteLedBright);
+                    }
                 }
-                active.set(MoveShift, WhiteLedDim);
-                if (shiftHeld) active.set(MoveShift, WhiteLedBright);
                 break;
             case VIEW_OPTIONS:
                 active.set(MoveBack, WhiteLedBright);
@@ -1798,9 +1895,13 @@ function updateButtonLEDs() {
             case VIEW_SETLIST_BANK:
                 active.set(MoveBack, WhiteLedBright);
                 active.set(MoveMainButton, WhiteLedBright);
-                if (selectedSetlistIndex > 0) active.set(MoveDelete, WhiteLedBright);
-                active.set(MoveShift, WhiteLedDim);
-                if (shiftHeld) active.set(MoveShift, WhiteLedBright);
+                if (selectedSetlistIndex > 0) {
+                    active.set(MoveDelete, WhiteLedBright);
+                    /* Shift (rename) only applies to an existing setlist, not
+                     * the "+ New Setlist" row. */
+                    active.set(MoveShift, WhiteLedDim);
+                    if (shiftHeld) active.set(MoveShift, WhiteLedBright);
+                }
                 break;
             case VIEW_SETLIST_EDIT: {
                 const songs = currentSetlist ? currentSetlist.songs : [];
@@ -1810,8 +1911,11 @@ function updateButtonLEDs() {
                 if (!onAddSong) active.set(MoveDelete, WhiteLedBright);
                 if (!onAddSong && setlistSongIndex > 0) active.set(MoveLeft, WhiteLedBright);
                 if (!onAddSong && setlistSongIndex < songs.length - 1) active.set(MoveRight, WhiteLedBright);
-                active.set(MoveShift, WhiteLedDim);
-                if (shiftHeld) active.set(MoveShift, WhiteLedBright);
+                if (!onAddSong) {
+                    /* Shift has no action on "(add song)", so leave it black. */
+                    active.set(MoveShift, WhiteLedDim);
+                    if (shiftHeld) active.set(MoveShift, WhiteLedBright);
+                }
                 break;
             }
             case VIEW_SETLIST_PICK:
@@ -1834,8 +1938,27 @@ function updateButtonLEDs() {
                 active.set(MoveBack, WhiteLedBright);
                 {
                     const maxRow = Math.max(0, Math.ceil(perfSongSections.length / 8) - 4);
-                    if (perfScrollRow < maxRow) active.set(MoveUp, WhiteLedBright);
-                    if (perfScrollRow > 0) active.set(MoveDown, WhiteLedBright);
+                    const upLit = perfScrollRow < maxRow;
+                    const downLit = perfScrollRow > 0;
+                    if (upLit) active.set(MoveUp, WhiteLedBright);
+                    if (downLit) active.set(MoveDown, WhiteLedBright);
+                    /* When the pad window scrolls (auto-scroll or manual), the
+                     * up/down button LEDs must reflect the new position. Force a
+                     * re-send on a scroll-row change so a stale queued/deduped
+                     * state can't leave them lit incorrectly. */
+                    if (perfScrollRow !== perfLastUpDownScrollRow) {
+                        perfLastUpDownScrollRow = perfScrollRow;
+                        /* Send directly, bypassing the throttled ledQueue. A
+                         * queued button message can be wiped by the next
+                         * ledDirtyAll's ledQueue.length=0 (which fires on bar
+                         * boundaries during playback) before it flushes,
+                         * leaving the up/down LEDs stuck in their old state
+                         * after an auto-scroll. */
+                        setButtonLED(MoveUp, upLit ? WhiteLedBright : Black);
+                        setButtonLED(MoveDown, downLit ? WhiteLedBright : Black);
+                        lastButtonState.set(MoveUp, upLit ? WhiteLedBright : Black);
+                        lastButtonState.set(MoveDown, downLit ? WhiteLedBright : Black);
+                    }
                 }
                 active.set(MovePlay, perfPlaying ? PureRed : PureGreen);
                 break;
@@ -2031,32 +2154,6 @@ function perfInClick() {
     return perfPlaying && perfClickPlaying;
 }
 
-/* Independent beat-flash for the performance active pad. Uses the DSP's own
- * beat_flash flag so the flash is tied to the sample-accurate playhead, not
- * the UI polling interval. This keeps the click pad and song section pad
- * flashes perfectly in time with the engine's beat. */
-function perfPadFlash() {
-    if (!perfPlaying) return false;
-    if (!lastDspTransport || !lastDspTransport.running) return false;
-    if (perfClickPlaying) {
-        const flash = lastDspTransport.beat_flash ? 1 : 0;
-        const beatKey = (lastDspTransport.bar || 0) + ":" + (lastDspTransport.beat || 0);
-        if (beatKey !== lastLoggedFlashBeat || flash !== lastLoggedFlashOn) {
-            lastLoggedFlashBeat = beatKey;
-            lastLoggedFlashOn = flash;
-            logClick("CLICKFLASH beat_flash=" + flash +
-                " bar=" + (lastDspTransport.bar || "?") +
-                " beat=" + (lastDspTransport.beat || "?") +
-                " bpm=" + (lastDspTransport.bpm || "?") +
-                " sig=" + (lastDspTransport.time_sig_num || "?") + "/" + (lastDspTransport.time_sig_den || "?") +
-                " tpb=" + (lastDspTransport.ticks_per_beat || "?"));
-        }
-    }
-    return !!lastDspTransport.beat_flash;
-}
-
-let lastPerformancePadLayout = [];
-
 /* Map a pad index to the setlist layout item it currently shows, accounting
  * for the scroll offset. Pads are 8 columns x 4 rows, row-major, bottom row
  * first. The visible window is 4 rows tall, scrolled by perfScrollRow (the
@@ -2089,10 +2186,17 @@ function perfNextSectionIndex() {
  * section (or click) of the next song when the current song is on its last
  * section. Returns null if there is no next item. */
 function perfNextItem() {
-    /* A queued section jump targets a section of the current song. */
-    if (perfQueuedSection >= 0) {
+    /* A queued section jump to a DIFFERENT section targets that section. */
+    if (perfQueuedSection >= 0 && perfQueuedSection !== playbackSectionIndex) {
         return perfSongSections.find(it =>
             it.kind === "section" && it.songIndex === perfSongIndex && it.sectionIndex === perfQueuedSection) || null;
+    }
+    /* A queued repeat of the CURRENT section (perfQueuedSection === the
+     * playing section): the current section plays again, so it is the item
+     * to highlight as "next" (matching the display's Nsec line). */
+    if (perfQueuedSection >= 0 && perfQueuedSection === playbackSectionIndex) {
+        return perfSongSections.find(it =>
+            it.kind === "section" && it.songIndex === perfSongIndex && it.sectionIndex === playbackSectionIndex) || null;
     }
     /* A queued song jump targets the first playable item of that song. */
     if (perfQueuedSongIndex >= 0) {
@@ -2184,16 +2288,17 @@ function perfNextImminent() {
     return withinSectionBar >= secBars - 1;
 }
 
-function drawPerformanceLEDs() {
+function drawPerformanceLEDs(force) {
     const inClick = perfInClick();
-    const desired = new Uint8Array(NUM_PADS);
+    const desired = new Uint16Array(NUM_PADS);
     /* Default unused pads to black. */
     for (let p = 0; p < NUM_PADS; p++) desired[p] = Black;
     /* The first item that will play from a stopped state (the click pad, or
-     * the first section). Lit white when stopped as the "now queued" target. */
+     * the first section). Lit white when it's the "now" queued target. */
     const firstItem = perfPlaying ? null : perfFirstItem();
-    /* Pads map to the setlist layout: sections of each song (full colour for
-     * the current song, dimmed for others), plus a click pad per song that
+
+    /* Pads map to the song/section layout: sections of each song (full colour
+     * for the current song, dimmed for others), plus a click pad per song that
      * has a click flag. The visible window is 4 rows tall, scrolled by
      * perfScrollRow (bottom row index). */
     for (let p = 0; p < NUM_PADS; p++) {
@@ -2241,12 +2346,15 @@ function drawPerformanceLEDs() {
             }
         } else if (isQueued) {
             desired[p] = White;
+        } else if (isNext) {
+            /* The next section to play (including a queued repeat of the
+             * current section) is white until its last bar, then purered
+             * (mirrors Jam mode's queued-clip behaviour). Checked before
+             * isActive so a queued repeat of the playing section shows the
+             * queued colour instead of the plain active mustard. */
+            desired[p] = nextImminent ? PureRed : White;
         } else if (isActive) {
             desired[p] = Mustard;
-        } else if (isNext) {
-            /* The next section to play is white until its last bar, then
-             * purered (mirrors Jam mode's queued-clip behaviour). */
-            desired[p] = nextImminent ? PureRed : White;
         } else if (isCurrentSong) {
             /* Current song but not currently playing: section colour. */
             desired[p] = sectionPadColor(item.sectionInfo.name, false);
@@ -2254,45 +2362,13 @@ function drawPerformanceLEDs() {
             desired[p] = DarkGrey;
         }
     }
-    /* Only send pads whose colour changed; avoid blanking the whole grid. */
+    /* Send pads. When called from drawPerformanceLEDs with force, send every
+     * pad so the grid is guaranteed to reflect the current song/section state
+     * after a transition. Otherwise use change detection so the LED queue
+     * isn't flooded every tick. */
     for (let p = 0; p < NUM_PADS; p++) {
-        if (lastPadState[p] !== desired[p]) {
+        if (force || lastPadState[p] !== desired[p]) {
             padColor(p, desired[p], true);
-        }
-    }
-    lastPerformancePadLayout = perfSongSections.slice();
-}
-
-/* Per-tick update: only toggle the active pad's flash colour, without
- * clearing/redrawing every pad (which caused a rapid black->colour flicker).
- * During the prepended click section, the click pad flashes; otherwise the
- * active section pad flashes. */
-function updatePerformancePadFlash() {
-    if (!currentSong || !perfPlaying) return;
-    const activeFlash = perfPadFlash();
-    if (perfClickPlaying) {
-        const beatKey = (lastDspTransport && lastDspTransport.bar || 0) + ":" + (lastDspTransport && lastDspTransport.beat || 0);
-        const key = beatKey + ":" + (activeFlash ? 1 : 0);
-        if (key !== lastLoggedClickpadKey) {
-            lastLoggedClickpadKey = key;
-            logClick("CLICKPAD flash=" + (activeFlash ? 1 : 0) + " inClick=" + (perfInClick() ? 1 : 0) + " t=" + Date.now());
-        }
-    }
-    const inClick = perfInClick();
-    for (let p = 0; p < NUM_PADS; p++) {
-        const item = perfItemForPad(p);
-        if (!item) continue;
-        if (inClick) {
-            if (item.kind === "click" && item.songIndex === perfSongIndex) {
-                padColor(p, activeFlash ? White : Mustard);
-                return;
-            }
-        } else {
-            if (item.kind === "click") continue;
-            if (item.songIndex === perfSongIndex && item.sectionIndex === playbackSectionIndex) {
-                padColor(p, activeFlash ? White : Mustard);
-                return;
-            }
         }
     }
 }
@@ -2906,7 +2982,26 @@ function updateLEDs() {
         ledQueue.length = 0;
         switch (currentView) {
             case VIEW_BUILDER: drawBuilderLEDs(); break;
-            case VIEW_PERFORMANCE: drawPerformanceLEDs(); break;
+            case VIEW_PERFORMANCE:
+                /* Force a full send only when the grid content actually changed:
+                 * a song change, or an auto-scroll that moved the pad window
+                 * (perfScrollRow). During playback ledDirtyAll also fires on
+                 * section changes and bar boundaries; force-sending all 32 pads
+                 * on every one of those floods the LED queue and makes the
+                 * pad/step beat flash inconsistent. When neither the song nor
+                 * the scroll row changed, use change-detection. */
+                if (perfSongIndex !== perfLastPadSongIdx || perfScrollRow !== perfLastPadScrollRow) {
+                    perfLastPadSongIdx = perfSongIndex;
+                    perfLastPadScrollRow = perfScrollRow;
+                    drawPerformanceLEDs(true);
+                    /* The forced grid must reach the hardware now. The queued
+                     * path throttles to 8/tick and gets wiped by a later
+                     * ledDirtyAll, so flush all 32 pads immediately. */
+                    flushPadGridImmediate();
+                } else {
+                    drawPerformanceLEDs(false);
+                }
+                break;
             case VIEW_JAM: drawJamLEDs(); break;
             default: clearPadLEDs();
         }
@@ -2933,7 +3028,7 @@ function updateLEDs() {
         stepLedsDirty = false;
     } else if (currentView === VIEW_PERFORMANCE && perfClickBars > 0 &&
                (perfClickPlaying || (!perfPlaying && perfSelectedSection < 0))) {
-        drawClickStepLEDs();
+        drawClickStepLEDs(forceSteps);
         stepLedsDirty = false;
     } else if (currentView === VIEW_JAM) {
         drawJamStepLEDs(forceSteps);
@@ -2946,7 +3041,7 @@ function updateLEDs() {
 
 /* During a count-in click, show one step LED per click bar and flash the
  * current bar white on each beat, matching the song-section step LEDs. */
-function drawClickStepLEDs() {
+function drawClickStepLEDs(force) {
     const bars = Math.max(1, Math.min(perfClickBars, NUM_STEPS));
     let currentBar = -1;
     let currentBeat = -1;
@@ -2963,13 +3058,15 @@ function drawClickStepLEDs() {
     }
     for (let s = 0; s < NUM_STEPS; s++) {
         if (s >= bars) {
-            stepColor(s, Black, false);
+            /* Steps beyond the click bars must be black (forced so stale
+             * section steps from the previous song are cleared). */
+            stepColor(s, Black, force);
         } else if (s === currentBar) {
             /* Active click bar: flash white to black, then return to the dim
              * colour when the playhead moves on to the next bar. */
-            stepColor(s, flashOn ? White : Black, false);
+            stepColor(s, flashOn ? White : Black, force);
         } else {
-            stepColor(s, CLICK_DIM_COLOUR, false);
+            stepColor(s, CLICK_DIM_COLOUR, force);
         }
     }
 }
@@ -3024,7 +3121,7 @@ function scrollHeader(title, maxChars) {
 }
 
 function drawRoot() {
-    drawMenuHeader("Arranger", "v0.1");
+    drawMenuHeader("Arranger", "v0.2");
     drawMenuList({
         items: [
             { label: "Song Builder" },
@@ -3176,6 +3273,37 @@ function trimBeatsPerBar() {
     return (currentSong && currentSong.time_sig_num > 0) ? currentSong.time_sig_num : 4;
 }
 
+/* A clip is "full length" when Start sits at the clip's first playable bar and
+ * End extends to the last bar. Shortening a clip from full length auto-applies
+ * a 13% guard interval; widening it back to full length clears the guard.
+ * Only the length (Start/End) drives this; the Guard field remains manual.
+/* A clip is "full length" when End extends to the last bar. Shortening a clip
+ * from full length auto-applies a 13% guard interval; widening the END back to
+ * the last bar removes the guard. Only the END length drives the guard — the
+ * Start position does not. The Guard field itself remains manual.
+ *
+ * For beat-level edits the guard is only cleared when the end beat returns to
+ * the final beat of the bar AND advanced trimming is disabled (beats snap back
+ * to the full-bar defaults) AND the end bar is at the clip's full length.
+ */
+function trimAutoApplyGuard(effMaxBar, beatEdit = false) {
+    if (!trimClip) return;
+    if (beatEdit) {
+        /* In Advanced Trim the guard is a manual field the user controls; a
+         * beat-level edit must NOT overwrite it. Leave it as the user set it. */
+        if (trimAdvanced) return;
+        const bpb = trimBeatsPerBar();
+        const atFullBarEnd = (trimPendingEnd === effMaxBar) && (trimPendingEndBeat === bpb);
+        /* Only clear when genuinely back to a full-length bar (advanced mode
+         * off, so beats snap to the full-bar defaults). */
+        trimPendingGuard = atFullBarEnd ? 0 : 0.13;
+        return;
+    }
+    /* Guard is applied only when the END is shortened. If the end reaches the
+     * full length the guard is cleared, regardless of the start position. */
+    trimPendingGuard = (trimPendingEnd === effMaxBar) ? 0 : 0.13;
+}
+
 /* Toggle Advanced Trim. Start/End stay in effective song-bar units (source ÷
  * speed) in both modes; Advanced mode just reveals the sub-bar beat fields. */
 function trimToggleAdvanced() {
@@ -3185,6 +3313,13 @@ function trimToggleAdvanced() {
         trimPendingStartBeat = 1;
         trimPendingEndBeat = bpb;
         trimAdvanced = false;
+        /* With advanced off, the end beat snaps to the full bar. If the end bar
+         * is the clip's full length, clear the auto-guard. */
+        if (trimClip) {
+            const maxBar = clipTrueBars(trimClip);
+            const effMaxBar = Math.max(1, Math.round(maxBar / trimPendingSpeed));
+            trimAutoApplyGuard(effMaxBar, true);
+        }
     } else {
         trimPendingStartBeat = Math.max(1, Math.min(bpb, trimPendingStartBeat));
         trimPendingEndBeat = Math.max(1, Math.min(bpb, trimPendingEndBeat));
@@ -3221,10 +3356,10 @@ function drawTrim() {
     items.push({ key: "guard", label: "Guard", value: Math.round(trimPendingGuard * 100) + "%" });
     items.push({ key: "speed", label: "Speed", value: trimPendingSpeed + "x" });
     items.push({ key: "velocity", label: "Velocity", value: Math.round(trimPendingVelocityScale * 100) + "%" });
-    items.push({ key: "snare_note", label: "Reduce Note", value: String(trimPendingSnareNote) });
-    items.push({ key: "snare_velocity", label: "Reduce Vel", value: Math.round(trimPendingSnareVelocityScale * 100) + "%" });
+    items.push({ key: "snare_note", label: "Single Note", value: String(trimPendingSnareNote) });
+    items.push({ key: "snare_velocity", label: "Single Note Vel", value: Math.round(trimPendingSnareVelocityScale * 100) + "%" });
     items.push({ key: "kick_note", label: "Limit Note", value: trimPendingKickNote === 0 ? "Off" : String(trimPendingKickNote) });
-    items.push({ key: "kick_target", label: "Notes/Bar", value: trimPendingKickTarget === 0 ? "Off" : String(trimPendingKickTarget) });
+    items.push({ key: "kick_target", label: "Limit Notes/Bar", value: trimPendingKickTarget === 0 ? "Off" : String(trimPendingKickTarget) });
     drawMenuList({
         items,
         selectedIndex,
@@ -3315,8 +3450,14 @@ function handleTrimInput(cc, value) {
                 trimPendingStartBeat = Math.max(1, Math.min(bpb, trimPendingStartBeat + delta));
             } else if (field === "end") {
                 trimPendingEnd = Math.max(trimPendingStart + 1, Math.min(effMaxBar, trimPendingEnd + delta));
+                /* Shortening the END from full length auto-adds a 13% guard;
+                 * widening it back to full length clears it. */
+                trimAutoApplyGuard(effMaxBar);
             } else if (field === "end_beat") {
                 trimPendingEndBeat = Math.max(1, Math.min(bpb, trimPendingEndBeat + delta));
+                /* Changing the end beat also shortens/widens the end, so apply
+                 * the same auto-guard based on the END position. */
+                trimAutoApplyGuard(effMaxBar, true);
             } else if (field === "guard") {
                 const steps = [0, 0.03125, 0.0625, 0.125, 0.25, 0.5];
                 const idx = steps.indexOf(trimPendingGuard);
@@ -3553,6 +3694,7 @@ function drawOptions() {
     const items = [
         { key: "output", label: "Output", value: currentOutputLabel() },
         { key: "channel", label: "MIDI Channel", value: String(activeOutputChannel()) },
+        { key: "clickchan", label: "Click Channel", value: clickChannel === 0 ? "Default" : String(clickChannel) },
         { key: "swapguard", label: "Swap Guard", value: Math.round(swapGuardFraction * 100) + "%" },
         { key: "dspdebug", label: "DSP Debug", value: dspDebugEnabled ? "On" : "Off" }
     ];
@@ -3702,8 +3844,13 @@ function drawPerformance() {
     let nextSecName = "";
     const stoppedSelection = !perfPlaying && perfSelectedSection >= 0 ? perfSelectedSection : -1;
     if (fullSong) {
-        if (perfQueuedSection >= 0 && perfQueuedSection < fullSong.sections.length) {
+        if (perfQueuedSection >= 0 && perfQueuedSection !== playbackSectionIndex && perfQueuedSection < fullSong.sections.length) {
+            /* A jump to a different section: show that target. */
             nextSecName = fullSong.sections[perfQueuedSection]?.name || "";
+        } else if (perfQueuedSection >= 0 && perfQueuedSection === playbackSectionIndex) {
+            /* A repeat of the current section: it plays again, so Nsec shows
+             * the current section's name. */
+            nextSecName = fullSong.sections[playbackSectionIndex]?.name || "";
         } else if (perfClickPlaying || (!perfPlaying && hasClick && perfSelectedSection < 0)) {
             nextSecName = fullSong.sections[0]?.name || "";
         } else if (stoppedSelection >= 0) {
@@ -4109,8 +4256,13 @@ function handleBuilderInput(cc, value) {
         if (playbackState === "playing") {
             stopPlayback();
         } else if (shiftHeld) {
+            /* Shift + Play starts playback from the beginning of the song,
+             * playing through to the end without looping. */
             saveCurrentSong();
-            playFromCurrentSection();
+            const savedLoop = dspLoopEnabled;
+            dspLoopEnabled = false;
+            playCurrentSong();
+            dspLoopEnabled = savedLoop;
         } else {
             previewClipAtCursor();
         }
@@ -4454,6 +4606,14 @@ function handleOptionsInput(cc, value) {
                     }
                 }
             } else if (optionsFocus === 2) {
+                /* Adjust the count-in click channel. 0 = follow the primary
+                 * output channel (Default); 1-16 = explicit channel. */
+                const newCh = Math.max(0, Math.min(16, clickChannel + delta));
+                if (newCh !== clickChannel) {
+                    clickChannel = newCh;
+                    saveOutputSettings();
+                }
+            } else if (optionsFocus === 3) {
                 /* Adjust the mid-clip swap guard (0-100%, in 5% steps). */
                 const newG = Math.max(0, Math.min(1, swapGuardFraction + delta * 0.05));
                 if (newG !== swapGuardFraction) {
@@ -4473,7 +4633,7 @@ function handleOptionsInput(cc, value) {
                 }
             }
         } else {
-            const newIdx = Math.max(0, Math.min(3, optionsFocus + delta));
+            const newIdx = Math.max(0, Math.min(4, optionsFocus + delta));
             if (newIdx !== optionsFocus) {
                 optionsFocus = newIdx;
             }
@@ -4721,12 +4881,14 @@ function handlePerformanceInput(cc, value) {
          * Reversed: Up scrolls down (reveal lower sections). */
         const maxRow = Math.max(0, Math.ceil(perfSongSections.length / 8) - 4);
         perfScrollRow = Math.min(maxRow, perfScrollRow + 1);
+        perfManualScroll = true; /* user took over; stop auto-follow */
         needsRedraw = true;
         ledDirtyAll = true;
     } else if (cc === MoveDown && value > 0) {
         /* Scroll the pad window down one row (reveal lower sections).
          * Reversed: Down scrolls up (reveal higher sections). */
         perfScrollRow = Math.max(0, perfScrollRow - 1);
+        perfManualScroll = true; /* user took over; stop auto-follow */
         needsRedraw = true;
         ledDirtyAll = true;
     } else if (cc === MovePlay && value > 0) {
@@ -6177,6 +6339,20 @@ function perfLoadSong(index) {
     playbackSectionIndex = 0;
     previewBarOffset = 0;
     dspLoopEnabled = false;
+    /* Clamp the pad scroll row to the new layout's valid range. On an
+     * auto-advance the previous (longer) song may have scrolled down (high
+     * perfScrollRow); keeping that stale value for the shorter new song makes
+     * the up/down button LEDs wrong (they think the view is a different row).
+     * Clamping keeps the scroll position but bounds it to the new layout. */
+    const maxRow = Math.max(0, Math.ceil(perfSongSections.length / 8) - 4);
+    if (perfScrollRow > maxRow) perfScrollRow = maxRow;
+    /* Re-enable auto-follow for the new song; the manual-scroll lock only
+     * applies to the song the user was actively viewing. */
+    perfManualScroll = false;
+    /* Force a full pad repaint so the grid reflects the new song's sections
+     * (coloured) and dims/greys the other songs. Without this, the previous
+     * song's pad colours can persist when the active-pad flash runs. */
+    ledDirtyAll = true;
     return true;
 }
 
@@ -6201,13 +6377,16 @@ function perfPlayCurrent() {
     if (clickBars > 0) {
         const beatsPerBar = currentSong.time_sig_num || 4;
         const bpm = currentSong.tempo_bpm || 120;
-        /* Use the click MIDI file generated while editing the setlist. If it is
-         * missing (e.g. a setlist created before this feature), generate it
-         * here as a fallback so playback still works. */
-        clickMidiPath = (entry && entry.click_path) ? entry.click_path : "";
+        /* Ensure the click MIDI file exists for the current revision. The file
+         * is cached by a revision-based path; generateClickForEntry only
+         * rewrites it when the click settings changed (click_rev bumped) or
+         * the file is missing, so unchanged clicks are not rewritten on every
+         * play. */
+        const regenerated = generateClickForEntry(entry);
+        clickMidiPath = regenerated || (entry && entry.click_path) || "";
         if (!clickMidiPath || !host_file_exists(clickMidiPath)) {
-            const regenerated = generateClickForEntry(entry);
-            clickMidiPath = regenerated || "";
+            logDebug("perfPlayCurrent: failed to generate click MIDI");
+            return;
         }
         /* Build a click-only timeline: one section, one clip spanning the
          * click bars. */
@@ -6221,7 +6400,10 @@ function perfPlayCurrent() {
                 start_bar: 0,
                 end_bar: clickBars,
                 guard_fraction: 0,
-                velocity_scale: 1.0
+                velocity_scale: 1.0,
+                /* Route the count-in click to its own MIDI channel so it can
+                 * be separated from the song/primary output. */
+                channel: activeClickChannel()
             }]
         }];
         currentSong = clickSong;
@@ -6232,17 +6414,53 @@ function perfPlayCurrent() {
         perfClickDsp = true;
         perfClickMute = (clickNote <= 0);
         perfClickStartMs = Date.now();
+        /* Force a full step-LED redraw so the count-in click's steps (blue)
+         * replace any steps left lit by the previous song's last section.
+         * Do NOT clearStepLEDs() first — those black messages get wiped by
+         * ledQueue.length=0 in updateLEDs, leaving the old section's steps
+         * physically lit. Instead rely on stepRedrawAll + a forced click
+         * draw to overwrite every step. Also force a pad repaint so the new
+         * song's sections are coloured and other songs are greyed. */
+        stepLedsDirty = true;
+        stepRedrawAll = true;
+        ledDirtyAll = true;
         /* Compute the exact musical duration of the count-in. We use this
          * timer to start the real song on the next downbeat, instead of
          * waiting for the DSP's stopped_at_end flag, which fires slightly
          * early/late depending on clip-duration heuristics. */
         perfClickTotalMs = Math.round(clickBars * beatsPerBar * (60000 / bpm));
-        playCurrentSong();
+        /* Pass preloadStaged=true so playCurrentSong stages the full song into
+         * DSP staging AFTER the click's song_json loads (loading song_json
+         * clears staging, so preloading first would wipe it) but BEFORE play=1.
+         * This keeps the blocking preload off the audio path (no first-note
+         * blip) while leaving the staged full song intact for a sample-accurate
+         * click→song swap. */
+        perfClickSwapCounter = (lastDspTransport && lastDspTransport.swap_counter) || 0;
+        perfClickSongStaged = false;
+        playCurrentSong(true);
         return;
     }
     perfClickPlaying = false;
     playCurrentSong();
     perfFullSongLoaded = true; /* the full song timeline is now in the DSP */
+}
+
+/* Preload the real (full) performance song into the DSP staging timeline so
+ * it can be auto-swapped in the instant the count-in click ends. Mirrors the
+ * Jam-mode preload/swap mechanism. */
+function preloadPerfSongToStaging() {
+    if (!perfFullSong || typeof host_module_set_param !== "function") return;
+    const json = toEngineSongJson(perfFullSong);
+    if (typeof host_module_set_param_blocking === "function") {
+        host_module_set_param_blocking("preload_song_json", json, 500);
+        /* The staged song plays through once then stops (performance songs
+         * advance, they don't loop). */
+        host_module_set_param_blocking("loop", "0", 100);
+    } else {
+        host_module_set_param("preload_song_json", json);
+        host_module_set_param("loop", "0");
+    }
+    perfClickSongStaged = true;
 }
 
 /* Start a performance from the current setlist position. */
@@ -6322,12 +6540,27 @@ function perfQueueSection(sectionIndex) {
     if (sectionIndex === playbackSectionIndex && !perfPlaying) return;
     /* Replace any pending song jump. */
     perfQueuedSongIndex = -1;
-    /* Pressing the already-queued "next" section schedules it at the end of
-     * the current bar (presses=2); pressing a different (not queued) section
-     * schedules it at the end of the current section (presses=1). */
-    const isNext = (sectionIndex === perfNextSectionIndex());
-    perfQueuedSection = sectionIndex;
-    perfQueuedSectionPresses = isNext ? 2 : 1;
+    /* Section press semantics:
+     *  - a DIFFERENT (not queued) section queues a jump at the end of the
+     *    current section (presses=1);
+     *  - pressing the already-queued "next" section escalates to the end of
+     *    the current bar (presses=2);
+     *  - pressing the CURRENT playing section queues a repeat: the first
+     *    press fires it at the end of the section (presses=1), a second
+     *    press escalates it to the end of the current bar (presses=2).
+     * Both repeat presses target the current section's start, so after the
+     * jump fires (perfFireSectionJump clears perfQueuedSection) the display
+     * and pads fall through to the normal "next section" state. */
+    const isRepeat = (sectionIndex === playbackSectionIndex);
+    const isQueuedRepeat = isRepeat && perfQueuedSection === sectionIndex;
+    const isNext = (!isRepeat && sectionIndex === perfNextSectionIndex());
+    if (isQueuedRepeat) {
+        /* Second press on the current section: repeat at bar-end. */
+        perfQueuedSectionPresses = 2;
+    } else {
+        perfQueuedSection = sectionIndex;
+        perfQueuedSectionPresses = isNext ? 2 : 1;
+    }
     perfJumpPending = true;
     /* If the full song timeline is already in the DSP, schedule the seek
      * sample-accurately now at the correct musical boundary, so the jump lands
@@ -6335,11 +6568,20 @@ function perfQueueSection(sectionIndex) {
     if (perfFullSongLoaded && perfPlaying && lastDspTransport && lastDspTransport.running &&
         typeof host_module_set_param === "function") {
         const curBar = lastDspTransport.bar || 1;
+        /* Section-end boundaries can be fractional (perfSectionBarRange uses
+         * sectionBars, which accounts for beat-level trims). The DSP parses the
+         * boundary with strtod and converts to ticks, so it can fire exactly at
+         * the section seam (a fractional bar) — neither cutting the current
+         * section short (floor/truncate) nor bleeding into the next section
+         * (ceil). Send the raw fractional boundary bar. */
+        const sectionEnd = perfSectionBarRange(playbackSectionIndex)?.endBar;
         const boundaryBar0 = (perfQueuedSectionPresses >= 2)
             ? curBar /* bar-end: seek at end of the current bar */
-            : (perfSectionBarRange(playbackSectionIndex)?.endBar || curBar); /* section-end */
+            : (typeof sectionEnd === "number" ? sectionEnd : curBar);
         const targetRange = perfSectionBarRange(sectionIndex);
-        const targetBar = targetRange ? targetRange.startBar : 0;
+        /* Round the target bar UP so we don't land early and skip the start of
+         * the target section (the DSP seeks to whole bars only). */
+        const targetBar = targetRange ? Math.ceil(targetRange.startBar) : 0;
         /* seek_bar_scheduled = "<boundaryBar>:<targetBar>" (0-based bars). */
         host_module_set_param("seek_bar_scheduled", boundaryBar0 + ":" + targetBar);
         perfSeekScheduled = true;
@@ -6542,38 +6784,60 @@ function perfTick() {
      * see when relying on the host's stopped_at_end flag. */
     if (perfClickPlaying && perfClickDsp && perfClickTotalMs > 0) {
         if (Date.now() - perfClickStartMs >= perfClickTotalMs) {
-            logDebug("perfTick: timer-based click transition, starting song");
+            logDebug("perfTick: timer-based click transition");
             perfClickPlaying = false;
             perfClickMute = false;
-            if (perfLoadSong(perfSongIndex)) {
-                playCurrentSong();
+            /* The real song was preloaded into DSP staging during the click,
+             * so the DSP auto-swaps to it sample-accurately at the click's
+             * end. We must NOT call playCurrentSong() here — that would issue
+             * a blocking song_json rebuild (the audible gap between the last
+             * click beat and the song's downbeat). Just sync the UI song to
+             * the full song. */
+            if (perfFullSong) {
+                currentSong = JSON.parse(JSON.stringify(perfFullSong));
                 perfFullSongLoaded = true;
             }
             perfAdvancePending = false;
             needsRedraw = true;
             stepLedsDirty = true;
             stepRedrawAll = true;
+            /* Force a full pad repaint: the count-in click mode coloured the
+             * click pad / dimmed sections; the song now plays, so the pad grid
+             * must switch to the song-section colouring (active section
+             * mustard, current song coloured, others grey). */
+            ledDirtyAll = true;
             return;
         }
     }
 
     /* Song end detection: DSP reports stopped_at_end on a one-shot.
      * If this happens while the count-in click is still playing, treat it as
-     * the click-to-song transition (the timer above is the primary path, but
-     * the DSP may end the click clip slightly before our timer fires). */
+     * the click-to-song transition. With the song preloaded into staging the
+     * DSP auto-swaps; if staging wasn't ready for some reason, fall back to a
+     * blocking rebuild. */
     if (lastDspState && lastDspState.stopped_at_end) {
         if (perfClickPlaying && perfClickDsp) {
-            logDebug("perfTick: DSP click end fallback, starting song");
+            logDebug("perfTick: DSP click end fallback");
             perfClickPlaying = false;
             perfClickMute = false;
-            if (perfLoadSong(perfSongIndex)) {
-                playCurrentSong();
+            if (!perfClickSongStaged) {
+                /* Staging wasn't ready: blocking rebuild (rare fallback). */
+                if (perfLoadSong(perfSongIndex)) {
+                    playCurrentSong();
+                    perfFullSongLoaded = true;
+                }
+            } else if (perfFullSong) {
+                /* Song was preloaded; the DSP auto-swapped it. Sync the UI. */
+                currentSong = JSON.parse(JSON.stringify(perfFullSong));
                 perfFullSongLoaded = true;
             }
             perfAdvancePending = false;
             needsRedraw = true;
             stepLedsDirty = true;
             stepRedrawAll = true;
+            /* Force a full pad repaint so the grid leaves click mode and shows
+             * the song's section colouring. */
+            ledDirtyAll = true;
             return;
         }
         perfAdvancePending = true;
@@ -6603,9 +6867,14 @@ function perfTick() {
                 perfLastBarCounter = bc;
             }
         } else if (perfQueuedSection >= 0) {
-            /* presses=2 (the already-queued next section): fire at the end of
-             * the current bar. presses=1 (a different section): fire at the
-             * end of the current section. */
+            /* presses=2 (the already-queued next section / escalated repeat):
+             * fire at the end of the current bar. presses=1 (a different
+             * section, or a single-press repeat): fire at the end of the
+             * current section. A single-press REPEAT targets the same section
+             * (playbackSectionIndex never changes), so it is detected instead
+             * by the DSP's seek_counter: when the scheduled seek fires the
+             * section replays, and the queued state is cleared so the display
+             * and pads fall through to the next section. */
             if (perfQueuedSectionPresses >= 2) {
                 if (barChanged) {
                     perfFireSectionJump(perfQueuedSection);
@@ -6613,6 +6882,13 @@ function perfTick() {
                 }
             } else {
                 if (perfLastSection >= 0 && playbackSectionIndex !== perfLastSection && barChanged) {
+                    perfFireSectionJump(perfQueuedSection);
+                    perfLastBarCounter = bc;
+                } else if (perfQueuedSection === playbackSectionIndex &&
+                           (lastDspTransport.seek_counter || 0) > perfLastSeekCounter) {
+                    /* A repeat of the current section fired (the scheduled
+                     * seek applied in the DSP). Clear the queued state so the
+                     * next section becomes the highlighted one. */
                     perfFireSectionJump(perfQueuedSection);
                     perfLastBarCounter = bc;
                 }
@@ -6630,6 +6906,7 @@ function perfTick() {
         }
         perfLastBar = curPerfBar;
         perfLastBarCounter = lastDspTransport.bar_counter || 0;
+        perfLastSeekCounter = lastDspTransport.seek_counter || 0;
     }
     perfLastSection = playbackSectionIndex;
 
@@ -6714,7 +6991,7 @@ globalThis.init = function() {
     songFiles = listSongFiles();
     loadSettings();
     applyOutputSettingsToDsp();
-    logDebug("init: library_root=" + LIBRARY_ROOT + " folders=" + libraryFolders.length + " songs=" + songFiles.length +
+    logDebug("init: BUILD=" + UI_BUILD_VERSION + " library_root=" + LIBRARY_ROOT + " folders=" + libraryFolders.length + " songs=" + songFiles.length +
         " external_send=" + (typeof move_midi_external_send) + " shadow_send=" + (typeof shadow_send_midi_to_dsp));
     needsRedraw = true;
 };
@@ -6911,11 +7188,12 @@ globalThis.tick = function() {
     } else if (currentView === VIEW_JAM) {
         drawJamStepLEDs(false);
     }
-    /* Refresh the active performance pad flash in time with the beat, then
-     * flush so the flash message is not wiped by a later full redraw. */
-    if (currentView === VIEW_PERFORMANCE && perfPlaying) {
-        updatePerformancePadFlash();
-    }
+    /* Beat flash is shown on the STEP LEDs only (drawBuilderStepLEDs /
+     * drawClickStepLEDs above). The performance pads must NOT flash on the
+     * beat: updatePerformancePadFlash used to toggle the active pad
+     * white/mustard every beat, which overwrote the queued-repeat red on the
+     * current section's last bar. Pads are drawn statically by
+     * drawPerformanceLEDs (queued = white, last-bar imminent = red). */
     updateButtonLEDs();
     flushLedQueue();
 };
