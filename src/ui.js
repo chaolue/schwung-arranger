@@ -19,7 +19,7 @@ import {
     MoveStep1, MoveStep16,
     MovePad1, MovePad32,
     MoveRow1, MoveRow2, MoveRow3, MoveRow4,
-    Black, White, BrightRed, Mustard,
+    Black, White, BrightRed,
     WhiteLedOff, WhiteLedDim, WhiteLedBright,
     MovePads, MoveSteps
 } from '/data/UserData/schwung/shared/constants.mjs';
@@ -1933,7 +1933,7 @@ function updateButtonLEDs() {
                 break;
             case VIEW_PERF_SETLIST:
                 active.set(MoveBack, WhiteLedBright);
-                active.set(MoveMainButton, Mustard);
+                active.set(MoveMainButton, PureGreen);
                 break;
             case VIEW_PERFORMANCE:
                 active.set(MoveBack, WhiteLedBright);
@@ -2314,18 +2314,18 @@ function drawPerformanceLEDs(force) {
         if (item.kind === "click") {
             const isCurrent = item.songIndex === perfSongIndex;
             if (!perfPlaying) {
-                /* Stopped: only the "Now" queued item is white; the current
+                /* Stopped: only the "Now" queued item is puregreen; the current
                  * song's click is dim-blue, other songs' clicks are grey. */
-                desired[p] = isFirst ? White : (isCurrent ? CLICK_DIM_COLOUR : DarkGrey);
+                desired[p] = isFirst ? PureGreen : (isCurrent ? CLICK_DIM_COLOUR : DarkGrey);
             } else if (isNext) {
-                /* The next item to play (e.g. a queued song's click) is white
-                 * until its last bar, then purered (mirrors Jam mode). */
-                desired[p] = nextImminent ? PureRed : White;
+                /* The next item to play (e.g. a queued song's click) is
+                 * puregreen until its last bar, then purered (mirrors Jam
+                 * mode). */
+                desired[p] = nextImminent ? PureRed : PureGreen;
             } else if (isCurrent) {
-                /* The current song's click pad uses the same blue as the click
-                 * step LEDs; bright when the count-in is actively playing,
-                 * dim otherwise. */
-                desired[p] = inClick ? CLICK_COLOUR : CLICK_DIM_COLOUR;
+                /* The current song's click pad is white while the count-in is
+                 * actively playing, dim-blue otherwise. */
+                desired[p] = inClick ? White : CLICK_DIM_COLOUR;
             } else {
                 /* Other songs' clicks are uncoloured (grey). */
                 desired[p] = DarkGrey;
@@ -2337,25 +2337,25 @@ function drawPerformanceLEDs(force) {
         const isQueued = (!isCurrentSong && perfQueuedSongIndex === item.songIndex);
         if (!perfPlaying) {
             /* Stopped: current-song sections are coloured, other songs
-             * grey, and only the "Now" queued section is white. */
+             * grey, and only the "Now" queued section is puregreen. */
             if (isFirst) {
-                desired[p] = White;
+                desired[p] = PureGreen;
             } else if (isCurrentSong) {
                 desired[p] = sectionPadColor(item.sectionInfo.name, false);
             } else {
                 desired[p] = DarkGrey;
             }
         } else if (isQueued) {
-            desired[p] = White;
+            desired[p] = PureGreen;
         } else if (isNext) {
             /* The next section to play (including a queued repeat of the
-             * current section) is white until its last bar, then purered
+             * current section) is green until its last bar, then purered
              * (mirrors Jam mode's queued-clip behaviour). Checked before
              * isActive so a queued repeat of the playing section shows the
-             * queued colour instead of the plain active mustard. */
-            desired[p] = nextImminent ? PureRed : White;
+             * queued colour instead of the plain active white. */
+            desired[p] = nextImminent ? PureRed : PureGreen;
         } else if (isActive) {
-            desired[p] = Mustard;
+            desired[p] = White;
         } else if (isCurrentSong) {
             /* Current song but not currently playing: section colour. */
             desired[p] = sectionPadColor(item.sectionInfo.name, false);
@@ -2782,23 +2782,23 @@ function drawJamLEDs() {
                 /* The current groove is queued for a bar-end restart: red. */
                 desired[p] = PureRed;
             } else if (isCurrent) {
-                /* The current playing clip is green, turning red on its last
+                /* The current playing clip is white, turning red on its last
                  * bar only when it is about to loop AND no other clip is
                  * queued to take over. A fill never loops; a queued fill or a
-                 * queued groove interrupts the loop, so it stays green. */
+                 * queued groove interrupts the loop, so it stays white. */
                 const willLoop = jamCurrentClip.type !== "fill" &&
                     jamQueue.length === 0 && !jamQueuedGroove;
-                desired[p] = (imminent && willLoop) ? PureRed : Mustard;
+                desired[p] = (imminent && willLoop) ? PureRed : White;
             } else if (isQueued) {
-                /* A queued groove is white, turning red only when it is within
-                 * one bar of playing (escalated bar-end, or the current clip
-                 * is in its last bar). */
-                desired[p] = (jamQueuedGrooveEscalated || imminent) ? PureRed : White;
+                /* A queued groove is green, turning red only when it is
+                 * within one bar of playing (escalated bar-end, or the current
+                 * clip is in its last bar). */
+                desired[p] = (jamQueuedGrooveEscalated || imminent) ? PureRed : PureGreen;
             } else if (isReturn) {
-                /* A fill is playing and this is the return groove: white until
-                 * the fill's last bar (imminent return), then red. If the user
-                 * pressed it to restart from the start, show blue. */
-                desired[p] = jamReturnFromStart ? PureBlue : (imminent ? PureRed : White);
+                /* A fill is playing and this is the return groove: green
+                 * until the fill's last bar (imminent return), then red. If
+                 * the user pressed it to restart from the start, show blue. */
+                desired[p] = jamReturnFromStart ? PureBlue : (imminent ? PureRed : PureGreen);
             } else {
                 desired[p] = clipColor(clip, false);
             }
@@ -2817,13 +2817,13 @@ function drawJamLEDs() {
             if (!clip) continue;
             const p = r * 8 + (4 + c);
             if (jamCurrentClip && jamCurrentClip.path === clip.path) {
-                desired[p] = Mustard;
+                desired[p] = White;
             } else if (nextFill && nextFill.path === clip.path) {
                 /* The next fill plays at the next bar, so it is red. */
                 desired[p] = PureRed;
             } else if (jamQueue.some(q => q.path === clip.path)) {
-                /* A fill queued further back: white. */
-                desired[p] = White;
+                /* A fill queued further back: green. */
+                desired[p] = PureGreen;
             } else {
                 desired[p] = clipColor(clip, false);
             }
@@ -4965,6 +4965,9 @@ function handlePerfSetlistInput(cc, value) {
             perfSongIndex = 0;
             perfPlaying = false;
             perfDisplayIndex = 0;
+            /* Re-entering perform mode starts the pad window at the top. */
+            perfScrollRow = 0;
+            perfManualScroll = false;
             /* Load the first playable song immediately so the display and step
              * LEDs reflect real section data before Play is pressed. */
             const firstPlayable = perfNextPlayable(0);
@@ -6856,7 +6859,7 @@ function perfTick() {
             /* Force a full pad repaint: the count-in click mode coloured the
              * click pad / dimmed sections; the song now plays, so the pad grid
              * must switch to the song-section colouring (active section
-             * mustard, current song coloured, others grey). */
+             * green, current song coloured, others grey). */
             ledDirtyAll = true;
             return;
         }
@@ -7244,7 +7247,7 @@ globalThis.tick = function() {
     /* Beat flash is shown on the STEP LEDs only (drawBuilderStepLEDs /
      * drawClickStepLEDs above). The performance pads must NOT flash on the
      * beat: updatePerformancePadFlash used to toggle the active pad
-     * white/mustard every beat, which overwrote the queued-repeat red on the
+     * white/green every beat, which overwrote the queued-repeat red on the
      * current section's last bar. Pads are drawn statically by
      * drawPerformanceLEDs (queued = white, last-bar imminent = red). */
     updateButtonLEDs();
