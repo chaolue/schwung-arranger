@@ -412,10 +412,14 @@ function writeJson(path, obj) {
 /* Generate a click MIDI file (a single note per beat, for `bars` bars) and
  * write it to the given path. Returns true on success. The click note is
  * `note` (0 = no note, pad-flash only). */
-function writeClickMidi(path, note, beatsPerBar, division, bars) {
+function writeClickMidi(path, note, beatsPerBar, division, bars, ticksPerBeat) {
     if (note <= 0) return false;
     const ppq = division || 240;
-    const ticksPerBeat = ppq;
+    /* The DSP's ticks_per_beat is ppq * 4 / time_sig_den (e.g. 120 for 6/8 at
+     * ppq 240), so the click notes must be spaced at that interval to land on
+     * the DSP's beats. Defaulting to ppq would place them a quarter-note apart
+     * and turn a 6/8 click into 6/4. */
+    const tpb = ticksPerBeat || ppq;
     const totalBeats = Math.max(1, (bars || 1)) * beatsPerBar;
     const bytes = [];
     const push = (b) => bytes.push(b & 0xFF);
@@ -439,19 +443,19 @@ function writeClickMidi(path, note, beatsPerBar, division, bars) {
      * same duration so each downbeat stays exactly ticksPerBeat apart. The
      * final click is held almost to the next downbeat so the DSP clip ends
      * exactly at the bar boundary without needing an extra silent tail event. */
-    const clickDuration = Math.min(ticksPerBeat - 1, Math.max(24, Math.floor(ticksPerBeat / 4)));
-    const finalBarTick = totalBeats * ticksPerBeat;
+    const clickDuration = Math.min(tpb - 1, Math.max(24, Math.floor(tpb / 4)));
+    const finalBarTick = totalBeats * tpb;
     /* Accent (louder) velocity for the first beat of each bar (downbeat), so
      * the count-in helps the player feel the bar grouping. Regular beats use
      * a quieter velocity. */
     const ACCENT_VELOCITY = 120;
     const BEAT_VELOCITY = 92;
     for (let b = 0; b < totalBeats; b++) {
-        const delta = (b === 0) ? 0 : Math.max(1, ticksPerBeat - clickDuration);
+        const delta = (b === 0) ? 0 : Math.max(1, tpb - clickDuration);
         pushVlq(delta);
         const isDownbeat = (b % beatsPerBar === 0);
         push(0x90); push(note); push(isDownbeat ? ACCENT_VELOCITY : BEAT_VELOCITY); /* note-on */
-        const duration = (b === totalBeats - 1) ? Math.max(1, finalBarTick - b * ticksPerBeat - 1) : clickDuration;
+        const duration = (b === totalBeats - 1) ? Math.max(1, finalBarTick - b * tpb - 1) : clickDuration;
         pushVlq(duration);
         push(0x80); push(note); push(0);   /* note-off */
     }
@@ -1182,6 +1186,11 @@ function generateClickForEntry(entry) {
     const beatsPerBar = song.time_sig_num || 4;
     const ppq = song.ppq || 240;
     const note = (entry.click_note || 0) > 0 ? entry.click_note : 1;
+    /* The DSP's ticks_per_beat is ppq * 4 / time_sig_den (e.g. 120 for 6/8 at
+     * ppq 240). The click notes must be spaced at this interval so they land on
+     * the DSP's beats; spacing them a quarter-note (ppq) apart would turn a
+     * 6/8 click into 6/4. */
+    const ticksPerBeat = Math.max(1, Math.round(ppq * 4 / (song.time_sig_den || 4)));
     /* Unique per-edit path so the DSP reloads the clip on click changes. When
      * the click settings change, entryClickRevision bumps click_rev -> a new
      * path -> this regenerates. The file's content also depends on the song's
@@ -1197,7 +1206,7 @@ function generateClickForEntry(entry) {
         entry.click_path = path;
         return path;
     }
-    if (writeClickMidi(path, note, beatsPerBar, ppq, bars)) {
+    if (writeClickMidi(path, note, beatsPerBar, ppq, bars, ticksPerBeat)) {
         entry.click_path = path;
         return path;
     }
