@@ -170,6 +170,7 @@ let trimPendingSnareNote = 38;
 let trimPendingSnareVelocityScale = 1.0;
 let trimPendingKickNote = 36;
 let trimPendingKickTarget = 0;
+let trimPendingChannel = 0;   /* per-clip MIDI out channel: 0 = follow Options, 1-16 = explicit */
 let trimAdvanced = false;
 let trimOriginalStart = 0;
 let trimOriginalStartBeat = 0;
@@ -182,6 +183,7 @@ let trimOriginalSnareNote = 38;
 let trimOriginalSnareVelocityScale = 1.0;
 let trimOriginalKickNote = 36;
 let trimOriginalKickTarget = 0;
+let trimOriginalChannel = 0;
 /* The clip object being edited in the trim view. Captured when the view opens
  * so a section auto-advance during playback doesn't switch the edit to a clip
  * in the new section. */
@@ -3294,6 +3296,10 @@ function openTrimView() {
     trimPendingSnareVelocityScale = trimOriginalSnareVelocityScale;
     trimPendingKickNote = (clip.kick_note !== undefined) ? clip.kick_note : 36;
     trimPendingKickTarget = (clip.kick_target !== undefined) ? clip.kick_target : 0;
+    /* Per-clip MIDI out channel: 0 = follow the Options output channel,
+     * 1-16 = explicit override for this clip only. */
+    trimOriginalChannel = (clip.channel !== undefined) ? clip.channel : 0;
+    trimPendingChannel = trimOriginalChannel;
     currentView = VIEW_TRIM;
     menuStack.push({ title: clipShortName(clip) || "Clip Settings", selectedIndex: 0 });
     needsRedraw = true;
@@ -3391,6 +3397,7 @@ function drawTrim() {
     items.push({ key: "snare_velocity", label: "Single Note Vel", value: Math.round(trimPendingSnareVelocityScale * 100) + "%" });
     items.push({ key: "kick_note", label: "Limit Note", value: trimPendingKickNote === 0 ? "Off" : String(trimPendingKickNote) });
     items.push({ key: "kick_target", label: "Limit Notes/Bar", value: trimPendingKickTarget === 0 ? "Off" : String(trimPendingKickTarget) });
+    items.push({ key: "channel", label: "MIDI Channel", value: trimPendingChannel === 0 ? "Default" : String(trimPendingChannel) });
     drawMenuList({
         items,
         selectedIndex,
@@ -3417,7 +3424,8 @@ function commitTrim(pending) {
         snare_note: trimPendingSnareNote,
         snare_velocity: trimPendingSnareVelocityScale,
         kick_note: trimPendingKickNote,
-        kick_target: trimPendingKickTarget
+        kick_target: trimPendingKickTarget,
+        channel: trimPendingChannel
     };
     clip.guard_fraction = Math.max(0, Math.min(0.5, p.guard));
     clip.speed = Math.max(0.25, Math.min(4.0, p.speed));
@@ -3453,7 +3461,10 @@ function commitTrim(pending) {
     clip.snare_velocity_scale = Math.max(0.0, Math.min(2.0, p.snare_velocity));
     clip.kick_note = Math.max(0, Math.min(127, Math.round(p.kick_note)));
     clip.kick_target = Math.max(0, Math.min(16, Math.round(p.kick_target)));
-    logDebug("commitTrim: clip=" + clipShortName(clip) + " start=" + clip.start_bar + "." + clip.start_beat + " end=" + clip.end_bar + "." + clip.end_beat + " adv=" + (p.advanced ? 1 : 0) + " guard=" + clip.guard_fraction + " speed=" + clip.speed + " vel=" + clip.velocity_scale + " snare=" + clip.snare_note + " snareVel=" + clip.snare_velocity_scale + " kick=" + clip.kick_note + "/" + clip.kick_target);
+    /* Per-clip MIDI out channel: 0 = follow the Options output channel,
+     * 1-16 = explicit override for this clip only. */
+    clip.channel = Math.max(0, Math.min(16, Math.round(p.channel)));
+    logDebug("commitTrim: clip=" + clipShortName(clip) + " start=" + clip.start_bar + "." + clip.start_beat + " end=" + clip.end_bar + "." + clip.end_beat + " adv=" + (p.advanced ? 1 : 0) + " guard=" + clip.guard_fraction + " speed=" + clip.speed + " vel=" + clip.velocity_scale + " snare=" + clip.snare_note + " snareVel=" + clip.snare_velocity_scale + " kick=" + clip.kick_note + "/" + clip.kick_target + " ch=" + clip.channel);
     unsavedChanges = true;
     menuStack.pop();
     currentView = VIEW_BUILDER;
@@ -3469,8 +3480,8 @@ function handleTrimInput(cc, value) {
     const bpb = trimBeatsPerBar();
     let selectedIndex = menuStack.getSelectedIndex();
     const fields = trimAdvanced
-        ? ["advanced", "start", "start_beat", "end", "end_beat", "guard", "speed", "velocity", "snare_note", "snare_velocity", "kick_note", "kick_target"]
-        : ["advanced", "start", "end", "guard", "speed", "velocity", "snare_note", "snare_velocity", "kick_note", "kick_target"];
+        ? ["advanced", "start", "start_beat", "end", "end_beat", "guard", "speed", "velocity", "snare_note", "snare_velocity", "kick_note", "kick_target", "channel"]
+        : ["advanced", "start", "end", "guard", "speed", "velocity", "snare_note", "snare_velocity", "kick_note", "kick_target", "channel"];
     let field = fields[selectedIndex];
     if (cc === MoveMainKnob) {
         const delta = decodeDelta(value);
@@ -3517,6 +3528,10 @@ function handleTrimInput(cc, value) {
                 trimPendingKickNote = Math.max(0, Math.min(127, trimPendingKickNote + delta));
             } else if (field === "kick_target") {
                 trimPendingKickTarget = Math.max(0, Math.min(16, trimPendingKickTarget + delta));
+            } else if (field === "channel") {
+                /* Per-clip MIDI out channel: 0 = follow the Options output
+                 * channel, 1-16 = explicit override for this clip only. */
+                trimPendingChannel = Math.max(0, Math.min(16, trimPendingChannel + delta));
             }
         } else {
             const newIdx = Math.max(0, Math.min(fields.length - 1, selectedIndex + delta));
@@ -3552,6 +3567,7 @@ function handleTrimInput(cc, value) {
             else if (field === "snare_velocity") trimPendingSnareVelocityScale = trimOriginalSnareVelocityScale;
             else if (field === "kick_note") trimPendingKickNote = trimOriginalKickNote;
             else if (field === "kick_target") trimPendingKickTarget = trimOriginalKickTarget;
+            else if (field === "channel") trimPendingChannel = trimOriginalChannel;
             trimEditing = false;
             needsRedraw = true;
         } else {
@@ -3568,7 +3584,8 @@ function handleTrimInput(cc, value) {
                 snare_note: trimPendingSnareNote,
                 snare_velocity: trimPendingSnareVelocityScale,
                 kick_note: trimPendingKickNote,
-                kick_target: trimPendingKickTarget
+                kick_target: trimPendingKickTarget,
+                channel: trimPendingChannel
             };
             commitTrim(pending);
             saveCurrentSong();
@@ -6318,7 +6335,10 @@ function previewClipAtCursor() {
         snare_note: c.snare_note,
         snare_velocity_scale: c.snare_velocity_scale,
         kick_note: c.kick_note,
-        kick_target: c.kick_target
+        kick_target: c.kick_target,
+        /* Carry the per-clip MIDI out channel override so a clip with a
+         * modified channel keeps it when played from the cursor. */
+        channel: c.channel !== undefined ? c.channel : 0
     }));
     const temp = JSON.parse(JSON.stringify(currentSong));
     temp.sections = JSON.parse(JSON.stringify(currentSong.sections.slice(currentSectionIndex)));
@@ -6547,7 +6567,7 @@ function perfStart() {
         const sectionIndex = perfSelectedSection;
         if (sectionIndex < perfFullSong.sections.length) {
             logDebug("PERFSTART jump to selected section=" + sectionIndex);
-            perfClearSelection();
+        perfClearSelection();
             perfFireSectionJump(sectionIndex);
         } else {
             logDebug("PERFSTART selected section out of range, playing from start");
