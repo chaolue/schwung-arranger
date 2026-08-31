@@ -129,6 +129,7 @@ let builderCursor = 0;  /* insertion cursor position within current section */
 let previewingClip = null; /* clip currently held for preview */
 let previewingFile = null;   /* file being previewed, set in buildTimeline */
 let previewStartTime = 0;
+let previewCursorBefore = 0; /* builder cursor before a pad preview, restored on release */
 
 let playbackState = "stopped";
 let playbackStartTime = 0;
@@ -1613,8 +1614,11 @@ function updateDspState() {
     /* While playing a multi-section preview, follow the DSP playhead so the
      * screen and step LEDs switch to whichever section is currently playing.
      * Map against the full original song (perfFullSong) so section indices are
-     * stable even when the DSP is playing a sliced one-shot timeline. */
-    if (playbackState === "playing" && lastDspTransport && lastDspTransport.running) {
+     * stable even when the DSP is playing a sliced one-shot timeline.
+     * Skip while a pad preview is active: the preview is a single-clip
+     * audition and following it would reset the builder cursor to the first
+     * clip, changing the highlighted clip the user is previewing. */
+    if (playbackState === "playing" && lastDspTransport && lastDspTransport.running && !padPreviewClip) {
         /* Use the fractional bar position (bar_frac, 0-based) so a clip that
          * ends mid-bar (Advanced Trim / speed) switches sections at the exact
          * musical boundary instead of the next integer bar. */
@@ -1808,8 +1812,12 @@ function updateButtonLEDs() {
                 const ledOnClip = ledSec && builderCursor >= 0 && builderCursor < ledSec.clips.length;
                 const ledOnSection = builderCursor === -1;
                 const ledOnInsert = ledSec && ledSec.clips.length === 0 && builderCursor === 0;
-                const ledHasLeftSection = !!(currentSong && currentSectionIndex > 0);
-                const ledHasRightSection = !!(currentSong && currentSong.sections && currentSectionIndex < currentSong.sections.length - 1);
+                /* Use the displayed section (auto-followed/jumped during
+                 * playback) so the left/right arrow LEDs reflect the section
+                 * actually shown, not the stale currentSectionIndex. */
+                const ledSectionIndex = builderDisplaySectionIndex();
+                const ledHasLeftSection = !!(currentSong && ledSectionIndex > 0);
+                const ledHasRightSection = !!(currentSong && currentSong.sections && ledSectionIndex < currentSong.sections.length - 1);
                 const ledTotalPages = builderPageCount();
                 const ledHasUp = builderPage > 0;
                 const ledHasDown = builderPage < ledTotalPages - 1;
@@ -6156,6 +6164,9 @@ function handleBuilderPad(note, velocity) {
         padPreviewTriggerTime = Date.now();
         padPreviewScheduled = false;
         previewStartTime = 0;
+        /* Remember the cursor so releasing the preview restores the same
+         * highlighted clip (stopPlayback resets builderCursor to 0). */
+        previewCursorBefore = builderCursor;
         logDebug("handleBuilderPad press clip=" + clip.name + " bars=" + padPreviewBars + " pad=" + padIndex);
         /* Light only the pressed pad; do not trigger a full redraw. */
         const dimColour = clipColor(clip, true);
@@ -6173,6 +6184,10 @@ function handleBuilderPad(note, velocity) {
             /* Suppress the all-steps clear flash for a tick after the preview
              * ends so the section steps don't blink black before repainting. */
             padPreviewStopping = true;
+            /* stopPlayback reset builderCursor to 0; restore the clip that was
+             * highlighted before the preview so it doesn't jump to the first
+             * clip on release. */
+            builderCursor = previewCursorBefore;
         }
         if (padPreviewClip && !padPreviewScheduled) {
             /* Released before preview delay elapsed -> short tap insert only. */
