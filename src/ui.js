@@ -8,7 +8,7 @@
  * confirmed from the logs (see init()/playCurrentSong()) instead of guessing
  * whether a new file actually loaded. Keep the DSP dsp_build_version in
  * arranger_engine.c in sync so both sides are verifiable. */
-const UI_BUILD_VERSION = "arranger-ui-2026-08-28h";
+const UI_BUILD_VERSION = "arranger-ui-2026-09-01a";
 
 import {
     MidiNoteOn, MidiNoteOff, MidiCC,
@@ -259,6 +259,7 @@ let lastTransportBar = 0;     /* last bar number seen from DSP transport */
 let maxBeatThisBar = 0;       /* highest transport beat seen in current bar */
 let transportBeatsPerBar = 0; /* observed transport beats in last complete bar */
 let lastSubdivisionIndex = 0; /* current subdivision within transport beat */
+let lastSubFlashMs = 0;       /* wall-clock anchor of the current sub-beat flash */
 
 /* Performance / setlist playback state */
 let perfPlaying = false;            /* is the setlist advancing on its own */
@@ -496,6 +497,7 @@ function writeClickMidi(path, note, beatsPerBar, division, bars, ticksPerBeat) {
  * path and does not reload a file it has already parsed, so we must use a
  * fresh filename each time to pick up timing changes in the generated click. */
 let clickMidiPath = "/data/UserData/UserLibrary/Arranger/.click.mid";
+const CLICK_DIR = "/data/UserData/UserLibrary/Arranger";
 
 const DEBUG_LOG_PATH = "/data/UserData/UserLibrary/Arranger/.arranger_log";
 const CLICK_LOG_PATH = "/data/UserData/UserLibrary/Arranger/.clickflash_log";
@@ -1186,32 +1188,67 @@ function generateClickForEntry(entry) {
     const beatsPerBar = song.time_sig_num || 4;
     const ppq = song.ppq || 240;
     const note = (entry.click_note || 0) > 0 ? entry.click_note : 1;
-    /* The DSP's ticks_per_beat is ppq * 4 / time_sig_den (e.g. 120 for 6/8 at
-     * ppq 240). The click notes must be spaced at this interval so they land on
-     * the DSP's beats; spacing them a quarter-note (ppq) apart would turn a
-     * 6/8 click into 6/4. */
+    /* The DSP's ticks_per_beat is the MIDI ppq, and the click notes must be
+     * spaced at the DSP's beats so they land on them. For 6/8 the DSP reports
+     * a quarter-note beat (ppq) but there are 6 eighth-note clicks per bar, so
+     * the click note interval is ppq / (num*4/den... ) — this note spacing is
+     * handled by writeClickMidi via ticksPerBeat below. */
     const ticksPerBeat = Math.max(1, Math.round(ppq * 4 / (song.time_sig_den || 4)));
     /* Unique per-edit path so the DSP reloads the clip on click changes. When
      * the click settings change, entryClickRevision bumps click_rev -> a new
      * path -> this regenerates. The file's content also depends on the song's
-     * time signature (beatsPerBar) and division (ppq), both baked into the
-     * MIDI header/beat count, so those are folded into the path too — editing
-     * a song's time signature/division in the Builder (without touching the
-     * setlist click settings) becomes a cache miss and regenerates. If the
-     * current-revision file already exists (unchanged settings, already
-     * written), reuse it instead of rewriting. */
-    const path = "/data/UserData/UserLibrary/Arranger/.click-" + (entry.id || "setlist") +
-        "-" + (entry.click_rev || 0) + "-" + beatsPerBar + "x" + ppq + ".mid";
+     * time signature (beatsPerBar), division (ppq) and beat spacing
+     * (ticksPerBeat), so those are folded into the path too — the DSP caches
+     * clips by full path and won't reload a file with the same path even if
+     * its bytes change. If the current-revision file already exists
+     * (unchanged settings, already written), reuse it instead of rewriting. */
+    const path = CLICK_DIR + "/.click-" + (entry.id || "setlist") +
+        "-" + (entry.click_rev || 0) + "-" + beatsPerBar + "x" + ppq +
+        "t" + ticksPerBeat + ".mid";
     if (typeof host_file_exists === "function" && host_file_exists(path)) {
         entry.click_path = path;
         return path;
     }
     if (writeClickMidi(path, note, beatsPerBar, ppq, bars, ticksPerBeat)) {
         entry.click_path = path;
+        pruneOldClickFiles();
         return path;
     }
     entry.click_path = "";
     return null;
+}
+
+/* Delete obsolete generated click MIDI files so they don't accumulate. Every
+ * live-click file referenced by any setlist entry (via entry.click_path), plus
+ * the currently-active click path, is kept; any other .click-*.mid is a stale
+ * revision and is removed. Cheap enough to run on each click file write. */
+function pruneOldClickFiles() {
+    if (typeof os.readdir !== "function" || typeof os.remove !== "function") return;
+    const keep = new Set();
+    const harvest = (list) => {
+        if (!list || !list.songs) return;
+        for (const e of list.songs) {
+            if (e && e.click_path) keep.add(e.click_path);
+        }
+    };
+    harvest(currentSetlist);
+    for (const d of setlistFiles) {
+        if (!d || !d.path) continue;
+        harvest(readJson(d.path));
+    }
+    if (clickMidiPath) keep.add(clickMidiPath);
+    let names = [];
+    try {
+        const raw = os.readdir(CLICK_DIR);
+        if (Array.isArray(raw)) names = Array.isArray(raw[0]) ? raw[0] : raw;
+    } catch (e) { return; }
+    for (const name of names) {
+        if (!name || name.indexOf(".click-") !== 0 || !name.endsWith(".mid")) continue;
+        const full = CLICK_DIR + "/" + name;
+        if (!keep.has(full)) {
+            try { os.remove(full); } catch (e) {}
+        }
+    }
 }
 
 /* Regenerate the count-in click MIDI file for every song in the setlist that
@@ -2424,6 +2461,7 @@ function resetStepFlash() {
     maxBeatThisBar = 0;
     transportBeatsPerBar = 0;
     lastSubdivisionIndex = 0;
+    lastSubFlashMs = 0;
 }
 
 function updateStepFlash(currentBar, currentBeat, bpm, beatsPerBar) {
@@ -2450,21 +2488,36 @@ function updateStepFlash(currentBar, currentBeat, bpm, beatsPerBar) {
 
     const beatDurationMs = 60000.0 / (bpm || 120);
 
-    /* Latch the flash on the sample-accurate beat change, then blink: on for
-     * ~35% of the beat, off for the rest. The DSP's beat_flash flag is only
-     * true for ~35% of each beat and the UI polls at ~1s intervals, so relying
-     * on it directly drops flashes when the poll misses that brief window.
-     * Latching on the beat number (reported sample-accurately) guarantees every
-     * beat blinks, anchored to the real beat start. */
+    /* In compound meters the DSP reports fewer transport beats than the written
+     * time signature (6/8 -> 3 quarter-note beats/bar), but the step LED must
+     * flash on the full time_sig_num beats (6 for 6/8). Subdivide each quarter
+     * transport beat into subdivs = beatsPerBar / transportBeatsPerBar (6/3=2)
+     * and flash once per sub-beat, using the DSP's sample-accurate beat_progress
+     * to anchor each subdivision so all sub-beats stay in time. */
+    const subdiv = (beatsPerBar > 0 && transportBeatsPerBar > 0)
+        ? Math.max(1, Math.round(beatsPerBar / transportBeatsPerBar))
+        : 1;
+    const subDivDurationMs = beatDurationMs / subdiv;
+    const beatProgress = (lastDspTransport && lastDspTransport.running)
+        ? (lastDspTransport.beat_progress || 0) : 0;
+    const subIndex = Math.max(0, Math.min(subdiv - 1, Math.floor(beatProgress * subdiv)));
+
     if (beatChanged) {
         lastStepBeatKey = beatKey;
         lastBeatFlashMs = nowMs;
         lastSubdivisionIndex = 0;
-        logDebug("stepflash bar=" + currentBar + " beat=" + currentBeat + " bpb=" + beatsPerBar + " t=" + nowMs);
+        lastSubFlashMs = nowMs;
+        logDebug("stepflash bar=" + currentBar + " beat=" + currentBeat + " bpb=" + beatsPerBar +
+            " subdiv=" + subdiv + " t=" + nowMs);
+    }
+    if (subIndex !== lastSubdivisionIndex) {
+        lastSubdivisionIndex = subIndex;
+        lastSubFlashMs = nowMs;
     }
 
-    const elapsedInBeat = nowMs - lastBeatFlashMs;
-    const onMs = Math.min(Math.max(beatDurationMs * 0.35, 80), 220);
+    /* Blink each sub-beat: on for ~45% of the sub-division, off for the rest. */
+    const elapsedInBeat = nowMs - lastSubFlashMs;
+    const onMs = Math.min(Math.max(subDivDurationMs * 0.45, 80), 220);
     return elapsedInBeat < onMs;
 }
 
@@ -6474,7 +6527,11 @@ function perfPlayCurrent() {
     perfClickDsp = false;
     perfClickMute = false;
     if (clickBars > 0) {
-        const beatsPerBar = currentSong.time_sig_num || 4;
+        /* The DSP's ticks_per_beat is the MIDI ppq, and a bar contains
+         * num*4/den quarter-note beats (3 for 6/8, 4 for 4/4), so the count-in
+         * audio lasts clicksInQtrBeats = clickBars * num*4/den quarter notes.
+         * time_sig_num itself (6) would double the timer for compound meters. */
+        const qtrBeatsPerBar = (currentSong.time_sig_num || 4) * 4 / (currentSong.time_sig_den || 4);
         const bpm = currentSong.tempo_bpm || 120;
         /* Ensure the click MIDI file exists for the current revision. The file
          * is cached by a revision-based path; generateClickForEntry only
@@ -6527,7 +6584,7 @@ function perfPlayCurrent() {
          * timer to start the real song on the next downbeat, instead of
          * waiting for the DSP's stopped_at_end flag, which fires slightly
          * early/late depending on clip-duration heuristics. */
-        perfClickTotalMs = Math.round(clickBars * beatsPerBar * (60000 / bpm));
+        perfClickTotalMs = Math.round(clickBars * qtrBeatsPerBar * (60000 / bpm));
         /* Pass preloadStaged=true so playCurrentSong stages the full song into
          * DSP staging AFTER the click's song_json loads (loading song_json
          * clears staging, so preloading first would wipe it) but BEFORE play=1.
@@ -6542,6 +6599,16 @@ function perfPlayCurrent() {
     perfClickPlaying = false;
     playCurrentSong();
     perfFullSongLoaded = true; /* the full song timeline is now in the DSP */
+    /* Force a full step-LED repaint so the new song's first section replaces
+     * the previous song's last-section steps. Without stepRedrawAll the draw
+     * runs with force=false and only changes steps whose colour differs, so
+     * leftover steps (e.g. a shorter new first section) stay lit from the old
+     * song. The click branch above already does this; the no-click path must
+     * too. */
+    stepScrollOffset = 0;
+    resetStepFlash();
+    stepRedrawAll = true;
+    stepLedsDirty = true;
 }
 
 /* Preload the real (full) performance song into the DSP staging timeline so
