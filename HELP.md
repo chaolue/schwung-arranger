@@ -100,6 +100,7 @@ Adjust clip start/end, guard window, speed, velocity, single note velocity and t
 | Single Note Vel | Single note velocity scale (0% = remove, 100% = unchanged, up to 200%) |
 | Limit Note | Note to thin (set to a note number, e.g. 36; 0 = off) |
 | Limit Notes/Bar | Max note hits to keep per bar (0 = off). For example, for kicks, on strong beats (1, plus 3 in 4/4 / 4 in 6/8) are always kept; extra kicks nearest to other kicks are dropped first. |
+| MIDI Channel | Per-clip MIDI out channel override: **Default** follows the Options output channel, or set 1–16 to route this clip to a specific channel |
 
 
 **Button LED hints:** Back and Main are lit.

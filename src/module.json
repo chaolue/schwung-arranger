@@ -2,7 +2,7 @@
   "id": "arranger",
   "name": "Arranger",
   "abbrev": "ARR",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Build songs from a MIDI drum-clip library and perform them live. There are many free MIDIs at https://groovemonkee.com/pages/beat-farm-free-midi-beats",
   "author": "chaolue",
   "license": "MIT",
