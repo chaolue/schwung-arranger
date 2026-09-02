@@ -1320,11 +1320,23 @@ function playCurrentSong(preloadStaged) {
             " bars=" + (dspTimelineInfo ? dspTimelineInfo.total_bars : "?") + " t=" + Date.now());
         logDebug("playCurrentSong: BUILD=" + UI_BUILD_VERSION + " song=" + currentSong.name + " sections=" + secCount + " clips=" + clipCount + " json_len=" + json.length + " output=" + outputTarget);
         logDebug("playCurrentSong json=" + json.slice(0, 600));
+        /* The song_json → loop → play sequence MUST be delivered in order and
+         * fully consumed before the next write. host_module_set_param is
+         * fire-and-forget over a SINGLE shared shadow_param SHM slot, so a
+         * later write clobbers an earlier one before it is consumed. The DSP
+         * log showed song_json arriving and building (a ~600ms build for a
+         * large song) but the subsequent `play` write being dropped — the song
+         * built but never started. Use the BLOCKING variant so each write is
+         * fully processed before the next, guaranteeing `play` reaches the DSP
+         * after the timeline is ready. */
+        const block = typeof host_module_set_param_blocking === "function";
+        const set = block ? host_module_set_param_blocking : host_module_set_param;
+        const t = block ? 500 : undefined;
         /* Ensure library_root is set first so clip resolution works. */
-        host_module_set_param("library_root", LIBRARY_ROOT);
+        set("library_root", LIBRARY_ROOT, t);
         pushOutputRoutingToDsp();
-        host_module_set_param("loop", "0");
-        host_module_set_param("song_json", json);
+        set("loop", "0", t);
+        set("song_json", json, t);
         if (typeof host_module_get_param === "function") {
             const afterJsonErr = host_module_get_param("error");
             const afterJsonInfo = host_module_get_param("timeline_info");
@@ -1339,8 +1351,8 @@ function playCurrentSong(preloadStaged) {
         if (preloadStaged) {
             preloadPerfSongToStaging();
         }
-        host_module_set_param("loop", dspLoopEnabled ? "1" : "0");
-        host_module_set_param("play", "1");
+        set("loop", dspLoopEnabled ? "1" : "0", t);
+        set("play", "1", t);
         if (typeof host_module_get_param === "function") {
             const info = host_module_get_param("timeline_info");
             const err = host_module_get_param("error");
@@ -1503,6 +1515,11 @@ function updateDspState() {
              * in that case the guard below would otherwise skip this and leave
              * the pad stuck red. */
             if (matched.type !== "fill") {
+                /* Capture whether a fill was playing and the return-groove path
+                 * BEFORE jamCurrentClip is overwritten with the matched groove,
+                 * so the same-groove guard below can keep the fill page. */
+                const wasFillPlaying = !!(jamCurrentClip && jamCurrentClip.type === "fill");
+                const returnGroovePath = jamReturnGroove ? jamReturnGroove.path : null;
                 jamCurrentClip = matched;
                 jamCurrentType = matched.type || "groove";
                 jamReturnGroove = matched;
@@ -1514,7 +1531,13 @@ function updateDspState() {
                 jamQueue = [];
                 jamScheduledSwap = null;
                 jamScheduledSwapBar = -1;
-                jamFillScroll = 0;
+                /* Returning to the same groove after a fill: keep the fill page
+                 * where it is instead of resetting to the start. */
+                const returningToSameGroove = wasFillPlaying && returnGroovePath &&
+                    matched.path === returnGroovePath;
+                if (!returningToSameGroove) {
+                    jamFillScroll = 0;
+                }
                 resetStepFlash();
                 needsRedraw = true;
                 stepLedsDirty = true;
@@ -1575,7 +1598,8 @@ function updateDspState() {
             jamQueue = [];
             jamScheduledSwap = null;
             jamScheduledSwapBar = -1;
-            jamFillScroll = 0;
+            /* Returning to the return groove after a fill: keep the fill page
+             * where it is instead of resetting to the start. */
             resetStepFlash();
             needsRedraw = true;
             stepLedsDirty = true;
@@ -5504,16 +5528,27 @@ function jamStartClip(clip, preloadNext, preloadResumeTick) {
      * actually plays. */
     const dspRunning = !!(lastDspState && lastDspState.running);
     const canSwap = jamStagedClip && jamStagedClip.path === clip.path && dspRunning;
+    /* Capture whether a fill is currently playing and the return-groove path
+     * BEFORE jamSwapStaged/jamPlayClip overwrite jamCurrentClip with the new
+     * clip. Used below to decide whether to keep the fill page when returning
+     * to the same groove. */
+    const wasFillPlaying = !!(jamCurrentClip && jamCurrentClip.type === "fill");
+    const returnGroovePath = jamReturnGroove ? jamReturnGroove.path : null;
     if (canSwap) {
         jamSwapStaged(clip);
     } else {
         jamPlayClip(clip);
     }
-    /* Reset the fill page only when switching to a GROOVE (the fill list is
-     * re-filtered for the new groove). When a fill plays, keep the current
-     * fill page so the fills don't jump while the fill is queued/playing. */
+    /* Reset the fill page only when switching to a DIFFERENT groove (the fill
+     * list is re-filtered for the new groove). When returning to the SAME
+     * groove after a fill, keep the current fill page so the fills don't jump
+     * back to the start. When a fill plays, keep the current fill page too. */
     if (clip.type !== "fill") {
-        jamFillScroll = 0;
+        const returningToSameGroove = wasFillPlaying && returnGroovePath &&
+            clip.path === returnGroovePath;
+        if (!returningToSameGroove) {
+            jamFillScroll = 0;
+        }
         /* The return-from-start flag only applies while a fill is playing; once
          * the groove actually starts, clear it so a later fill resumes normally. */
         jamReturnFromStart = false;
