@@ -255,6 +255,11 @@ let builderDisplaySection = -1;
  * fresh boot). The tick re-resolves the folder index (once libraryFolders is
  * populated) and reloads the clips until they arrive. */
 let pendingFolderClipLoadName = null;
+/* Set when loadLibraryFolders() fired scan_library but the DSP folder scan
+ * hadn't caught up yet (folder_count still 0). The tick re-polls until the
+ * folder list arrives, so opening Folder List / Jam Folder on a fresh boot
+ * (or right after a scan invalidation) doesn't leave the list empty forever. */
+let pendingLibraryFoldersReload = false;
 let lastTransportBar = 0;     /* last bar number seen from DSP transport */
 let maxBeatThisBar = 0;       /* highest transport beat seen in current bar */
 let transportBeatsPerBar = 0; /* observed transport beats in last complete bar */
@@ -7132,6 +7137,7 @@ function loadLibraryFolders() {
     }
     if (libraryFolders.length === 0) {
         host_module_set_param("scan_library", "1");
+        pendingLibraryFoldersReload = true;
     }
 }
 
@@ -7295,6 +7301,19 @@ globalThis.tick = function() {
                 stepLedsDirty = true;
                 needsRedraw = true;
             }
+        }
+    }
+
+    /* Retry loading the top-level library folder list if the DSP scan hadn't
+     * caught up when loadLibraryFolders() first ran (folder_count was 0).
+     * Re-poll each tick until the folders arrive, then repaint so the Folder
+     * List / Jam Folder picker isn't left empty. */
+    if (pendingLibraryFoldersReload && libraryFolders.length === 0) {
+        loadLibraryFolders();
+        if (libraryFolders.length > 0) {
+            pendingLibraryFoldersReload = false;
+            ledDirtyAll = true;
+            needsRedraw = true;
         }
     }
 

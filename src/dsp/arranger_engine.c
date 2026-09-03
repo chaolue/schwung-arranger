@@ -1606,8 +1606,9 @@ static int preload_song_from_json(engine_t *e, const char *json) {
 /* -------------------------------------------------------------------------- */
 
 /* One lightweight snapshot of a folder under library_root.
- * Clips are stored as a single concatenated buffer to keep the entry small. */
-#define FOLDER_HEAP_CLIPS 256
+ * Clips are stored as a single concatenated buffer to keep the entry small.
+ * Must be >= MAX_CLIPS_PER_FOLDER so no clip is dropped from the scan. */
+#define FOLDER_HEAP_CLIPS 512
 struct folder_entry {
     char name[128];
     char path[MAX_PATH_LEN];
@@ -2897,7 +2898,8 @@ static int arr_get_param(void *instance, const char *key, char *buf, int buf_len
         int left = buf_len;
         int w = snprintf(p, left, "[");
         if (w >= 0) { p += w; left -= w; }
-        for (int i = 0; i < folders[idx].clip_count && left > 16; i++) {
+        int first = 1;
+        for (int i = 0; i < folders[idx].clip_count; i++) {
             const char *name = folders[idx].clip_names + (i * 128);
             const char *type = (strncmp(name, "Fills/", 6) == 0) ? "fill" : "groove";
             const char *leaf = name;
@@ -2909,37 +2911,66 @@ static int arr_get_param(void *instance, const char *key, char *buf, int buf_len
                 if (leaf[k] == '.') { ext_pos = k; break; }
             }
             int dn_len = (ext_pos > 0) ? ext_pos : leaf_len;
-            w = snprintf(p, left, "%s{\"source\":\"",
-                         i > 0 ? "," : "");
-            if (w >= 0) { p += w; left -= w; }
-            /* source = folder-relative path including subdir + extension */
-            int src_len = (int)strlen(name);
-            for (int k = 0; k < src_len && left > 1; k++) {
-                if (name[k] == '"' || name[k] == '\\' || name[k] < 0x20 || name[k] > 0x7e) {
-                    *p++ = '\\';
-                    left--;
-                }
-                if (left <= 1) break;
-                *p++ = name[k];
-                left--;
-            }
             uint32_t bars = folders[idx].clip_bars ? folders[idx].clip_bars[i] : 1;
             if (bars < 1) bars = 1;
-            if (left > 16) {
-                w = snprintf(p, left, "\",\"type\":\"%s\",\"bars\":%u,\"display\":\"", type, bars);
-                p += w; left -= w;
-                for (int k = 0; k < dn_len && left > 1; k++) {
-                    if (leaf[k] == '"' || leaf[k] == '\\' || leaf[k] < 0x20 || leaf[k] > 0x7e) {
-                        *p++ = '\\';
-                        left--;
-                    }
-                    if (left <= 1) break;
-                    *p++ = leaf[k];
-                    left--;
+            /* Build the whole object into a temp buffer so we only append
+             * complete objects. If it doesn't fit, stop — this keeps the
+             * JSON valid (no trailing comma / partial object) even when the
+             * host's get_param buffer is smaller than the full clip list. */
+            char obj[512];
+            char *op = obj;
+            int oleft = (int)sizeof(obj);
+            /* Append a literal string, escaping nothing (fixed ASCII). */
+            #define OBJ_APPEND_LIT(s) do { \
+                const char *_s = (s); \
+                while (*_s && oleft > 1) { *op++ = *_s++; oleft--; } \
+            } while (0)
+            OBJ_APPEND_LIT("{\"source\":\"");
+            /* source = folder-relative path including subdir + extension */
+            int src_len = (int)strlen(name);
+            for (int k = 0; k < src_len && oleft > 1; k++) {
+                if (name[k] == '"' || name[k] == '\\' || name[k] < 0x20 || name[k] > 0x7e) {
+                    *op++ = '\\';
+                    oleft--;
                 }
-                if (left > 1) { *p++ = '"'; left--; }
-                if (left > 1) { *p++ = '}'; left--; }
+                if (oleft <= 1) break;
+                *op++ = name[k];
+                oleft--;
             }
+            OBJ_APPEND_LIT("\",\"type\":\"");
+            OBJ_APPEND_LIT(type);
+            OBJ_APPEND_LIT("\",\"bars\":");
+            /* Append bars as decimal digits. */
+            {
+                char num[16];
+                int nlen = snprintf(num, sizeof(num), "%u", bars);
+                if (nlen > 0) {
+                    for (int k = 0; k < nlen && oleft > 1; k++) { *op++ = num[k]; oleft--; }
+                }
+            }
+            OBJ_APPEND_LIT(",\"display\":\"");
+            for (int k = 0; k < dn_len && oleft > 1; k++) {
+                if (leaf[k] == '"' || leaf[k] == '\\' || leaf[k] < 0x20 || leaf[k] > 0x7e) {
+                    *op++ = '\\';
+                    oleft--;
+                }
+                if (oleft <= 1) break;
+                *op++ = leaf[k];
+                oleft--;
+            }
+            if (oleft > 1) { *op++ = '"'; oleft--; }
+            if (oleft > 1) { *op++ = '}'; oleft--; }
+            *op = '\0';
+            #undef OBJ_APPEND_LIT
+            int obj_len = (int)strlen(obj);
+            int need_comma = first ? 0 : 1;
+            /* Need room for optional comma + object + closing ']'. */
+            if (need_comma + obj_len + 1 > left) break;
+            if (need_comma) { *p++ = ','; left--; }
+            memcpy(p, obj, obj_len);
+            p += obj_len;
+            left -= obj_len;
+            first = 0;
         }
         if (left > 0) snprintf(p, left, "]");
         return (int)strlen(buf);
