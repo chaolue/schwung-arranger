@@ -127,6 +127,8 @@ typedef struct {
 typedef struct {
     int clip_index;          /* index into engine->clips[] */
     int status;              /* 1 if fields were parsed for this clip */
+    char source_folder[MAX_PATH_LEN]; /* per-clip source folder; "" = use song->source_folder */
+    char source_path[MAX_PATH_LEN];  /* raw source path; resolved once source_folder is known */
     uint32_t start_bar;          /* bar-quantized trim (start) */
     uint32_t end_bar;            /* exclusive */
     uint32_t start_beat;         /* 0-based beat offset within start_bar (advanced trim) */
@@ -1401,11 +1403,28 @@ static int parse_song_json(engine_t *e, const char *json, song_t *song,
                 if (strncmp(key_start, "source\"", 7) == 0) {
                     char rel[MAX_PATH_LEN];
                     if (json_get_string_at(p, "source", rel, sizeof(rel))) {
+                        copy_trunc(sc->source_path, sizeof(sc->source_path), rel);
+                        /* Resolve now using the song's source_folder; if a
+                         * per-clip source_folder appears later in the JSON, it
+                         * will re-resolve with the correct folder. */
                         sc->clip_index = resolve_clip_index(e, rel, song->source_folder);
-                        dsp_host_log("load_song: section=%d clip=%d source=%.120s idx=%d",
-                                     section_idx, clip_idx, rel, sc->clip_index);
+                        dsp_host_log("load_song: section=%d clip=%d source=%.120s folder=%.120s idx=%d",
+                                     section_idx, clip_idx, rel, song->source_folder, sc->clip_index);
                     }
                     sc->status = 1;
+                } else if (strncmp(key_start, "source_folder\"", 14) == 0) {
+                    char folder[MAX_PATH_LEN];
+                    if (json_get_string_at(p, "source_folder", folder, sizeof(folder))) {
+                        copy_trunc(sc->source_folder, sizeof(sc->source_folder), folder);
+                        /* A per-clip source_folder overrides the song's. The
+                         * source was parsed before this key, so re-resolve the
+                         * clip index with the correct folder. */
+                        if (sc->source_path[0]) {
+                            sc->clip_index = resolve_clip_index(e, sc->source_path, folder);
+                            dsp_host_log("load_song: re-resolve section=%d clip=%d source=%.120s folder=%.120s idx=%d",
+                                         section_idx, clip_idx, sc->source_path, folder, sc->clip_index);
+                        }
+                    }
                 } else if (strncmp(key_start, "start_bar\"", 10) == 0) {
                     int v; if (json_get_int_at(p, "start_bar", &v)) sc->start_bar = (uint32_t)v;
                 } else if (strncmp(key_start, "start_beat\"", 11) == 0) {
@@ -1465,6 +1484,8 @@ static int parse_song_json(engine_t *e, const char *json, song_t *song,
                 section_clip_t *sc = &sec->clips[clip_idx];
                 sc->clip_index = -1;
                 sc->status = 0;
+                sc->source_folder[0] = '\0';
+                sc->source_path[0] = '\0';
                 sc->start_bar = 0;
                 sc->end_bar = 1;
                 sc->start_beat = 0;

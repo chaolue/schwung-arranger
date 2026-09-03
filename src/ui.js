@@ -111,6 +111,10 @@ let confirmState = null;   /* { title, name, labels, selectedIndex, onConfirm, o
 
 let libraryFolders = [];
 let selectedFolderIndex = 0;
+/* Map of clip leaf name -> folder name, built from the DSP folder scan. Used
+ * to backfill a clip's source_folder when loading an existing song whose
+ * clips were added from a different folder than the song's primary one. */
+let folderClipMap = null;
 /* When true, the folder list is being used to change the CURRENT song's source
  * folder (opened via the Record button in the Song Builder) rather than to
  * create a new song. Selecting a folder reloads the clip palette from it. */
@@ -786,24 +790,34 @@ function toEngineSongJson(song) {
             if (typeof startBar !== "number" || startBar < 0 || startBar >= endBar) startBar = 0;
             const startBeat = (typeof c.start_beat === "number" && c.start_beat > 0) ? c.start_beat : 0;
             const endBeat = (typeof c.end_beat === "number" && c.end_beat > 0) ? c.end_beat : 0;
-            clipsOut.push({
+            /* Round scaling values to 2 decimal places so saved songs don't
+             * accumulate long floating-point tails (e.g. 0.7999999999999998). */
+            const round2 = (v) => Math.round(v * 100) / 100;
+            const clipOut = {
                 source: src,
                 start_bar: startBar,
                 start_beat: startBeat,
                 end_bar: endBar,
                 end_beat: endBeat,
-                guard_fraction: (typeof c.guard_fraction === "number") ? c.guard_fraction : 0,
-                speed: (typeof c.speed === "number" && c.speed > 0) ? c.speed : 1.0,
-                velocity_scale: (typeof c.velocity_scale === "number" && c.velocity_scale >= 0) ? c.velocity_scale : 1,
+                guard_fraction: (typeof c.guard_fraction === "number") ? round2(c.guard_fraction) : 0,
+                speed: (typeof c.speed === "number" && c.speed > 0) ? round2(c.speed) : 1.0,
+                velocity_scale: (typeof c.velocity_scale === "number" && c.velocity_scale >= 0) ? round2(c.velocity_scale) : 1,
                 snare_note: (typeof c.snare_note === "number") ? c.snare_note : 38,
-                snare_velocity_scale: (typeof c.snare_velocity_scale === "number" && c.snare_velocity_scale >= 0) ? c.snare_velocity_scale : 1,
+                snare_velocity_scale: (typeof c.snare_velocity_scale === "number" && c.snare_velocity_scale >= 0) ? round2(c.snare_velocity_scale) : 1,
                 kick_note: (typeof c.kick_note === "number") ? c.kick_note : 36,
                 kick_target: (typeof c.kick_target === "number") ? c.kick_target : 0,
                 /* Per-clip MIDI channel override: 0 = follow the engine's
                  * output-target channel; 1-16 = explicit channel (used for the
                  * count-in click). */
                 channel: (typeof c.channel === "number" && c.channel > 0) ? c.channel : 0
-            });
+            };
+            /* A clip added from a different folder than the song's primary one
+             * stores its own source_folder so the DSP resolves it correctly.
+             * Only emit it when it differs from the song's primary folder. */
+            if (c.source_folder && c.source_folder !== song.source_folder) {
+                clipOut.source_folder = c.source_folder;
+            }
+            clipsOut.push(clipOut);
         }
         secOut.push({ name: sec.name || "Section", clips: clipsOut });
     }
@@ -821,10 +835,11 @@ function toEngineSongJson(song) {
 
 function toUiSong(engineLike) {
     const s = engineLike || {};
+    const songFolder = s.source_folder || "";
     return {
         id: s.id || ("song-" + Date.now()),
         name: s.name || "Untitled",
-        source_folder: s.source_folder || "",
+        source_folder: songFolder,
         tempo_bpm: s.tempo_bpm || 120,
         time_sig_num: s.time_sig_num || (s.time_signature ? s.time_signature[0] : 4),
         time_sig_den: s.time_sig_den || (s.time_signature ? s.time_signature[1] : 4),
@@ -834,24 +849,40 @@ function toUiSong(engineLike) {
         sections: (s.sections || []).map(sec => ({
             id: sec.id || ("sec-" + Date.now()),
             name: sec.name || "Section",
-            clips: (sec.clips || []).map(c => ({
-                source: c.source || c.path || "",
-                name: c.name || clipDisplayName(c.source || c.path || ""),
-                type: c.type || inferPartTypeFromFilename(c.name || c.source || c.path || ""),
-                start_bar: c.start_bar !== undefined ? c.start_bar : (c.trim ? c.trim.start_bar : 0),
-                start_beat: c.start_beat !== undefined ? c.start_beat : 0,
-                end_bar: c.end_bar !== undefined ? c.end_bar : (c.trim ? c.trim.end_bar : 1),
-                end_beat: c.end_beat !== undefined ? c.end_beat : 0,
-                guard_fraction: c.guard_fraction !== undefined ? c.guard_fraction : 0,
-                speed: c.speed !== undefined ? c.speed : 1.0,
-                velocity_scale: c.velocity_scale !== undefined ? c.velocity_scale : 1.0,
-                snare_note: c.snare_note !== undefined ? c.snare_note : 38,
-                snare_velocity_scale: c.snare_velocity_scale !== undefined ? c.snare_velocity_scale : 1.0,
-                kick_note: c.kick_note !== undefined ? c.kick_note : 36,
-                kick_target: c.kick_target !== undefined ? c.kick_target : 0,
-                channel: c.channel !== undefined ? c.channel : 0,
-                advanced: !!(c.advanced)
-            }))
+            clips: (sec.clips || []).map(c => {
+                const src = c.source || c.path || "";
+                /* Backfill a clip's source_folder for existing songs whose
+                 * clips were added from a different folder than the song's
+                 * primary one. A clip that already carries its own folder is
+                 * kept; otherwise, if the clip's leaf name is found in another
+                 * folder, record that folder so the DSP resolves it correctly
+                 * and the saved file is updated. */
+                let clipFolder = c.source_folder || "";
+                if (!clipFolder && folderClipMap && src) {
+                    const leaf = clipDisplayName(src);
+                    const found = leaf ? folderClipMap[leaf] : "";
+                    if (found && found !== songFolder) clipFolder = found;
+                }
+                return {
+                    source: src,
+                    name: c.name || clipDisplayName(src),
+                    type: c.type || inferPartTypeFromFilename(c.name || src),
+                    source_folder: clipFolder,
+                    start_bar: c.start_bar !== undefined ? c.start_bar : (c.trim ? c.trim.start_bar : 0),
+                    start_beat: c.start_beat !== undefined ? c.start_beat : 0,
+                    end_bar: c.end_bar !== undefined ? c.end_bar : (c.trim ? c.trim.end_bar : 1),
+                    end_beat: c.end_beat !== undefined ? c.end_beat : 0,
+                    guard_fraction: c.guard_fraction !== undefined ? c.guard_fraction : 0,
+                    speed: c.speed !== undefined ? c.speed : 1.0,
+                    velocity_scale: c.velocity_scale !== undefined ? c.velocity_scale : 1.0,
+                    snare_note: c.snare_note !== undefined ? c.snare_note : 38,
+                    snare_velocity_scale: c.snare_velocity_scale !== undefined ? c.snare_velocity_scale : 1.0,
+                    kick_note: c.kick_note !== undefined ? c.kick_note : 36,
+                    kick_target: c.kick_target !== undefined ? c.kick_target : 0,
+                    channel: c.channel !== undefined ? c.channel : 0,
+                    advanced: !!(c.advanced)
+                };
+            })
         }))
     };
 }
@@ -918,11 +949,49 @@ function listSetlistFiles() {
     return out;
 }
 
+/* Normalize a song in place before saving: round scaling values to 2 decimal
+ * places and ensure each clip carries its own source_folder when it was added
+ * from a different folder than the song's primary one. This keeps the saved
+ * file consistent with what the DSP plays (toEngineSongJson) and avoids
+ * accumulating floating-point tails (e.g. 0.7999999999999998). */
+function normalizeSongForSave(song) {
+    if (!song) return;
+    const round2 = (v) => Math.round(v * 100) / 100;
+    const songFolder = song.source_folder || "";
+    for (const sec of song.sections || []) {
+        for (const c of sec.clips || []) {
+            if (typeof c.guard_fraction === "number") c.guard_fraction = round2(c.guard_fraction);
+            if (typeof c.speed === "number") c.speed = round2(c.speed);
+            if (typeof c.velocity_scale === "number") c.velocity_scale = round2(c.velocity_scale);
+            if (typeof c.snare_velocity_scale === "number") c.snare_velocity_scale = round2(c.snare_velocity_scale);
+            /* Backfill a clip's source_folder when it was added from a
+             * different folder than the song's primary one. A clip that
+             * already carries its own folder is kept; otherwise, if the clip's
+             * leaf name is found in another folder, record that folder. */
+            if (!c.source_folder && folderClipMap && c.source) {
+                const leaf = clipDisplayName(c.source);
+                const found = leaf ? folderClipMap[leaf] : "";
+                if (found && found !== songFolder) c.source_folder = found;
+            }
+            /* A clip whose source_folder equals the song's primary folder
+             * needs no override — the song folder already resolves it. Strip
+             * it so the saved file only stores the folder when it differs. */
+            if (c.source_folder && c.source_folder === songFolder) {
+                delete c.source_folder;
+            }
+        }
+    }
+}
+
 function saveCurrentSong() {
     if (!currentSong) return;
     currentSong.modified = new Date().toISOString();
     const path = activeSongFile || songPath(currentSong.name);
     activeSongFile = path;
+    /* Normalize the song before writing so the saved file reflects the same
+     * rounding and per-clip source_folder that the DSP playback uses. The
+     * in-memory currentSong is updated in place so the UI stays consistent. */
+    normalizeSongForSave(currentSong);
     writeJson(path, currentSong);
     unsavedChanges = false;
     /* Invalidate the DSP's cached song scan so a newly saved song appears in
@@ -6080,10 +6149,18 @@ function insertClipAtCursor(clip) {
     }
     const sec = currentSong.sections[currentSectionIndex];
     const bars = clip.bars || 1;
+    /* Record the folder the clip was added from (the palette's current folder).
+     * Always store it so the clip remembers its origin even if the song's
+     * source_folder is later changed back to a different folder. toEngineSongJson
+     * only emits it when it differs from the song's primary folder, keeping the
+     * saved file clean. */
+    const paletteFolder = (selectedFolderIndex >= 0 && selectedFolderIndex < libraryFolders.length)
+        ? libraryFolders[selectedFolderIndex] : "";
     const newClip = {
         source: clip.path,
         name: clip.name,
         type: clip.type || inferPartTypeFromFilename(clip.name || clip.path || ""),
+        source_folder: paletteFolder || "",
         start_bar: clipStartBar(clip),
         start_beat: 1,
         end_bar: bars,
@@ -7138,6 +7215,10 @@ function loadLibraryFolders() {
     if (libraryFolders.length === 0) {
         host_module_set_param("scan_library", "1");
         pendingLibraryFoldersReload = true;
+    } else {
+        /* Build the clip->folder map once folders are known, so existing songs
+         * can backfill a clip's source_folder on load/save. */
+        buildFolderClipMap();
     }
 }
 
@@ -7169,6 +7250,27 @@ function loadFolderClips(folderIndex) {
         grooveClips.sort(clipOrderCompare);
         fillClips.sort(clipOrderCompare);
     } catch (e) { folderClips = []; grooveClips = []; fillClips = []; }
+}
+
+/* Build a map of clip leaf name -> folder name from the DSP's folder scan.
+ * Used to backfill a clip's source_folder when loading an existing song whose
+ * clips were added from a different folder than the song's primary one. */
+function buildFolderClipMap() {
+    folderClipMap = {};
+    if (typeof host_module_get_param !== "function") return;
+    for (let i = 0; i < libraryFolders.length; i++) {
+        const folder = libraryFolders[i];
+        const clipsJson = host_module_get_param("folder_clips_json_" + i);
+        if (!clipsJson) continue;
+        try {
+            const raw = JSON.parse(clipsJson);
+            for (const c of raw) {
+                const path = (typeof c === "string") ? c : (c.source || c);
+                const leaf = clipDisplayName(path);
+                if (leaf) folderClipMap[leaf] = folder;
+            }
+        } catch (e) {}
+    }
 }
 
 /* ── Pad helpers (local to avoid deprecated shared exports) ──────────── */
@@ -7312,6 +7414,7 @@ globalThis.tick = function() {
         loadLibraryFolders();
         if (libraryFolders.length > 0) {
             pendingLibraryFoldersReload = false;
+            buildFolderClipMap();
             ledDirtyAll = true;
             needsRedraw = true;
         }
