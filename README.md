@@ -9,12 +9,16 @@ and perform live — all from Move's pads, step buttons and jog wheel.
 
 - **Song Builder** — assemble a song from a MIDI drum-clip library into
   sections, then trim each clip (start/end, guard, velocity, snare filter,
-  kick thinning).
+  kick thinning). The trim view shows each clip's source folder.
 - **Setlists & Performance** — build a setlist of songs, set a count-in click
   and stop-after-finish per song, then play through it live with queued
   section/song jumps.
 - **Jam Mode** — layer grooves and fills on the fly, queueing clips at bar
   boundaries and adjusting the BPM in realtime.
+- **Categorised library** — folders are grouped by category (e.g. `GM Ballads`,
+  `Vintage Drummer/03 Swing`) with drill-in navigation in both the Builder and
+  Jam folder pickers. Song folders laid out with part subfolders (`Grooves/`,
+  `Fills/`, `Clap/`, `Snare/`, `Stick/`) are recognised automatically.
 - **Output routing** — send MIDI to External, Move tracks, or the Schwung
   synth chain, on a configurable channel.
 - **Overtake module** — runs on Move's hardware surface (pads, steps, jog
@@ -25,8 +29,9 @@ and perform live — all from Move's pads, step buttons and jog wheel.
 - [Schwung](https://github.com/charlesvestal/schwung) installed on your
   Ableton Move.
 - A library of GM-style MIDI drum clips organised into folders
-  (e.g. `Grooves/`, `Fills/`). The default library path is
-  `/data/UserData/UserLibrary/Arranger/MidiLibrary`.
+  (e.g. `Grooves/`, `Fills/`). Song folders may be laid out with part
+  subfolders (`Grooves/`, `Fills/`, `Clap/`, `Snare/`, `Stick/`). The default
+  library path is `/data/UserData/UserLibrary/Arranger/MidiLibrary`.
   I use MIDI packs from Groove Monkee, see free packs here (https://groovemonkee.com/pages/beat-farm-free-midi-beats)
 
 ## Building

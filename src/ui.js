@@ -8,7 +8,7 @@
  * confirmed from the logs (see init()/playCurrentSong()) instead of guessing
  * whether a new file actually loaded. Keep the DSP dsp_build_version in
  * arranger_engine.c in sync so both sides are verifiable. */
-const UI_BUILD_VERSION = "arranger-ui-2026-09-01a";
+const UI_BUILD_VERSION = "arranger-ui-2026-09-04e";
 
 import {
     MidiNoteOn, MidiNoteOff, MidiCC,
@@ -110,7 +110,32 @@ let menuStack = null;
 let confirmState = null;   /* { title, name, labels, selectedIndex, onConfirm, onCancel } */
 
 let libraryFolders = [];
-let selectedFolderIndex = 0;
+/* Category grouping of the library. libraryFolders is the flat list of song
+ * folders (indexed by the DSP's folder index); libraryFolderCategories is a
+ * parallel array holding each folder's full category path, with '/' separators
+ * for nested categories (e.g. "Vintage Drummer/03 Swing"). libraryCategoryTree
+ * is a tree of category nodes: each node has children (sub-categories) and
+ * folders (indices into libraryFolders). folderPickerPath is the array of
+ * category names currently navigated to in the Builder folder picker;
+ * folderPickerSelectedIndex is the cursor within that node's combined list of
+ * sub-categories and folders. The Jam folder picker uses parallel state. */
+let libraryFolderCategories = [];
+let libraryCategoryTree = null;
+/* True once the folder list + clip map have been built and the DSP scan is
+ * stable. Opening a folder picker (Jam, new song, change folder) reuses this
+ * cache instead of re-fetching and re-parsing every folder's clips from the
+ * DSP each time. Invalidated when a scan is requested (folder_count was 0). */
+let libraryCacheValid = false;
+let folderPickerPath = [];
+let folderPickerSelectedIndex = 0;
+/* Stack of the selected index at each ancestor level of the Builder folder
+ * picker, so pressing Back returns to the subcategory/cursor the user was on
+ * rather than resetting to the top of the parent list. */
+let folderPickerSelectedStack = [];
+let jamFolderPickerPath = [];
+let jamFolderPickerSelectedIndex = 0;
+/* Parallel stack for the Jam folder picker. */
+let jamFolderPickerSelectedStack = [];
 /* Map of clip leaf name -> folder name, built from the DSP folder scan. Used
  * to backfill a clip's source_folder when loading an existing song whose
  * clips were added from a different folder than the song's primary one. */
@@ -193,6 +218,9 @@ let trimOriginalChannel = 0;
  * so a section auto-advance during playback doesn't switch the edit to a clip
  * in the new section. */
 let trimClip = null;
+/* Scroller for the read-only source-folder line at the top of the trim view,
+ * so long folder paths marquee instead of being hard-truncated. */
+let trimSrcScroller = createTextScroller({ scrollInterval: 8, delayFrames: 12 });
 
 let songSettingsFocus = 0;
 let songSettingsPendingBpm = 120;
@@ -259,6 +287,11 @@ let builderDisplaySection = -1;
  * fresh boot). The tick re-resolves the folder index (once libraryFolders is
  * populated) and reloads the clips until they arrive. */
 let pendingFolderClipLoadName = null;
+/* Set when a Jam folder is entered but the DSP folder scan isn't ready yet
+ * (folder_clips_json_ returned empty on a fresh boot). The tick re-resolves
+ * the folder index and reloads the clips until they arrive, so the Jam pads
+ * aren't left empty on first entry. */
+let pendingJamFolderClipLoadIndex = -1;
 /* Set when loadLibraryFolders() fired scan_library but the DSP folder scan
  * hadn't caught up yet (folder_count still 0). The tick re-polls until the
  * folder list arrives, so opening Folder List / Jam Folder on a fresh boot
@@ -307,7 +340,6 @@ let perfSelectedSong = -1;          /* song selected while stopped in performanc
 let perfStoppedKeepSelection = false; /* if true, perfStop() preserves perfSelectedSection/perfSelectedSong */
 
 /* ── Jam mode state ─────────────────────────────────────────────────── */
-let jamFolderIndex = 0;             /* selected folder index in the Jam folder picker */
 let jamGrooves = [];                /* grooves for the selected folder: { path, name, type, bars } */
 let jamFills = [];                  /* fills for the selected folder */
 let jamGrooveScroll = 0;            /* scroll offset for the groove pad grid (rows) */
@@ -592,10 +624,11 @@ function listFolders(path) {
 }
 
 function inferTempoFromFolder(name) {
-    /* A three-digit number together (e.g. "078", "110", "120") is the BPM.
-     * Prefer an explicit "NNN BPM" marker, then any standalone 3-digit number. */
-    const explicit = name.match(/(\d{3})\s*BPM/i);
+    /* A number followed by "BPM" (e.g. "120 BPM", "85BPM") is the tempo.
+     * Accept 2-3 digits so two-digit tempos like "85BPM" are not missed. */
+    const explicit = name.match(/(\d{2,3})\s*BPM/i);
     if (explicit) return parseInt(explicit[1], 10);
+    /* Fallback: a standalone 3-digit number together (e.g. "078", "110"). */
     const m = name.match(/(?<!\d)(\d{3})(?!\d)/);
     return m ? parseInt(m[1], 10) : 120;
 }
@@ -745,11 +778,15 @@ function shortSongName(name) {
 }
 
 function newSong(folderName) {
+    /* Store the FULL relative path (category + leaf) as source_folder so the
+     * DSP resolves clips directly and the folder picker can reopen at the
+     * exact category. Tempo/time-sig are still inferred from the leaf name. */
+    const fullPath = folderFullPathForName(folderName);
     const [num, den] = inferTimeSigFromFolder(folderName);
     return {
         id: "song-" + Date.now(),
         name: folderName,
-        source_folder: folderName,
+        source_folder: fullPath,
         tempo_bpm: inferTempoFromFolder(folderName),
         time_sig_num: num,
         time_sig_den: den,
@@ -1010,6 +1047,14 @@ function loadSongFile(path) {
     if (!obj) { logDebug("loadSongFile: readJson returned null for " + path); return false; }
     activeSongFile = path;
     currentSong = toUiSong(obj);
+    /* Upgrade leaf-only source_folder values to full paths so the DSP resolves
+     * clips directly and the folder picker reopens at the exact category.
+     * Persist the upgrade immediately so the saved file is corrected. */
+    if (upgradeSongSourceFolders(currentSong)) {
+        normalizeSongForSave(currentSong);
+        writeJson(path, currentSong);
+        logDebug("loadSongFile: upgraded source_folder paths in " + path);
+    }
     currentSectionIndex = 0;
     builderCursor = 0;
     logDebug("loadSongFile: loaded song " + (currentSong && currentSong.name));
@@ -1406,6 +1451,16 @@ function playCurrentSong(preloadStaged) {
         const block = typeof host_module_set_param_blocking === "function";
         const set = block ? host_module_set_param_blocking : host_module_set_param;
         const t = block ? 500 : undefined;
+        /* song_json can trigger a long SYNCHRONOUS timeline build on the DSP
+         * side (the log showed ~1.7s for a 14-section song whose clips need a
+         * recursive folder search). The 500ms blocking-write timeout below
+         * expires while the build is still running, so the subsequent `play`
+         * write waits on the still-busy SHM slot and gets dropped — the song
+         * builds a valid timeline but never starts. Give the final `play`
+         * write a larger blocking budget (it is cheap once the build
+         * finishes) so it reliably waits out the build and starts playback.
+         * Capped at 1000ms so a slow build doesn't stall the UI for long. */
+        const tPlay = block ? 1000 : undefined;
         /* Ensure library_root is set first so clip resolution works. */
         set("library_root", LIBRARY_ROOT, t);
         pushOutputRoutingToDsp();
@@ -1415,18 +1470,31 @@ function playCurrentSong(preloadStaged) {
             const afterJsonErr = host_module_get_param("error");
             const afterJsonInfo = host_module_get_param("timeline_info");
             logDebug("playCurrentSong after song_json: error=" + (afterJsonErr || "null") + " timeline_info=" + (afterJsonInfo || "null"));
+            /* If a clip file is missing, surface it on the display so the user
+             * knows which clip is the problem. */
+            if (afterJsonErr && afterJsonErr.indexOf("clip not found") >= 0) {
+                showMissingClipOverlay();
+            }
+            /* If any clip resolved to a different folder than the song stored
+             * (i.e. the file moved), persist the corrected source_folder so
+             * the next play resolves directly instead of re-searching. */
+            persistResolvedClipFolders();
         }
-        /* Optional: preload the full song into DSP staging AFTER the current
-         * (click) song_json has loaded. Loading song_json clears staging, so
-         * preloading first would wipe the staged full song and the click→song
-         * swap would never fire. Preloading here, before play=1, keeps the
-         * blocking build off the audio path (no first-note blip) while leaving
-         * the staged full song intact for a sample-accurate swap. */
+        set("loop", dspLoopEnabled ? "1" : "0", t);
+        /* Start the click FIRST, then preload the full song into staging.
+         * The preload builds the full song timeline on the control thread and
+         * can take well over the 500ms blocking-write timeout (the DSP log
+         * showed ~1.8s for a 14-section song). If the preload ran before
+         * play=1, its long blocking write would clobber the subsequent `play`
+         * write in the shared shadow_param SHM slot — the click never started
+         * and the first song never played. Sending play first starts the click
+         * immediately; the preload then stages the full song while the click
+         * plays, so the click→song swap still fires sample-accurately at the
+         * click's end. */
+        set("play", "1", tPlay);
         if (preloadStaged) {
             preloadPerfSongToStaging();
         }
-        set("loop", dspLoopEnabled ? "1" : "0", t);
-        set("play", "1", t);
         if (typeof host_module_get_param === "function") {
             const info = host_module_get_param("timeline_info");
             const err = host_module_get_param("error");
@@ -1448,6 +1516,72 @@ function playCurrentSong(preloadStaged) {
     transportBeatsPerBar = 0;
     lastSubdivisionIndex = 0;
     needsRedraw = true;
+}
+
+/* Persist corrected clip source_folder values reported by the DSP. When a clip
+ * file has moved, the DSP resolves it via a recursive library search on every
+ * play (the audible delay). It reports the resolved folder via the
+ * "resolved_clips" get_param; we write that folder back into the song so the
+ * next play resolves directly and the delay disappears. Returns true if any
+ * clip was updated. */
+function persistResolvedClipFolders() {
+    if (typeof host_module_get_param !== "function") return false;
+    let raw = null;
+    try {
+        raw = host_module_get_param("resolved_clips");
+    } catch (e) { return false; }
+    if (!raw || raw === "[]") return false;
+    let list = [];
+    try {
+        list = JSON.parse(raw);
+    } catch (e) { return false; }
+    if (!Array.isArray(list) || list.length === 0) return false;
+    let changed = false;
+    for (const item of list) {
+        const src = item && item.source;
+        const folder = item && item.folder;
+        if (!src || !folder) continue;
+        for (const sec of currentSong ? currentSong.sections : []) {
+            for (const c of sec.clips || []) {
+                if (c.source === src && c.source_folder !== folder) {
+                    c.source_folder = folder;
+                    changed = true;
+                }
+            }
+        }
+    }
+    if (changed) {
+        unsavedChanges = true;
+        if (activeSongFile) {
+            normalizeSongForSave(currentSong);
+            writeJson(activeSongFile, currentSong);
+            unsavedChanges = false;
+        }
+    }
+    return changed;
+}
+
+/* Show a display overlay naming the clip that could not be found, so the user
+ * knows which file is the problem instead of the song silently failing. The
+ * overlay auto-dismisses after a few seconds (the UI does not call
+ * dismissOverlayOnInput, so a finite duration is required). */
+const MISSING_CLIP_OVERLAY_TICKS = 600; /* ~10s at 60fps */
+function showMissingClipOverlay() {
+    if (typeof host_module_get_param !== "function") return;
+    let raw = null;
+    try {
+        raw = host_module_get_param("error");
+    } catch (e) { return; }
+    if (!raw) return;
+    const m = raw.match(/clip not found: source='([^']*)'/);
+    const clipName = m ? m[1] : "";
+    /* Show the leaf name (after the last slash) so a long folder-relative
+     * source path doesn't get truncated in the overlay band. */
+    const leaf = clipName ? clipName.substring(clipName.lastIndexOf("/") + 1) : "";
+    const title = "Clip not found";
+    const value = leaf ? leaf : "missing file";
+    showOverlay(title, value, MISSING_CLIP_OVERLAY_TICKS);
+    logDebug("showMissingClipOverlay: " + raw);
 }
 
 function stopPlayback() {
@@ -3313,7 +3447,7 @@ function scrollHeader(title, maxChars) {
 }
 
 function drawRoot() {
-    drawMenuHeader("Arranger", "v0.2");
+    drawMenuHeader("Arranger", "v0.3");
     drawMenuList({
         items: [
             { label: "Song Builder" },
@@ -3330,11 +3464,13 @@ function drawRoot() {
 }
 
 function drawFolderList() {
-    drawMenuHeader("Source Folder", "");
-    const items = libraryFolders.map(f => ({ label: shortSongName(f) }));
+    const node = getTreeNode(libraryCategoryTree, folderPickerPath);
+    const pathStr = folderPickerPath.map(shortSongName).join("/");
+    drawMenuHeader("Source Folder", pathStr);
+    const items = node ? getTreeDisplayItems(node) : [];
     drawMenuList({
         items,
-        selectedIndex: selectedFolderIndex,
+        selectedIndex: folderPickerSelectedIndex,
         getLabel: (item) => item.label,
         getValue: () => "",
         maxVisible: 5,
@@ -3394,6 +3530,9 @@ function drawBuilder() {
     const num = currentSong ? currentSong.time_sig_num : 4;
     const den = currentSong ? currentSong.time_sig_den : 4;
     drawBuilderPreviewOverlay();
+    /* Draw any active overlay (e.g. a missing-clip warning) on top of the
+     * builder display. */
+    drawOverlay();
 }
 
 /* Shared scrolling overlay: draws the centered 120x28 box with a marquee-
@@ -3539,6 +3678,16 @@ function drawTrim() {
         print(2, LIST_TOP_Y, "No clip selected", 1);
         return;
     }
+    /* Show the clip's source folder (read-only) at the top of the trim view.
+     * The effective folder is the per-clip source_folder if set, else the
+     * song's primary source_folder. Long paths marquee via a scroller. */
+    const srcFolder = (clip.source_folder) ? clip.source_folder : (currentSong ? currentSong.source_folder : "");
+    const srcLabel = srcFolder ? ("Src: " + srcFolder) : "";
+    trimSrcScroller.setSelected(srcLabel);
+    trimSrcScroller.tick();
+    let srcText = srcLabel;
+    if (srcText.length > 24) srcText = trimSrcScroller.getScrolledText(srcText, 24);
+    print(2, LIST_TOP_Y, srcText, 1);
     const maxBar = clipTrueBars(clip);
     /* The denominator and Start/End are always in EFFECTIVE song-bar units
      * (source bars ÷ speed), so the total shown updates when Speed changes.
@@ -3573,7 +3722,9 @@ function drawTrim() {
         getValue: (item) => item.value,
         valueAlignRight: true,
         editMode: trimEditing,
-        listArea: { topY: LIST_TOP_Y, bottomY: LIST_INDICATOR_BOTTOM_Y }
+        /* The source-folder line occupies LIST_TOP_Y, so the list starts one
+         * row lower. */
+        listArea: { topY: LIST_TOP_Y + 9, bottomY: LIST_INDICATOR_BOTTOM_Y }
     });
 }
 
@@ -4100,6 +4251,9 @@ function drawPerformance() {
         }
         print(2, perfYs[i], perfPrefixes[i] + text, 1);
     }
+    /* Draw any active overlay (e.g. a missing-clip warning) on top of the
+     * performance display. */
+    drawOverlay();
 }
 
 function drawPerfSetlist() {
@@ -4188,14 +4342,13 @@ function jamVisibleFills() {
 }
 
 function drawJamFolder() {
-    drawMenuHeader("Jam Folder", "");
-    const items = libraryFolders.map(f => ({ label: shortSongName(f) }));
-    /* Widen the label area (labelX/labelGap at 0) so folder names can use the
-     * full row up to the scroll-arrow column instead of being cut to ~16 chars
-     * with blank space on the right. */
+    const node = getTreeNode(libraryCategoryTree, jamFolderPickerPath);
+    const pathStr = jamFolderPickerPath.map(shortSongName).join("/");
+    drawMenuHeader("Jam Folder", pathStr);
+    const items = node ? getTreeDisplayItems(node) : [];
     drawMenuList({
         items,
-        selectedIndex: jamFolderIndex,
+        selectedIndex: jamFolderPickerSelectedIndex,
         getLabel: (item) => item.label,
         getValue: () => "",
         labelX: 0,
@@ -4205,7 +4358,7 @@ function drawJamFolder() {
 }
 
 function drawJam() {
-    const folderName = libraryFolders[jamFolderIndex] || "";
+    const folderName = libraryFolders[currentJamFolderIndex()] || "";
     const shortFolder = shortSongName(folderName);
     jamHeaderScroller.setSelected(shortFolder);
     jamHeaderScroller.tick();
@@ -4306,7 +4459,9 @@ function handleRootInput(cc, value) {
             currentView = VIEW_JAM_FOLDER;
             menuStack.push({ title: "Jam Folder", selectedIndex: 0 });
             loadLibraryFolders();
-            jamFolderIndex = 0;
+            jamFolderPickerPath = [];
+            jamFolderPickerSelectedIndex = 0;
+            jamFolderPickerSelectedStack = [];
             needsRedraw = true;
         } else if (idx === 4) {
             currentView = VIEW_OPTIONS;
@@ -4318,27 +4473,41 @@ function handleRootInput(cc, value) {
 }
 
 function handleFolderListInput(cc, value) {
+    const node = getTreeNode(libraryCategoryTree, folderPickerPath);
+    const items = node ? getTreeDisplayItems(node) : [];
     if (cc === MoveMainKnob) {
         const delta = decodeDelta(value);
-        const newIdx = Math.max(0, Math.min(libraryFolders.length - 1, selectedFolderIndex + delta));
-        if (newIdx !== selectedFolderIndex) {
-            selectedFolderIndex = newIdx;
+        const newIdx = Math.max(0, Math.min(items.length - 1, folderPickerSelectedIndex + delta));
+        if (newIdx !== folderPickerSelectedIndex) {
+            folderPickerSelectedIndex = newIdx;
             needsRedraw = true;
         }
     } else if (cc === MoveMainButton && value > 0) {
-        const folder = libraryFolders[selectedFolderIndex];
+        const item = items[folderPickerSelectedIndex];
+        if (!item) return;
+        if (item.type === "category") {
+            /* Drill into the selected sub-category. Remember the current
+             * cursor so Back can return to it. */
+            folderPickerSelectedStack.push(folderPickerSelectedIndex);
+            folderPickerPath = folderPickerPath.concat([item.name]);
+            folderPickerSelectedIndex = 0;
+            needsRedraw = true;
+            return;
+        }
+        const folderIndex = item.index;
+        const folder = libraryFolders[folderIndex];
         if (builderChangeFolder) {
             /* Re-selecting the source folder for the current song: update the
-             * song's source_folder and reload the clip palette from it. */
+             * song's source_folder (full path) and reload the clip palette. */
             builderChangeFolder = false;
             if (currentSong) {
-                currentSong.source_folder = folder;
+                currentSong.source_folder = folderFullPath(folderIndex);
                 unsavedChanges = true;
             }
             currentView = VIEW_BUILDER;
             menuStack.pop();
             builderPage = 0;
-            loadFolderClips(selectedFolderIndex);
+            loadFolderClips(folderIndex);
             stepLedsDirty = true;
             ledDirtyAll = true;
             needsRedraw = true;
@@ -4369,7 +4538,7 @@ function handleFolderListInput(cc, value) {
                 currentView = VIEW_BUILDER;
                 menuStack.push({ title: "Arrange", selectedIndex: 0 });
                 builderPage = 0;
-                loadFolderClips(selectedFolderIndex);
+                loadFolderClips(folderIndex);
                 stepLedsDirty = true;
                 needsRedraw = true;
             },
@@ -4379,6 +4548,16 @@ function handleFolderListInput(cc, value) {
         });
         needsRedraw = true;
     } else if (cc === MoveBack && value > 0) {
+        if (folderPickerPath.length > 0) {
+            /* Back out to the parent category, restoring the cursor the user
+             * was on before drilling in. */
+            folderPickerPath = folderPickerPath.slice(0, folderPickerPath.length - 1);
+            folderPickerSelectedIndex = folderPickerSelectedStack.length > 0
+                ? folderPickerSelectedStack.pop()
+                : 0;
+            needsRedraw = true;
+            return;
+        }
         menuStack.pop();
         if (builderChangeFolder) {
             builderChangeFolder = false;
@@ -4551,7 +4730,14 @@ function handleBuilderInput(cc, value) {
         currentView = VIEW_FOLDER_LIST;
         menuStack.push({ title: "Source Folder", selectedIndex: 0 });
         loadLibraryFolders();
-        selectedFolderIndex = Math.max(0, libraryFolders.indexOf(currentSong ? currentSong.source_folder : ""));
+        folderPickerSelectedStack = [];
+        const curIdx = folderIndexForPath(currentSong ? currentSong.source_folder : "");
+        if (curIdx >= 0) {
+            setFolderPickerToFolder(curIdx);
+        } else {
+            folderPickerPath = [];
+            folderPickerSelectedIndex = 0;
+        }
         needsRedraw = true;
     }
 }
@@ -4565,8 +4751,9 @@ function startNewSong(folderName) {
     menuStack.push({ title: "Arrange", selectedIndex: 0 });
     builderPage = 0;
     builderCursor = 0;
-    loadFolderClips(selectedFolderIndex);
-    pendingFolderClipLoadName = (folderClips.length === 0) ? (libraryFolders[selectedFolderIndex] || null) : null;
+    const folderIndex = libraryFolders.indexOf(folderName);
+    loadFolderClips(folderIndex >= 0 ? folderIndex : 0);
+    pendingFolderClipLoadName = (folderClips.length === 0) ? (libraryFolders[folderIndex >= 0 ? folderIndex : 0] || null) : null;
     stepLedsDirty = true;
     ledDirtyAll = true;
     needsRedraw = true;
@@ -4719,7 +4906,9 @@ function loadSelectedSongIntoBuilder() {
         currentMode = MODE_BUILDER;
         currentView = VIEW_FOLDER_LIST;
         menuStack.push({ title: "Source Folder", selectedIndex: 0 });
-        selectedFolderIndex = 0;
+        folderPickerPath = [];
+        folderPickerSelectedIndex = 0;
+        folderPickerSelectedStack = [];
         loadLibraryFolders();
         needsRedraw = true;
         return;
@@ -4740,9 +4929,9 @@ function loadSelectedSongIntoBuilder() {
     builderPage = 0;
     builderCursor = 0;
     const srcFolder = currentSong.source_folder;
-    loadFolderClips(libraryFolders.indexOf(srcFolder));
+    loadFolderClips(folderIndexForPath(srcFolder));
     /* If the DSP folder scan isn't ready yet (fresh boot), retry until the
-     * clips arrive, then repaint the pads. Track the folder NAME so the retry
+     * clips arrive, then repaint the pads. Track the folder PATH so the retry
      * can re-resolve its index once libraryFolders is populated. */
     pendingFolderClipLoadName = (folderClips.length === 0) ? srcFolder : null;
     stepLedsDirty = true;
@@ -5176,16 +5365,34 @@ function handlePerfSetlistInput(cc, value) {
 /* ── Jam input handling ────────────────────────────────────────────── */
 
 function handleJamFolderInput(cc, value) {
+    const node = getTreeNode(libraryCategoryTree, jamFolderPickerPath);
+    const items = node ? getTreeDisplayItems(node) : [];
     if (cc === MoveMainKnob) {
         const delta = decodeDelta(value);
-        const newIdx = Math.max(0, Math.min(libraryFolders.length - 1, jamFolderIndex + delta));
-        if (newIdx !== jamFolderIndex) {
-            jamFolderIndex = newIdx;
+        const newIdx = Math.max(0, Math.min(items.length - 1, jamFolderPickerSelectedIndex + delta));
+        if (newIdx !== jamFolderPickerSelectedIndex) {
+            jamFolderPickerSelectedIndex = newIdx;
             needsRedraw = true;
         }
     } else if (cc === MoveMainButton && value > 0) {
+        const item = items[jamFolderPickerSelectedIndex];
+        if (!item) return;
+        if (item.type === "category") {
+            /* Drill into the selected sub-category. Remember the current
+             * cursor so Back can return to it. */
+            jamFolderPickerSelectedStack.push(jamFolderPickerSelectedIndex);
+            jamFolderPickerPath = jamFolderPickerPath.concat([item.name]);
+            jamFolderPickerSelectedIndex = 0;
+            needsRedraw = true;
+            return;
+        }
+        const folderIndex = item.index;
         /* Enter the selected folder into the Jam screen. */
-        jamLoadFolder(jamFolderIndex);
+        jamLoadFolder(folderIndex);
+        /* If the DSP folder scan isn't ready yet (fresh boot), retry loading
+         * the clips each tick until they arrive, so the Jam pads aren't left
+         * empty on first entry. */
+        pendingJamFolderClipLoadIndex = (jamGrooves.length === 0 && jamFills.length === 0) ? folderIndex : -1;
         jamGrooveScroll = 0;
         jamCurrentClip = null;
         jamReturnGroove = null;
@@ -5196,13 +5403,23 @@ function handleJamFolderInput(cc, value) {
         jamFillQueued = false;
         jamCurrentType = "";
         /* Read the BPM from the folder name (e.g. "Song 13 4-4 120 BPM"). */
-        jamBpm = inferTempoFromFolder(libraryFolders[jamFolderIndex] || "");
+        jamBpm = inferTempoFromFolder(libraryFolders[folderIndex] || "");
         currentView = VIEW_JAM;
         menuStack.push({ title: "Jam", selectedIndex: 0 });
         needsRedraw = true;
         stepLedsDirty = true;
         ledDirtyAll = true;
     } else if (cc === MoveBack && value > 0) {
+        if (jamFolderPickerPath.length > 0) {
+            /* Back out to the parent category, restoring the cursor the user
+             * was on before drilling in. */
+            jamFolderPickerPath = jamFolderPickerPath.slice(0, jamFolderPickerPath.length - 1);
+            jamFolderPickerSelectedIndex = jamFolderPickerSelectedStack.length > 0
+                ? jamFolderPickerSelectedStack.pop()
+                : 0;
+            needsRedraw = true;
+            return;
+        }
         menuStack.pop();
         currentView = VIEW_ROOT;
         needsRedraw = true;
@@ -5211,7 +5428,7 @@ function handleJamFolderInput(cc, value) {
 
 /* Build a one-section engine song JSON for a single clip. */
 function jamClipToSongJson(clip) {
-    const base = newSong(libraryFolders[jamFolderIndex] || "");
+    const base = newSong(libraryFolders[currentJamFolderIndex()] || "");
     const temp = JSON.parse(JSON.stringify(base));
     temp.tempo_bpm = jamBpm; /* use the Jam BPM (folder-derived, jog-adjustable) */
     temp.sections = [{
@@ -5327,7 +5544,7 @@ function jamPlayClip(clip) {
     previewBarOffset = 0;
     dspLoopEnabled = true; /* always loop in Jam mode */
 
-    const temp = newSong(libraryFolders[jamFolderIndex] || "");
+    const temp = newSong(libraryFolders[currentJamFolderIndex()] || "");
     temp.tempo_bpm = jamBpm;
     temp.sections = [{
         id: "jam-" + Date.now(),
@@ -5994,6 +6211,10 @@ function handleJamInput(cc, value) {
         stopPlayback();
         menuStack.pop();
         currentView = VIEW_JAM_FOLDER;
+        /* Preserve the category path and cursor so Back returns to the folder
+         * the user was in, not the base folder. The path/selection were set
+         * when the folder was entered (jamFolderPickerPath = category path,
+         * jamFolderPickerSelectedIndex = the selected folder item). */
         needsRedraw = true;
         stepLedsDirty = true;
         ledDirtyAll = true;
@@ -6154,8 +6375,7 @@ function insertClipAtCursor(clip) {
      * source_folder is later changed back to a different folder. toEngineSongJson
      * only emits it when it differs from the song's primary folder, keeping the
      * saved file clean. */
-    const paletteFolder = (selectedFolderIndex >= 0 && selectedFolderIndex < libraryFolders.length)
-        ? libraryFolders[selectedFolderIndex] : "";
+    const paletteFolder = libraryFolders[currentBuilderFolderIndex()] || "";
     const newClip = {
         source: clip.path,
         name: clip.name,
@@ -7201,7 +7421,13 @@ function perfTick() {
 
 
 function loadLibraryFolders() {
+    /* Reuse the cached folder list + clip map when the DSP scan is stable.
+     * Re-fetching and re-parsing every folder's clips on each picker open is
+     * the source of the delay when opening Jam / new-song / change-folder. */
+    if (libraryCacheValid) return;
     libraryFolders = [];
+    libraryFolderCategories = [];
+    libraryCategoryTree = makeCategoryTree();
     if (typeof host_module_get_param !== "function") return;
     let count = 0;
     try {
@@ -7210,7 +7436,11 @@ function loadLibraryFolders() {
     } catch (e) {}
     for (let i = 0; i < count; i++) {
         const name = host_module_get_param("folder_name_" + i);
-        if (name) libraryFolders.push(name);
+        if (!name) continue;
+        libraryFolders.push(name);
+        const cat = host_module_get_param("folder_category_" + i) || "";
+        libraryFolderCategories.push(cat);
+        addFolderToTree(libraryCategoryTree, cat, i);
     }
     if (libraryFolders.length === 0) {
         host_module_set_param("scan_library", "1");
@@ -7219,7 +7449,158 @@ function loadLibraryFolders() {
         /* Build the clip->folder map once folders are known, so existing songs
          * can backfill a clip's source_folder on load/save. */
         buildFolderClipMap();
+        libraryCacheValid = true;
     }
+}
+
+/* Tree helpers for nested category navigation. */
+
+function makeCategoryTree() {
+    return { children: {}, folders: [] };
+}
+
+function addFolderToTree(tree, catPath, folderIndex) {
+    const parts = catPath ? catPath.split("/") : [];
+    let node = tree;
+    for (let i = 0; i < parts.length; i++) {
+        const part = parts[i];
+        if (!node.children[part]) {
+            node.children[part] = makeCategoryTree();
+        }
+        node = node.children[part];
+    }
+    node.folders.push(folderIndex);
+}
+
+function getTreeNode(tree, path) {
+    let node = tree;
+    for (let i = 0; i < path.length; i++) {
+        const part = path[i];
+        node = node.children[part];
+        if (!node) return null;
+    }
+    return node;
+}
+
+function getTreeDisplayItems(node) {
+    const items = [];
+    const childNames = Object.keys(node.children).sort((a, b) => a.localeCompare(b));
+    for (let i = 0; i < childNames.length; i++) {
+        const name = childNames[i];
+        items.push({ type: "category", name: name, label: shortSongName(name) + " >" });
+    }
+    const folderItems = node.folders.map(idx => ({ type: "folder", index: idx, label: shortSongName(libraryFolders[idx]) }));
+    folderItems.sort((a, b) => libraryFolders[a.index].localeCompare(libraryFolders[b.index]));
+    items.push(...folderItems);
+    return items;
+}
+
+/* Global folder index of the currently selected Builder folder. */
+function currentBuilderFolderIndex() {
+    const node = getTreeNode(libraryCategoryTree, folderPickerPath);
+    if (!node) return 0;
+    const items = getTreeDisplayItems(node);
+    const item = items[folderPickerSelectedIndex];
+    if (item && item.type === "folder") return item.index;
+    return node.folders[0] !== undefined ? node.folders[0] : 0;
+}
+
+/* Global folder index of the currently selected Jam folder. */
+function currentJamFolderIndex() {
+    const node = getTreeNode(libraryCategoryTree, jamFolderPickerPath);
+    if (!node) return 0;
+    const items = getTreeDisplayItems(node);
+    const item = items[jamFolderPickerSelectedIndex];
+    if (item && item.type === "folder") return item.index;
+    return node.folders[0] !== undefined ? node.folders[0] : 0;
+}
+
+/* Point the Builder folder picker at the category path containing folderIndex. */
+function setFolderPickerToFolder(folderIndex) {
+    const cat = libraryFolderCategories[folderIndex] || "";
+    folderPickerPath = cat ? cat.split("/") : [];
+    const node = getTreeNode(libraryCategoryTree, folderPickerPath);
+    if (!node) {
+        folderPickerSelectedIndex = 0;
+        return;
+    }
+    const items = getTreeDisplayItems(node);
+    for (let i = 0; i < items.length; i++) {
+        if (items[i].type === "folder" && items[i].index === folderIndex) {
+            folderPickerSelectedIndex = i;
+            return;
+        }
+    }
+    folderPickerSelectedIndex = 0;
+}
+
+/* Full relative path of a folder index (category + leaf), e.g.
+ * "GM Ballads/Song 08 082 Not Only One". Root-level folders have no category,
+ * so the full path is just the leaf name. */
+function folderFullPath(folderIndex) {
+    const cat = libraryFolderCategories[folderIndex] || "";
+    const name = libraryFolders[folderIndex] || "";
+    return cat ? cat + "/" + name : name;
+}
+
+/* Resolve a folder name (leaf or full path) to its full relative path. Used
+ * when creating a song so source_folder stores the full path, which lets the
+ * DSP resolve clips directly and lets the folder picker reopen at the exact
+ * category. */
+function folderFullPathForName(name) {
+    if (!name) return "";
+    /* libraryFolders is a flat array of leaf folder names across the entire
+     * nested library, so a leaf name can legitimately appear in more than one
+     * category (e.g. "Song 01", "Groove"). indexOf would silently pick the
+     * first match regardless of category, and the caller persists the result
+     * straight to disk — corrupting the song's source_folder with a wrong
+     * guess. Refuse to guess on ambiguity: only upgrade when the leaf name is
+     * unique, otherwise leave the value unchanged so the (correct-by-
+     * verification) C-side fallback chain resolves it. */
+    let match = -1, count = 0;
+    for (let i = 0; i < libraryFolders.length; i++) {
+        if (libraryFolders[i] === name) { match = i; count++; }
+    }
+    if (count !== 1) return name; /* ambiguous or not found — leave unchanged */
+    return folderFullPath(match);
+}
+
+/* Resolve a folder path (leaf or full path) to its libraryFolders index.
+ * Returns -1 if not found. */
+function folderIndexForPath(path) {
+    if (!path) return -1;
+    let idx = libraryFolders.indexOf(path);
+    if (idx >= 0) return idx;
+    for (let i = 0; i < libraryFolders.length; i++) {
+        if (folderFullPath(i) === path) return i;
+    }
+    const leaf = path.substring(path.lastIndexOf("/") + 1);
+    return libraryFolders.indexOf(leaf);
+}
+
+/* Upgrade a song's source_folder (and each clip's source_folder) from a
+ * leaf-only name to the full relative path (category + leaf) when the folder
+ * is found in the library. This lets the DSP resolve clips directly and the
+ * folder picker reopen at the exact category. Returns true if anything changed. */
+function upgradeSongSourceFolders(song) {
+    if (!song) return false;
+    let changed = false;
+    const songFull = folderFullPathForName(song.source_folder);
+    if (songFull && songFull !== song.source_folder) {
+        song.source_folder = songFull;
+        changed = true;
+    }
+    for (const sec of song.sections || []) {
+        for (const c of sec.clips || []) {
+            if (!c.source_folder) continue;
+            const full = folderFullPathForName(c.source_folder);
+            if (full && full !== c.source_folder) {
+                c.source_folder = full;
+                changed = true;
+            }
+        }
+    }
+    return changed;
 }
 
 function loadFolderClips(folderIndex) {
@@ -7259,7 +7640,7 @@ function buildFolderClipMap() {
     folderClipMap = {};
     if (typeof host_module_get_param !== "function") return;
     for (let i = 0; i < libraryFolders.length; i++) {
-        const folder = libraryFolders[i];
+        const folder = folderFullPath(i);
         const clipsJson = host_module_get_param("folder_clips_json_" + i);
         if (!clipsJson) continue;
         try {
@@ -7394,7 +7775,7 @@ globalThis.tick = function() {
         if (libraryFolders.length === 0) {
             loadLibraryFolders();
         }
-        const fi = libraryFolders.indexOf(pendingFolderClipLoadName);
+        const fi = folderIndexForPath(pendingFolderClipLoadName);
         if (fi >= 0) {
             loadFolderClips(fi);
             if (folderClips.length > 0) {
@@ -7406,6 +7787,22 @@ globalThis.tick = function() {
         }
     }
 
+    /* Retry loading the Jam folder's clips if they weren't ready yet (e.g. a
+     * Jam folder entered on a fresh boot before the DSP folder scan finished).
+     * Re-load the clips each tick until they arrive, then repaint the pads. */
+    if (pendingJamFolderClipLoadIndex >= 0) {
+        if (libraryFolders.length === 0) {
+            loadLibraryFolders();
+        }
+        jamLoadFolder(pendingJamFolderClipLoadIndex);
+        if (jamGrooves.length > 0 || jamFills.length > 0) {
+            pendingJamFolderClipLoadIndex = -1;
+            ledDirtyAll = true;
+            stepLedsDirty = true;
+            needsRedraw = true;
+        }
+    }
+
     /* Retry loading the top-level library folder list if the DSP scan hadn't
      * caught up when loadLibraryFolders() first ran (folder_count was 0).
      * Re-poll each tick until the folders arrive, then repaint so the Folder
@@ -7414,7 +7811,6 @@ globalThis.tick = function() {
         loadLibraryFolders();
         if (libraryFolders.length > 0) {
             pendingLibraryFoldersReload = false;
-            buildFolderClipMap();
             ledDirtyAll = true;
             needsRedraw = true;
         }
@@ -7581,6 +7977,9 @@ globalThis.onResume = function onResume() {
     clearAllLEDs();
     resetLedState();
     if (typeof host_module_get_param === "function") {
+        /* The library may have changed while the module was suspended (files
+         * added/moved on the Move), so invalidate the cache and re-scan. */
+        libraryCacheValid = false;
         loadLibraryFolders();
         reloadSongBankAndPreserveSelection();
     }

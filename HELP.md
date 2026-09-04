@@ -41,6 +41,21 @@ Browse, rename, delete, and load songs.
 
 ---
 
+### Source Folder Picker
+
+Choose the MIDI folder a new song is built from, or change the current song's source folder (via **Record** in Edit Song). Folders are grouped by category (e.g. `GM Ballads`, `Vintage Drummer/03 Swing`); drill into a category to reach its song folders.
+
+| Control | Action |
+|---------|--------|
+| Jog wheel | Scroll the current category's sub-categories and folders |
+| Jog click (on a category) | Drill into that sub-category |
+| Jog click (on a folder) | Select it (new song: name it; change-folder: apply it) |
+| Back | Return to the parent category, then to the previous screen |
+
+**Button LED hints:** Back and Main are lit.
+
+---
+
 ### Edit Song
 
 Build and arrange a song from Groove/Fill clips.
@@ -77,6 +92,8 @@ Playback keeps running while you browse: moving the cursor with the jog wheel, c
 ### Trim Clip
 
 Adjust clip start/end, guard window, speed, velocity, single note velocity and thinning. Enable **Advanced Trim** to also edit sub-bar (beat) positions.
+
+The top line shows the clip's **source folder** (read-only), so you can see which MIDI folder the clip comes from.
 
 | Control | Action |
 |---------|--------|
@@ -243,13 +260,14 @@ Choose a setlist to perform.
 
 ### Jam Folder Picker
 
-Choose which folder of clips to jam with. The folder's name (BPM / time signature) sets the playback tempo.
+Choose which folder of clips to jam with. The folder's name (BPM / time signature) sets the playback tempo. Folders are grouped by category; drill into a category to reach its song folders.
 
 | Control | Action |
 |---------|--------|
-| Jog wheel | Scroll the folder list |
-| Jog click | Enter Jam mode with the selected folder |
-| Back | Return to Root Menu |
+| Jog wheel | Scroll the current category's sub-categories and folders |
+| Jog click (on a category) | Drill into that sub-category |
+| Jog click (on a folder) | Enter Jam mode with the selected folder |
+| Back | Return to the parent category, then to the Root Menu |
 
 **Button LED hints:** Back and Main are lit.
 

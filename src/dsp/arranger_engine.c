@@ -120,6 +120,14 @@ typedef struct {
     smf_event_t *events;
 } clip_t;
 
+/* One entry in the lazy whole-library clip index: a clip leaf name mapped to
+ * its resolved full path under library_root. Built only when a song needs the
+ * whole-library recursive fallback (see clip_lookup_find). */
+typedef struct {
+    char leaf[128];
+    char full_path[MAX_PATH_LEN];
+} clip_lookup_entry_t;
+
 /* -------------------------------------------------------------------------- */
 /* Arrangement structures                                                     */
 /* -------------------------------------------------------------------------- */
@@ -168,6 +176,9 @@ typedef struct folder_entry folder_entry_t;
 typedef struct song_entry song_entry_t;
 static folder_entry_t* scan_library_heap(engine_t *e, int *out_count);
 static song_entry_t* scan_songs_heap(engine_t *e, int *out_count);
+static folder_entry_t* get_cached_folders(engine_t *e, int *out_count);
+static const char* clip_lookup_find(engine_t *e, const char *leaf);
+static void clip_lookup_free(engine_t *e);
 
 /* -------------------------------------------------------------------------- */
 /* Engine instance                                                            */
@@ -353,6 +364,18 @@ typedef struct engine {
     int lib_cache_valid;
     int song_cache_valid;
 
+    /* Lazy whole-library clip index: maps a clip leaf name (e.g.
+     * "072 S07 Verse Stick ALT.mid") to its full path under library_root.
+     * Built only on the first clip that needs the expensive whole-library
+     * recursive fallback in resolve_clip_index, so single-folder songs (which
+     * resolve every clip via a direct path and never hit the fallback) never
+     * pay the one-time build cost. Songs that pull clips from several folders
+     * resolve every subsequent fallback clip from this hash instead of re-
+     * walking the entire library tree once per clip — the source of the
+     * multi-folder build delay. Invalidated alongside the library cache. */
+    clip_lookup_entry_t *clip_index;
+    int clip_index_cap;
+    int clip_index_valid;
     /* Last error message */
     char error_msg[256];
 } engine_t;
@@ -686,9 +709,74 @@ static int find_file_recursive(const char *base_dir, const char *target, char *o
     return found;
 }
 
+/* Recursively search under base_dir for a DIRECTORY whose name matches target.
+ * Writes the first match into out_path (max out_len). Returns 1 if found. */
+static int find_dir_recursive(const char *base_dir, const char *target, char *out_path, size_t out_len) {
+    DIR *d = opendir(base_dir);
+    if (!d) return 0;
+    struct dirent *ent;
+    int found = 0;
+    while ((ent = readdir(d)) && !found) {
+        if (ent->d_name[0] == '.') continue;
+        char full[MAX_PATH_LEN];
+        int n = snprintf(full, sizeof(full), "%s/%s", base_dir, ent->d_name);
+        if (n < 0 || (size_t)n >= sizeof(full)) continue;
+        struct stat st;
+        if (stat(full, &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) {
+            if (strcasecmp(ent->d_name, target) == 0) {
+                copy_trunc(out_path, out_len, full);
+                found = 1;
+            } else {
+                found = find_dir_recursive(full, target, out_path, out_len);
+            }
+        }
+    }
+    closedir(d);
+    return found;
+}
+
 static int resolve_clip_index(engine_t *e, const char *source_path,
                               const char *source_folder) {
     char full_path[MAX_PATH_LEN];
+
+    /* Fast path: if the exact clip (library_root/source_folder/source_path) is
+     * already loaded in the clip cache (which persists across songs via
+     * clear_song_keep_clips), return it immediately. This avoids repeated
+     * access() filesystem checks for clips referenced many times in a song
+     * (e.g. a count-in hihat used in dozens of sections) and for clips already
+     * loaded by an earlier song in a setlist. Matching on the FULL expected
+     * path (not just the leaf name) means this only short-circuits when it is
+     * genuinely the same file, so there is no ambiguity class to guard against
+     * — a different folder that happens to share a filename is never
+     * substituted. */
+    {
+        char expected[MAX_PATH_LEN];
+        int n = snprintf(expected, sizeof(expected), "%s/%s/%s",
+                        e->library_root, source_folder, source_path);
+        if (n > 0 && (size_t)n < sizeof(expected)) {
+            for (int i = 0; i < e->clip_count; i++) {
+                if (strcmp(e->clips[i].path, expected) == 0) return i;
+            }
+        }
+    }
+
+    /* Second fast path: resolve the leaf name via the lazy whole-library index
+     * (which only contains leaf names that appear in exactly one folder, so it
+     * is unambiguous), and if that resolved file is already loaded, return it.
+     * This catches repeated cross-folder clips (e.g. a count-in hihat whose
+     * per-clip source_folder differs from the song folder) that the exact-path
+     * check above misses, without any wrong-clip risk. */
+    {
+        const char *leaf = strrchr(source_path, '/');
+        leaf = leaf ? leaf + 1 : source_path;
+        const char *hit = clip_lookup_find(e, leaf);
+        if (hit) {
+            for (int i = 0; i < e->clip_count; i++) {
+                if (strcmp(e->clips[i].path, hit) == 0) return i;
+            }
+        }
+    }
 
     /* source_path may already be an absolute path (older songs or UI). */
     if (source_path[0] == '/' && access(source_path, F_OK) == 0) {
@@ -710,6 +798,19 @@ static int resolve_clip_index(engine_t *e, const char *source_path,
         goto found;
     }
 
+    /* Try: library_root/<category>/source_folder/source_path. The song folder
+     * may live one level under a category folder (e.g. GM Ballads/Song 01). */
+    if (source_folder[0]) {
+        char cat_dir[MAX_PATH_LEN];
+        if (find_dir_recursive(e->library_root, source_folder, cat_dir, sizeof(cat_dir))) {
+            n = snprintf(full_path, sizeof(full_path), "%s/%s",
+                         cat_dir, source_path);
+            if (n >= 0 && (size_t)n < sizeof(full_path) && access(full_path, F_OK) == 0) {
+                goto found;
+            }
+        }
+    }
+
     /* Fallback 1: search source_folder recursively for leaf name. */
     {
         const char *leaf = strrchr(source_path, '/');
@@ -727,24 +828,40 @@ static int resolve_clip_index(engine_t *e, const char *source_path,
     }
 
     /* Fallback 2: search the whole library recursively for leaf name.
+     * Use the lazy leaf-name index so the tree is walked once, not per clip;
+     * songs that pull clips from several folders avoid a full recursive walk
+     * for each unresolved clip (the source of the multi-folder build delay).
      * Also try adding .mid extension if the leaf is missing one. */
     {
         const char *leaf = strrchr(source_path, '/');
         if (!leaf) leaf = source_path;
         else leaf++;
-        char found[MAX_PATH_LEN];
-        if (find_file_recursive(e->library_root, leaf, found, sizeof(found))) {
-            copy_trunc(full_path, sizeof(full_path), found);
-            if (access(full_path, F_OK) == 0) goto found;
-        }
-        /* Try leaf + .mid */
-        size_t leaf_len = strlen(leaf);
-        if (leaf_len > 4 && strcasecmp(leaf + leaf_len - 4, ".mid") != 0) {
-            char leaf_mid[MAX_PATH_LEN];
+        const char *hit = clip_lookup_find(e, leaf);
+        if (!hit && strcasecmp(leaf + (strlen(leaf) > 4 ? strlen(leaf) - 4 : 0), ".mid") != 0) {
+            char leaf_mid[128];
             snprintf(leaf_mid, sizeof(leaf_mid), "%s.mid", leaf);
-            if (find_file_recursive(e->library_root, leaf_mid, found, sizeof(found))) {
+            hit = clip_lookup_find(e, leaf_mid);
+        }
+        if (hit && access(hit, F_OK) == 0) {
+            copy_trunc(full_path, sizeof(full_path), hit);
+            goto found;
+        }
+        /* Not in the index (ambiguous or genuinely absent): fall back to the
+         * safe recursive walk for correctness. */
+        {
+            char found[MAX_PATH_LEN];
+            if (find_file_recursive(e->library_root, leaf, found, sizeof(found))) {
                 copy_trunc(full_path, sizeof(full_path), found);
                 if (access(full_path, F_OK) == 0) goto found;
+            }
+            size_t leaf_len = strlen(leaf);
+            if (leaf_len > 4 && strcasecmp(leaf + leaf_len - 4, ".mid") != 0) {
+                char leaf_mid[MAX_PATH_LEN];
+                snprintf(leaf_mid, sizeof(leaf_mid), "%s.mid", leaf);
+                if (find_file_recursive(e->library_root, leaf_mid, found, sizeof(found))) {
+                    copy_trunc(full_path, sizeof(full_path), found);
+                    if (access(full_path, F_OK) == 0) goto found;
+                }
             }
         }
     }
@@ -1633,6 +1750,7 @@ static int preload_song_from_json(engine_t *e, const char *json) {
 struct folder_entry {
     char name[128];
     char path[MAX_PATH_LEN];
+    char category[128];     /* category path (e.g. "Vintage/03 Swing"); "" for root-level folders */
     char *clip_names;       /* heap: clip_count * 128 byte slots */
     uint32_t *clip_bars;    /* heap: clip_count bar counts */
     int clip_count;
@@ -1698,6 +1816,7 @@ static void free_library_cache(engine_t *e) {
     if (e->song_cache) { free_songs(e->song_cache); e->song_cache = NULL; }
     e->song_cache_count = 0;
     e->song_cache_valid = 0;
+    clip_lookup_free(e);
 }
 
 /* Return the cached folder scan, scanning once and reusing it until the
@@ -1710,6 +1829,90 @@ static folder_entry_t* get_cached_folders(engine_t *e, int *out_count) {
     }
     *out_count = e->lib_cache_count;
     return e->lib_cache;
+}
+
+/* Lazy whole-library clip index. Walks the library ONCE (via the cached
+ * folder scan) and records each MIDI file's leaf name -> full path, so the
+ * expensive recursive whole-library fallback in resolve_clip_index is only
+ * paid on the first clip that needs it; every subsequent fallback clip
+ * resolves from this in-memory table instead of re-walking the entire tree.
+ * Returns the full path for `leaf` (a bare file name, optionally with .mid),
+ * or NULL if not found or if the name is ambiguous. The index is invalidated
+ * by free_library_cache (library_root change / scan_library / clear_song). */
+static const char* clip_lookup_find(engine_t *e, const char *leaf) {
+    if (!leaf) return NULL;
+    if (!e->clip_index_valid) {
+        if (e->clip_index) { free(e->clip_index); e->clip_index = NULL; }
+        e->clip_index_cap = 0;
+        int nfold = 0;
+        folder_entry_t *folders = get_cached_folders(e, &nfold);
+        if (!folders || nfold <= 0) { e->clip_index_valid = 1; return NULL; }
+        /* Total clip count bounds the index. */
+        int cap = 0;
+        for (int i = 0; i < nfold; i++) cap += folders[i].clip_count;
+        if (cap < 1) cap = 1;
+        /* Pass 1: count how many folders hold each leaf name, and remember one
+         * full path per leaf. Only leaves seen exactly once are unambiguous
+         * and safe to index (a name in two folders would silently resolve to
+         * the wrong one). */
+        clip_lookup_entry_t *idx = calloc(cap, sizeof(clip_lookup_entry_t));
+        int *count = calloc(cap, sizeof(int));
+        if (!idx || !count) {
+            free(idx); free(count);
+            e->clip_index_valid = 1;
+            return NULL;
+        }
+        int n = 0;
+        for (int i = 0; i < nfold; i++) {
+            folder_entry_t *f = &folders[i];
+            for (int c = 0; c < f->clip_count; c++) {
+                const char *clip_rel = f->clip_names + (c * 128);
+                const char *leaf_s = strrchr(clip_rel, '/');
+                leaf_s = leaf_s ? leaf_s + 1 : clip_rel;
+                if (!*leaf_s) continue;
+                int slot = -1;
+                for (int k = 0; k < n; k++) {
+                    if (strcasecmp(idx[k].leaf, leaf_s) == 0) { slot = k; break; }
+                }
+                if (slot < 0) {
+                    if (n >= cap) continue;
+                    copy_trunc(idx[n].leaf, sizeof(idx[n].leaf), leaf_s);
+                    int np = snprintf(idx[n].full_path, sizeof(idx[n].full_path),
+                                      "%s/%s", f->path, clip_rel);
+                    if (np < 0 || (size_t)np >= sizeof(idx[n].full_path)) {
+                        idx[n].leaf[0] = '\0';
+                    }
+                    count[n] = 1;
+                    n++;
+                } else {
+                    count[slot]++;
+                }
+            }
+        }
+        /* Pass 2: blank out ambiguous leaves (count != 1). */
+        for (int k = 0; k < n; k++) {
+            if (count[k] != 1) idx[k].leaf[0] = '\0';
+        }
+        e->clip_index = idx;
+        e->clip_index_cap = n;
+        e->clip_index_valid = 1;
+        free(count);
+    }
+    if (!e->clip_index) return NULL;
+    for (int i = 0; i < e->clip_index_cap; i++) {
+        if (e->clip_index[i].leaf[0] == '\0') continue;
+        if (strcasecmp(e->clip_index[i].leaf, leaf) == 0) {
+            return e->clip_index[i].full_path;
+        }
+    }
+    return NULL;
+}
+
+/* Invalidate the lazy clip index (called by free_library_cache). */
+static void clip_lookup_free(engine_t *e) {
+    if (e->clip_index) { free(e->clip_index); e->clip_index = NULL; }
+    e->clip_index_cap = 0;
+    e->clip_index_valid = 0;
 }
 
 /* Return the cached song scan, scanning once and reusing it. */
@@ -1930,6 +2133,204 @@ static void scan_dir_recursive(const char *folder_root, const char *rel_prefix, 
     closedir(d);
 }
 
+/* True if any .mid file exists under dir (recursively). Used to tell a
+ * category folder (whose immediate subfolders are song folders) apart from a
+ * song folder (which directly contains .mid files, possibly under Grooves/
+ * Fills/ subfolders). */
+static int dir_contains_mid_recursive(const char *dir) {
+    DIR *d = opendir(dir);
+    if (!d) return 0;
+    struct dirent *ent;
+    int found = 0;
+    while ((ent = readdir(d)) && !found) {
+        if (ent->d_name[0] == '.') continue;
+        char child[MAX_PATH_LEN];
+        int n = snprintf(child, sizeof(child), "%s/%s", dir, ent->d_name);
+        if (n < 0 || (size_t)n >= sizeof(child)) continue;
+        struct stat st;
+        if (stat(child, &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) {
+            if (dir_contains_mid_recursive(child)) found = 1;
+        } else if (S_ISREG(st.st_mode)) {
+            size_t len = strlen(ent->d_name);
+            if (len >= 4 && strcasecmp(ent->d_name + len - 4, ".mid") == 0) found = 1;
+        }
+    }
+    closedir(d);
+    return found;
+}
+
+/* Build a category path from all parent directories between library_root
+ * (exclusive) and the song folder's parent (inclusive).
+ * e.g. root=".../MIDI files", song=".../MIDI files/Vintage/03 Swing/Song 01"
+ *      => category = "Vintage/03 Swing" */
+static void build_category_path(const char *library_root, const char *song_folder,
+                                char *out, size_t out_size) {
+    size_t root_len = strlen(library_root);
+    /* library_root should be a prefix of song_folder. */
+    if (strncmp(song_folder, library_root, root_len) != 0 ||
+        (song_folder[root_len] != '/' && song_folder[root_len] != '\0')) {
+        out[0] = '\0';
+        return;
+    }
+    const char *cat_start = song_folder + root_len;
+    if (*cat_start == '/') cat_start++;
+    /* Remove the leaf song-folder name: back up to the previous '/'. */
+    const char *end = cat_start + strlen(cat_start);
+    if (end == cat_start) {
+        out[0] = '\0';
+        return;
+    }
+    const char *last_slash = strrchr(cat_start, '/');
+    if (!last_slash || last_slash == cat_start) {
+        out[0] = '\0';
+        return;
+    }
+    size_t cat_len = (size_t)(last_slash - cat_start);
+    if (cat_len >= out_size) cat_len = out_size - 1;
+    memcpy(out, cat_start, cat_len);
+    out[cat_len] = '\0';
+}
+
+/* Scan one song folder (a directory that directly holds .mid files, possibly
+ * under Grooves/Fills subfolders) into a folder_entry. Returns 0 on success. */
+static int scan_song_folder_into(folder_entry_t *f, const char *full_path,
+                                 const char *name, const char *category) {
+    memset(f, 0, sizeof(*f));
+    copy_trunc(f->name, sizeof(f->name), name);
+    copy_trunc(f->path, sizeof(f->path), full_path);
+    copy_trunc(f->category, sizeof(f->category), category);
+    f->clip_names = calloc(FOLDER_HEAP_CLIPS, 128);
+    if (!f->clip_names) return -1;
+    f->clip_bars = calloc(FOLDER_HEAP_CLIPS, sizeof(uint32_t));
+    if (!f->clip_bars) { free(f->clip_names); f->clip_names = NULL; return -1; }
+
+    scan_dir_recursive(full_path, "", f);
+    /* Sort clip names while keeping clip_bars aligned. */
+    if (f->clip_count > 1) {
+        clip_sort_pair_t *pairs = calloc(f->clip_count, sizeof(clip_sort_pair_t));
+        if (pairs) {
+            for (int i = 0; i < f->clip_count; i++) {
+                pairs[i].name = f->clip_names + (i * 128);
+                pairs[i].bars = f->clip_bars ? f->clip_bars[i] : 1;
+            }
+            qsort(pairs, f->clip_count, sizeof(clip_sort_pair_t), clip_pair_cmp);
+            char *temp_names = malloc(f->clip_count * 128);
+            if (temp_names) {
+                for (int i = 0; i < f->clip_count; i++) {
+                    memcpy(temp_names + (i * 128), pairs[i].name, 128);
+                    if (f->clip_bars) f->clip_bars[i] = pairs[i].bars;
+                }
+                memcpy(f->clip_names, temp_names, f->clip_count * 128);
+                free(temp_names);
+            }
+            free(pairs);
+        }
+    }
+    return 0;
+}
+
+/* True if dir contains any regular .mid file directly. Used to identify leaf
+ * song folders vs intermediate category folders. */
+static int dir_has_direct_mid(const char *dir) {
+    DIR *d = opendir(dir);
+    if (!d) return 0;
+    struct dirent *ent;
+    int found = 0;
+    while ((ent = readdir(d)) && !found) {
+        if (ent->d_name[0] == '.') continue;
+        char child[MAX_PATH_LEN];
+        int n = snprintf(child, sizeof(child), "%s/%s", dir, ent->d_name);
+        if (n < 0 || (size_t)n >= sizeof(child)) continue;
+        struct stat st;
+        if (stat(child, &st) != 0) continue;
+        if (!S_ISREG(st.st_mode)) continue;
+        size_t len = strlen(ent->d_name);
+        if (len >= 4 && strcasecmp(ent->d_name + len - 4, ".mid") == 0) found = 1;
+    }
+    closedir(d);
+    return found;
+}
+
+/* Case-insensitive substring search (avoids GNU strcasestr dependency). */
+static int str_contains_ci(const char *haystack, const char *needle) {
+    size_t nlen = strlen(needle);
+    if (nlen == 0) return 1;
+    for (const char *p = haystack; *p; ++p) {
+        if (strncasecmp(p, needle, nlen) == 0) return 1;
+    }
+    return 0;
+}
+
+/* True if dir is a SONG folder (a leaf in the category tree): it directly
+ * contains .mid files, OR it has an immediate subfolder named "Grooves" or
+ * "Fills" (a song folder laid out with part subfolders, e.g.
+ * "GM Ballads/Song 08 082 Not Only One/Grooves"). A category folder is one
+ * whose subfolders are themselves song folders (deeper nesting, e.g.
+ * "Vintage Drummer/03 Swing"), so it is NOT a song folder and the scan
+ * recurses into it. The Grooves/Fills name check is what tells a song folder
+ * with part subfolders apart from a category whose subfolders are songs. */
+static int dir_is_song_folder(const char *dir) {
+    if (dir_has_direct_mid(dir)) return 1;
+    DIR *d = opendir(dir);
+    if (!d) return 0;
+    struct dirent *ent;
+    int found = 0;
+    while ((ent = readdir(d)) && !found) {
+        if (ent->d_name[0] == '.') continue;
+        char child[MAX_PATH_LEN];
+        int n = snprintf(child, sizeof(child), "%s/%s", dir, ent->d_name);
+        if (n < 0 || (size_t)n >= sizeof(child)) continue;
+        struct stat st;
+        if (stat(child, &st) != 0) continue;
+        if (!S_ISDIR(st.st_mode)) continue;
+        /* A part subfolder is named "Grooves", "Clap", "Snare", "Stick",
+         * or contains "Fill" (e.g. "Fills", "Hat Fills", "Ride Fills").
+         * These names indicate the parent is a song folder whose clips are
+         * grouped by part, rather than a category folder whose subfolders are
+         * themselves songs. */
+        const char *nm = ent->d_name;
+        int is_part_folder = strcasecmp(nm, "Grooves") == 0 ||
+                              strcasecmp(nm, "Clap") == 0 ||
+                              strcasecmp(nm, "Snare") == 0 ||
+                              strcasecmp(nm, "Stick") == 0 ||
+                              str_contains_ci(nm, "Fill");
+        if (is_part_folder && dir_has_direct_mid(child)) found = 1;
+    }
+    closedir(d);
+    return found;
+}
+
+/* Recursively find leaf song folders under dir. A leaf folder is any
+ * directory that directly contains a .mid file; everything above it is a
+ * category. The full category path is built from parent dirs under library_root. */
+static void scan_library_recursive(engine_t *e, const char *dir,
+                                   folder_entry_t *folders, int *count) {
+    DIR *d = opendir(dir);
+    if (!d) return;
+    struct dirent *ent;
+    while ((ent = readdir(d)) && *count < MAX_SOURCE_FOLDERS) {
+        if (ent->d_name[0] == '.') continue;
+        char child_path[MAX_PATH_LEN];
+        int n = snprintf(child_path, sizeof(child_path), "%s/%s", dir, ent->d_name);
+        if (n < 0 || (size_t)n >= sizeof(child_path)) continue;
+        struct stat st;
+        if (stat(child_path, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
+        if (dir_is_song_folder(child_path)) {
+            char category[128];
+            build_category_path(e->library_root, child_path, category, sizeof(category));
+            folder_entry_t *f = &folders[*count];
+            if (scan_song_folder_into(f, child_path, ent->d_name, category) == 0) {
+                (*count)++;
+            }
+        } else if (dir_contains_mid_recursive(child_path)) {
+            /* Intermediate category with deeper song folders: keep recursing. */
+            scan_library_recursive(e, child_path, folders, count);
+        }
+    }
+    closedir(d);
+}
+
 static folder_entry_t* scan_library_heap(engine_t *e, int *out_count) {
     *out_count = 0;
     DIR *d = opendir(e->library_root);
@@ -1945,36 +2346,15 @@ static folder_entry_t* scan_library_heap(engine_t *e, int *out_count) {
         if (n < 0 || (size_t)n >= sizeof(full_path)) continue;
         struct stat st;
         if (stat(full_path, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
-        folder_entry_t *f = &folders[count++];
-        memset(f, 0, sizeof(*f));
-        copy_trunc(f->name, sizeof(f->name), ent->d_name);
-        copy_trunc(f->path, sizeof(f->path), full_path);
-        f->clip_names = calloc(FOLDER_HEAP_CLIPS, 128);
-        if (!f->clip_names) { count--; continue; }
-        f->clip_bars = calloc(FOLDER_HEAP_CLIPS, sizeof(uint32_t));
-        if (!f->clip_bars) { free(f->clip_names); f->clip_names = NULL; count--; continue; }
 
-        scan_dir_recursive(full_path, "", f);
-        /* Sort clip names while keeping clip_bars aligned. */
-        if (f->clip_count > 1) {
-            clip_sort_pair_t *pairs = calloc(f->clip_count, sizeof(clip_sort_pair_t));
-            if (pairs) {
-                for (int i = 0; i < f->clip_count; i++) {
-                    pairs[i].name = f->clip_names + (i * 128);
-                    pairs[i].bars = f->clip_bars ? f->clip_bars[i] : 1;
-                }
-                qsort(pairs, f->clip_count, sizeof(clip_sort_pair_t), clip_pair_cmp);
-                char *temp_names = malloc(f->clip_count * 128);
-                if (temp_names) {
-                    for (int i = 0; i < f->clip_count; i++) {
-                        memcpy(temp_names + (i * 128), pairs[i].name, 128);
-                        if (f->clip_bars) f->clip_bars[i] = pairs[i].bars;
-                    }
-                    memcpy(f->clip_names, temp_names, f->clip_count * 128);
-                    free(temp_names);
-                }
-                free(pairs);
+        if (dir_is_song_folder(full_path)) {
+            /* A song folder directly at the root (no category). */
+            folder_entry_t *f = &folders[count];
+            if (scan_song_folder_into(f, full_path, ent->d_name, "") == 0) {
+                count++;
             }
+        } else if (dir_contains_mid_recursive(full_path)) {
+            scan_library_recursive(e, full_path, folders, &count);
         }
     }
     closedir(d);
@@ -2395,7 +2775,7 @@ static void engine_clear_error(engine_t *e) {
 
 /* DSP build version stamp. Keep in sync with UI_BUILD_VERSION in ui.js so the
  * running dsp.so can be confirmed from .dsp_log on module load. */
-static const char *const DSP_BUILD_VERSION = "arranger-dsp-2026-08-28b";
+static const char *const DSP_BUILD_VERSION = "arranger-dsp-2026-09-04e";
 
 static void* arr_create_instance(const char *module_dir, const char *config_json) {
     (void)module_dir;
@@ -2910,6 +3290,13 @@ static int arr_get_param(void *instance, const char *key, char *buf, int buf_len
         if (!folders || idx < 0 || idx >= n) return -1;
         return snprintf(buf, buf_len, "%s", folders[idx].name);
     }
+    if (strncmp(key, "folder_category_", 16) == 0) {
+        int idx = atoi(key + 16);
+        int n = 0;
+        folder_entry_t *folders = get_cached_folders(e, &n);
+        if (!folders || idx < 0 || idx >= n) return -1;
+        return snprintf(buf, buf_len, "%s", folders[idx].category);
+    }
     if (strncmp(key, "folder_clips_json_", 18) == 0) {
         int idx = atoi(key + 18);
         int n = 0;
@@ -3018,6 +3405,89 @@ static int arr_get_param(void *instance, const char *key, char *buf, int buf_len
         song_entry_t *songs = get_cached_songs(e, &n);
         if (!songs || idx < 0 || idx >= n) return -1;
         return snprintf(buf, buf_len, "%s", songs[idx].path);
+    }
+    if (strcmp(key, "resolved_clips") == 0) {
+        /* Report clips whose resolved location differs from their stored
+         * folder, so the UI can persist the corrected source_folder and avoid
+         * a recursive library search on every play. Each entry is
+         * {"source":"<raw source>","folder":"<resolved folder relative to
+         * library_root>"}. Only clips that resolved to a different folder than
+         * their effective (per-clip or song) folder are emitted, keeping the
+         * payload small. */
+        char *p = buf;
+        int left = buf_len;
+        int w = snprintf(p, left, "[");
+        if (w >= 0) { p += w; left -= w; }
+        int first = 1;
+        for (int s = 0; s < e->song.section_count; s++) {
+            section_t *sec = &e->song.sections[s];
+            for (int c = 0; c < sec->clip_count; c++) {
+                section_clip_t *sc = &sec->clips[c];
+                if (!sc->source_path[0]) continue;
+                if (sc->clip_index < 0 || sc->clip_index >= e->clip_count) continue;
+                const char *full = e->clips[sc->clip_index].path;
+                /* Effective folder: per-clip source_folder if set, else song's. */
+                const char *eff = sc->source_folder[0] ? sc->source_folder : e->song.source_folder;
+                /* Derive the resolved SONG folder (the folder that directly
+                 * holds the .mid files) by stripping the source_path from the
+                 * end of the resolved full path, then removing the library_root
+                 * prefix. This yields the same relative form as source_folder. */
+                char folder[MAX_PATH_LEN] = "";
+                size_t full_len = strlen(full);
+                size_t src_len = strlen(sc->source_path);
+                if (src_len > 0 && full_len > src_len &&
+                    strcmp(full + full_len - src_len, sc->source_path) == 0) {
+                    size_t flen = full_len - src_len;
+                    if (flen > 0 && full[flen - 1] == '/') flen--;
+                    size_t root_len = strlen(e->library_root);
+                    if (flen > root_len &&
+                        strncmp(full, e->library_root, root_len) == 0 &&
+                        full[root_len] == '/') {
+                        size_t rel_len = flen - root_len - 1;
+                        if (rel_len < sizeof(folder)) {
+                            memcpy(folder, full + root_len + 1, rel_len);
+                            folder[rel_len] = '\0';
+                        }
+                    }
+                }
+                /* Only emit when the resolved folder differs from the stored
+                 * effective folder (i.e. the clip moved). */
+                if (!folder[0] || strcmp(folder, eff) == 0) continue;
+                /* Build {"source":"...","folder":"..."} */
+                char obj[1024];
+                char *op = obj;
+                int oleft = (int)sizeof(obj);
+                #define OBJ_APPEND_LIT(s) do { \
+                    const char *_s = (s); \
+                    while (*_s && oleft > 1) { *op++ = *_s++; oleft--; } \
+                } while (0)
+                OBJ_APPEND_LIT("{\"source\":\"");
+                for (const char *q = sc->source_path; *q && oleft > 1; q++) {
+                    if (*q == '"' || *q == '\\' || *q < 0x20 || *q > 0x7e) { *op++ = '\\'; oleft--; }
+                    if (oleft <= 1) break;
+                    *op++ = *q; oleft--;
+                }
+                OBJ_APPEND_LIT("\",\"folder\":\"");
+                for (const char *q = folder; *q && oleft > 1; q++) {
+                    if (*q == '"' || *q == '\\' || *q < 0x20 || *q > 0x7e) { *op++ = '\\'; oleft--; }
+                    if (oleft <= 1) break;
+                    *op++ = *q; oleft--;
+                }
+                OBJ_APPEND_LIT("\"}");
+                *op = '\0';
+                #undef OBJ_APPEND_LIT
+                int obj_len = (int)strlen(obj);
+                int need_comma = first ? 0 : 1;
+                if (need_comma + obj_len + 1 > left) break;
+                if (need_comma) { *p++ = ','; left--; }
+                memcpy(p, obj, obj_len);
+                p += obj_len;
+                left -= obj_len;
+                first = 0;
+            }
+        }
+        if (left > 0) snprintf(p, left, "]");
+        return (int)strlen(buf);
     }
     if (strcmp(key, "error") == 0) {
         return arr_get_error(e, buf, buf_len);
