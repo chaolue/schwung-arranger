@@ -1426,6 +1426,24 @@ function deleteSetlist(setlist) {
 
 /* ── MIDI output routing ────────────────────────────────────────────── */
 
+/* Build the current song's timeline in the DSP WITHOUT starting playback.
+ * Used when jumping to a section on first load: we want the full song timeline
+ * built so a subsequent play_from_bar seek is instant, but we must NOT send
+ * `play` (which starts from tick 0 and would play the song's first note before
+ * the seek lands — a double-note blip). */
+function buildSongTimelineOnly() {
+    if (!currentSong) return;
+    if (typeof host_module_set_param !== "function") return;
+    const json = toEngineSongJson(currentSong);
+    const block = typeof host_module_set_param_blocking === "function";
+    const set = block ? host_module_set_param_blocking : host_module_set_param;
+    const t = block ? 500 : undefined;
+    set("library_root", LIBRARY_ROOT, t);
+    pushOutputRoutingToDsp();
+    set("loop", "0", t);
+    set("song_json", json, t);
+}
+
 function playCurrentSong(preloadStaged) {
     if (!currentSong) { logDebug("playCurrentSong: no currentSong"); return; }
     lastLoggedDspError = null;
@@ -3483,7 +3501,7 @@ function drawBuilder() {
     const playingIdx = (playbackState === "playing" && builderDisplaySection >= 0) ? builderDisplaySection : playbackSectionIndex;
     const displayIdx = playbackState === "playing" ? playingIdx : currentSectionIndex;
     const sec = currentSong ? currentSong.sections[displayIdx] : null;
-    drawMenuHeader(scrollHeader("Edit: " + (currentSong ? shortSongName(currentSong.name) : ""), songIsLocked() ? 20 : 21), songIsLocked() ? "*" : "");
+    drawMenuHeader(scrollHeader("Edit: " + (currentSong ? shortSongName(currentSong.name) : ""), songIsLocked() ? 27 : 28), songIsLocked() ? "*" : "");
     if (!sec) {
         print(2, LIST_TOP_Y, "No section.", 1);
         drawOverlay();
@@ -3673,7 +3691,7 @@ function trimToggleAdvanced() {
 
 function drawTrim() {
     const clip = trimClip;
-    drawMenuHeader(scrollHeader("Edit: " + (clip ? clipShortName(clip) : "Clip Settings"), songIsLocked() ? 20 : 21), trimAdvanced ? "A" : "");
+    drawMenuHeader(scrollHeader("Edit: " + (clip ? clipShortName(clip) : "Clip Settings"), songIsLocked() ? 27 : 28), trimAdvanced ? "A" : "");
     if (!clip) {
         print(2, LIST_TOP_Y, "No clip selected", 1);
         return;
@@ -3686,7 +3704,7 @@ function drawTrim() {
     trimSrcScroller.setSelected(srcLabel);
     trimSrcScroller.tick();
     let srcText = srcLabel;
-    if (srcText.length > 24) srcText = trimSrcScroller.getScrolledText(srcText, 24);
+    if (srcText.length > 21) srcText = trimSrcScroller.getScrolledText(srcText, 21);
     print(2, LIST_TOP_Y, srcText, 1);
     const maxBar = clipTrueBars(clip);
     /* The denominator and Start/End are always in EFFECTIVE song-bar units
@@ -4092,7 +4110,7 @@ function drawSetlistBank() {
 }
 
 function drawSetlistEdit() {
-    drawMenuHeader(scrollHeader("Edit: " + (currentSetlist ? currentSetlist.name : ""), 21), "");
+    drawMenuHeader(scrollHeader("Edit: " + (currentSetlist ? currentSetlist.name : ""), 28), "");
     const songs = currentSetlist ? currentSetlist.songs : [];
     const items = songs.map((s, i) => ({ type: "song", index: i, name: shortSongName(s.name) || "" }));
     items.push({ type: "add" });
@@ -4114,7 +4132,7 @@ function drawSetlistEdit() {
 }
 
 function drawSetlistPick() {
-    drawMenuHeader(scrollHeader("Add Song: " + (currentSetlist ? shortSongName(currentSetlist.name) : ""), 21), "");
+    drawMenuHeader(scrollHeader("Add Song: " + (currentSetlist ? shortSongName(currentSetlist.name) : ""), 24), "");
     const items = songFiles.map(f => ({ label: shortSongName(f.name || f) }));
     drawMenuList({
         items,
@@ -4139,7 +4157,7 @@ function drawSectionPick() {
 
 function drawSetlistClick() {
     const entry = currentSetlist ? currentSetlist.songs[setlistSongIndex] : null;
-    drawMenuHeader(scrollHeader("Edit: " + (entry ? shortSongName(entry.name) : ""), 21), "");
+    drawMenuHeader(scrollHeader("Edit: " + (entry ? shortSongName(entry.name) : ""), 28), "");
     const bars = entry ? (entry.click_bars || 0) : 0;
     const note = entry ? (entry.click_note || 0) : 0;
     const stop = entry ? (entry.stop_after_finish || false) : false;
@@ -7138,15 +7156,29 @@ function perfFireSectionJump(sectionIndex) {
         }
         perfSeekScheduled = false;
     } else {
-        /* Full song not yet in the DSP: rebuild a sliced one-shot timeline.
-         * The sliced timeline starts at bar 1, so offset by startBar to map
-         * back to the full song. */
+        /* Full song not yet in the DSP: load the FULL song timeline, then seek
+         * to the target section. Keeping the full song in the DSP means later
+         * section jumps use the fast seek path (play_from_bar) instead of a
+         * blocking rebuild, so live section changes are blip-free. Build the
+         * timeline WITHOUT `play` (which would start from tick 0 and play the
+         * song's first note before the seek lands — a double-note blip), then
+         * seek directly to the target bar. */
         const temp = JSON.parse(JSON.stringify(full));
-        temp.sections = JSON.parse(JSON.stringify(full.sections.slice(sectionIndex)));
         currentSong = temp;
-        previewBarOffset = startBar;
-        playCurrentSong();
+        previewBarOffset = 0;
+        buildSongTimelineOnly();
         perfFullSongLoaded = true;
+        /* The build above can still be in flight (a first-time build with the
+         * whole-library clip fallback can exceed the blocking-write timeout).
+         * Use the BLOCKING variant with the same budget as playCurrentSong's
+         * `play` write so this seek reliably waits out the build and lands on
+         * the completed timeline — otherwise it could race the build over the
+         * shared shadow_param SHM slot and seek against a partial/stale
+         * timeline (wrong bar) or be dropped entirely. */
+        const set2 = typeof host_module_set_param_blocking === "function"
+            ? host_module_set_param_blocking : host_module_set_param;
+        set2("play_from_bar", String(startBar),
+             typeof host_module_set_param_blocking === "function" ? 1000 : undefined);
     }
     /* Clear stale transport/end state so perfTick doesn't act on old data. */
     lastDspState = null;
