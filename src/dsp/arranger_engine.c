@@ -15,18 +15,29 @@
  *  - malformed SMF track-length tolerance.
  */
 
+/* Must be defined before any system header so CPU_ZERO/CPU_SET and
+ * sched_setaffinity are available in the worker thread. */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include <math.h>
 #include <stdarg.h>
 #include <time.h>
+#include <errno.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 #include <dirent.h>
 #include <ctype.h>
+#include <pthread.h>
+#include <semaphore.h>
+#include <sched.h>
 #include "plugin_api_v1.h"
 
 static const host_api_v1_t *g_host;
@@ -79,6 +90,34 @@ static void dsp_host_log(const char *fmt, ...) {
     g_host->log(buf);
 }
 
+/* -------------------------------------------------------------------------- */
+/* Worker thread + logging ring buffer                                        */
+/* -------------------------------------------------------------------------- */
+/* The Schwung host has no control thread: every plugin entry point runs on
+ * the SPI audio callback (SCHED_FIFO 90, core 3, ~900us budget). All file
+ * I/O, allocation, and long builds must therefore move to a dedicated
+ * SCHED_OTHER worker thread. The audio thread only ever posts to a semaphore,
+ * sets/loads atomics, and reads the last value the worker published. */
+
+#define LOG_RING_CAP 256
+#define LOG_RING_MSG_LEN 256
+
+typedef struct {
+    char msg[LOG_RING_CAP][LOG_RING_MSG_LEN];
+    _Atomic(uint32_t) head;   /* next slot to write (audio thread) */
+    _Atomic(uint32_t) tail;   /* next slot to read (worker thread) */
+} log_ring_t;
+
+/* SPSC logging ring: the audio thread enqueues, the worker drains. */
+static log_ring_t g_log_ring;
+
+/* Forward declarations: the ring helpers and worker thread are defined after
+ * the engine struct and copy_trunc (they reference both). */
+static void log_ring_enqueue(log_ring_t *ring, const char *msg);
+static void log_ring_drain(log_ring_t *ring);
+static void dsp_log_enqueue_worker(const char *fmt, ...);
+static void *arranger_worker_thread(void *arg);
+
 #define MAX_TRACKS         64
 #define MAX_EVENTS         65536
 #define MAX_CLIP_EVENTS    65536
@@ -90,6 +129,11 @@ static void dsp_host_log(const char *fmt, ...) {
 #define MAX_CLIPS_PER_FOLDER 512
 #define MAX_PATH_LEN       512
 #define MAX_JSON_LEN       8192
+
+/* Fixed double-buffer capacities for the folder/song scan caches. The worker
+ * scans into the inactive slot; the audio thread reads the active slot. */
+#define FOLDER_CACHE_MAX 512
+#define SONG_CACHE_MAX   256
 
 #define OUTPUT_TARGET_EXTERNAL 0
 #define OUTPUT_TARGET_MOVE     1
@@ -174,18 +218,123 @@ typedef struct {
 typedef struct engine engine_t;
 typedef struct folder_entry folder_entry_t;
 typedef struct song_entry song_entry_t;
-static folder_entry_t* scan_library_heap(engine_t *e, int *out_count);
-static song_entry_t* scan_songs_heap(engine_t *e, int *out_count);
-static folder_entry_t* get_cached_folders(engine_t *e, int *out_count);
+static void scan_library_into(engine_t *e, folder_entry_t *folders, int *out_count);
+static void scan_songs_into(engine_t *e, song_entry_t *songs, int *out_count);
 static const char* clip_lookup_find(engine_t *e, const char *leaf);
 static void clip_lookup_free(engine_t *e);
+
+/* One lightweight snapshot of a folder under library_root.
+ * Clips are stored as a single concatenated buffer to keep the entry small.
+ * Must be >= MAX_CLIPS_PER_FOLDER so no clip is dropped from the scan. */
+#define FOLDER_HEAP_CLIPS 512
+struct folder_entry {
+    char name[128];
+    char path[MAX_PATH_LEN];
+    char category[128];     /* category path (e.g. "Vintage/03 Swing"); "" for root-level folders */
+    char *clip_names;       /* heap: clip_count * 128 byte slots */
+    uint32_t *clip_bars;    /* heap: clip_count bar counts */
+    int clip_count;
+};
+
+struct song_entry {
+    char name[128];
+    char path[MAX_PATH_LEN];
+};
+
+typedef struct {
+    const char *name;
+    uint32_t bars;
+} clip_sort_pair_t;
+
+static int clip_pair_cmp(const void *a, const void *b) {
+    const clip_sort_pair_t *pa = (const clip_sort_pair_t *)a;
+    const clip_sort_pair_t *pb = (const clip_sort_pair_t *)b;
+    return strcasecmp(pa->name, pb->name);
+}
+
+static int folder_entry_cmp(const void *a, const void *b) {
+    const folder_entry_t *fa = a, *fb = b;
+    return strcasecmp(fa->name, fb->name);
+}
+
+static void copy_trunc(char *dst, size_t dst_size, const char *src) {
+    size_t i = 0;
+    while (i + 1 < dst_size && src[i] != '\0') {
+        dst[i] = src[i];
+        i++;
+    }
+    dst[i] = '\0';
+}
+
+/* -------------------------------------------------------------------------- */
+/* Worker thread + logging ring buffer (bodies)                               */
+/* -------------------------------------------------------------------------- */
+
+/* Enqueue a formatted message into the SPSC ring. Safe to call from the audio
+ * thread: no allocation, no I/O, no blocking. Drops the message if the ring
+ * is full (oldest unread messages are preserved). */
+static void log_ring_enqueue(log_ring_t *ring, const char *msg) {
+    if (!ring || !msg) return;
+    uint32_t head = atomic_load_explicit(&ring->head, memory_order_relaxed);
+    uint32_t tail = atomic_load_explicit(&ring->tail, memory_order_acquire);
+    if (head - tail >= LOG_RING_CAP) return; /* full */
+    copy_trunc(ring->msg[head % LOG_RING_CAP], LOG_RING_MSG_LEN, msg);
+    atomic_store_explicit(&ring->head, head + 1, memory_order_release);
+}
+
+/* Drain the ring on the worker thread, doing the actual vsnprintf/file I/O
+ * that the audio thread must never do. */
+static void log_ring_drain(log_ring_t *ring) {
+    if (!ring) return;
+    for (;;) {
+        uint32_t tail = atomic_load_explicit(&ring->tail, memory_order_relaxed);
+        uint32_t head = atomic_load_explicit(&ring->head, memory_order_acquire);
+        if (tail == head) break;
+        const char *msg = ring->msg[tail % LOG_RING_CAP];
+        if (g_host && g_host->log) {
+            char host_buf[LOG_RING_MSG_LEN + 16];
+            snprintf(host_buf, sizeof(host_buf), "[arr_dsp] %s", msg);
+            g_host->log(host_buf);
+        }
+        FILE *fp = fopen("/data/UserData/UserLibrary/Arranger/.dsp_log", "a");
+        if (fp) {
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            struct tm tm_info;
+            localtime_r(&ts.tv_sec, &tm_info);
+            fprintf(fp, "[%04d-%02d-%02d %02d:%02d:%02d.%03d] %s\n",
+                    tm_info.tm_year + 1900, tm_info.tm_mon + 1, tm_info.tm_mday,
+                    tm_info.tm_hour, tm_info.tm_min, tm_info.tm_sec,
+                    (int)(ts.tv_nsec / 1000000), msg);
+            fclose(fp);
+        }
+        atomic_store_explicit(&ring->tail, tail + 1, memory_order_release);
+    }
+}
+
+/* Audio-thread-safe formatted log: formats into a stack buffer and enqueues
+ * into the ring. No I/O, no allocation, no blocking. */
+static void dsp_log_enqueue_worker(const char *fmt, ...) {
+    if (!fmt || !g_dsp_debug) return;
+    va_list ap;
+    va_start(ap, fmt);
+    char buf[LOG_RING_MSG_LEN];
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    log_ring_enqueue(&g_log_ring, buf);
+}
 
 /* -------------------------------------------------------------------------- */
 /* Engine instance                                                            */
 /* -------------------------------------------------------------------------- */
 
 typedef struct engine {
-    /* Library root */
+    /* Library root. The audio thread writes library_root_requested (from
+     * set_param) and reads it back (get_param); the worker copies it into
+     * library_root on wake and uses that for all scans/builds. Splitting the
+     * two keeps the multi-byte string race-free: the audio thread never
+     * writes the field the worker reads. */
+    char library_root_requested[MAX_PATH_LEN];
     char library_root[MAX_PATH_LEN];
 
     /* Loaded clips (one per unique source file referenced by current song) */
@@ -353,16 +502,25 @@ typedef struct engine {
     int move_channel;        /* 0-15 */
     int schwung_channel;     /* 0-15 */
 
-    /* Cached library scan. The JS UI queries folder_count/folder_name_* and
-     * song_count/song_name_* repeatedly; scanning the filesystem on every
-     * get_param is wasteful. We cache the scan and only refresh when the
-     * library_root changes or scan_library is explicitly requested. */
-    folder_entry_t *lib_cache;
-    int lib_cache_count;
-    song_entry_t *song_cache;
-    int song_cache_count;
-    int lib_cache_valid;
-    int song_cache_valid;
+    /* Folder/song scan caches as fixed double-buffers. The worker scans into
+     * slot [1 - active] and flips active when done; the audio thread only
+     * reads slot [active]. dirty is set by set_param("scan_library") /
+     * library_root change and cleared by the worker once it rescans. */
+    folder_entry_t folders[2][FOLDER_CACHE_MAX];
+    int folder_count[2];
+    _Atomic(int) folder_active;
+    _Atomic(int) folder_dirty;
+    song_entry_t songs[2][SONG_CACHE_MAX];
+    int song_count[2];
+    _Atomic(int) song_active;
+    _Atomic(int) song_dirty;
+
+    /* Worker thread. All file I/O, allocation, and long builds run here on
+     * SCHED_OTHER; the audio thread only posts to worker_wake and reads
+     * atomics. worker_running is set to 0 by destroy_instance to stop it. */
+    pthread_t worker_thread;
+    sem_t worker_wake;
+    _Atomic(int) worker_running;
 
     /* Lazy whole-library clip index: maps a clip leaf name (e.g.
      * "072 S07 Verse Stick ALT.mid") to its full path under library_root.
@@ -379,6 +537,54 @@ typedef struct engine {
     /* Last error message */
     char error_msg[256];
 } engine_t;
+
+/* Forward declaration: the engine's deferred work, run on the worker thread
+ * each wake. Defined after the scan helpers. */
+static void arranger_worker_iterate(engine_t *e);
+
+/* -------------------------------------------------------------------------- */
+/* Worker thread body                                                         */
+/* -------------------------------------------------------------------------- */
+
+/* The worker thread. Demotes itself off SCHED_FIFO as its FIRST action (see
+ * the comment in the body — this is the exact bug schwung-keydetect shipped),
+ * then loops on the wake semaphore, draining the log ring and running the
+ * engine's deferred work each iteration. */
+static void *arranger_worker_thread(void *arg) {
+    /* MUST be first, and MUST be sched_setscheduler — not nice().
+     *
+     * pthread_create() inherits the calling thread's scheduling policy.
+     * create_instance() runs on Move's SPI audio callback (SCHED_FIFO 90),
+     * so this thread is born SCHED_FIFO 90 too. nice() only affects
+     * SCHED_OTHER/CFS threads — it is a documented no-op on a thread that
+     * is still classified SCHED_FIFO, regardless of what priority value
+     * you pass it. schwung-keydetect shipped exactly this bug: nice(10)
+     * with no preceding sched_setscheduler call, verified via a ~200ms
+     * FFT pass running at FIFO 70 (above Move's own Link Main at FIFO 35)
+     * and causing periodic audio dropouts on a 4-second grid until fixed.
+     * The scheduling *class* must change before priority is a meaningful
+     * concept at all. */
+    struct sched_param sp = { .sched_priority = 0 };
+    if (sched_setscheduler(0, SCHED_OTHER, &sp) != 0) {
+        dsp_log_enqueue_worker("worker: sched_setscheduler failed, errno=%d", errno);
+        /* Fall through anyway — staying FIFO would be worse than logging
+         * and continuing, and this thread still does no file I/O until
+         * this call is confirmed, so the audio thread is not yet at risk. */
+    }
+
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    CPU_SET(0, &set); CPU_SET(1, &set); CPU_SET(2, &set);   /* core 3 stays free for SPI */
+    sched_setaffinity(0, sizeof(set), &set);
+
+    engine_t *e = (engine_t*)arg;
+    while (atomic_load_explicit(&e->worker_running, memory_order_acquire)) {
+        sem_wait(&e->worker_wake);          /* worker's own thread: blocking here is fine */
+        log_ring_drain(&g_log_ring);
+        arranger_worker_iterate(e);
+    }
+    return NULL;
+}
 
 /* -------------------------------------------------------------------------- */
 /* Helpers                                                                    */
@@ -1743,92 +1949,46 @@ static int preload_song_from_json(engine_t *e, const char *json) {
 /* Library scanning (for JS UI via get_param)                                */
 /* -------------------------------------------------------------------------- */
 
-/* One lightweight snapshot of a folder under library_root.
- * Clips are stored as a single concatenated buffer to keep the entry small.
- * Must be >= MAX_CLIPS_PER_FOLDER so no clip is dropped from the scan. */
-#define FOLDER_HEAP_CLIPS 512
-struct folder_entry {
-    char name[128];
-    char path[MAX_PATH_LEN];
-    char category[128];     /* category path (e.g. "Vintage/03 Swing"); "" for root-level folders */
-    char *clip_names;       /* heap: clip_count * 128 byte slots */
-    uint32_t *clip_bars;    /* heap: clip_count bar counts */
-    int clip_count;
-};
-
-typedef struct {
-    const char *name;
-    uint32_t bars;
-} clip_sort_pair_t;
-
-static int clip_pair_cmp(const void *a, const void *b) {
-    const clip_sort_pair_t *pa = (const clip_sort_pair_t *)a;
-    const clip_sort_pair_t *pb = (const clip_sort_pair_t *)b;
-    return strcasecmp(pa->name, pb->name);
-}
-
-static int folder_entry_cmp(const void *a, const void *b) {
-    const folder_entry_t *fa = a, *fb = b;
-    return strcasecmp(fa->name, fb->name);
-}
-
-static void copy_trunc(char *dst, size_t dst_size, const char *src) {
-    size_t i = 0;
-    while (i + 1 < dst_size && src[i] != '\0') {
-        dst[i] = src[i];
-        i++;
-    }
-    dst[i] = '\0';
-}
-
-static void free_folders(folder_entry_t *folders, int count) {
-    if (!folders) return;
-    for (int i = 0; i < count; i++) {
-        if (folders[i].clip_names) { free(folders[i].clip_names); folders[i].clip_names = NULL; }
-        if (folders[i].clip_bars) { free(folders[i].clip_bars); folders[i].clip_bars = NULL; }
-    }
-    free(folders);
-}
-
-/* -------------------------------------------------------------------------- */
-/* Song file scanning (for JS UI via get_param)                                */
-/* -------------------------------------------------------------------------- */
-
-struct song_entry {
-    char name[128];
-    char path[MAX_PATH_LEN];
-};
-
 static int song_entry_cmp(const void *a, const void *b) {
     const song_entry_t *sa = a, *sb = b;
     return strcasecmp(sa->name, sb->name);
 }
 
-static void free_songs(song_entry_t *songs) {
-    if (songs) free(songs);
+/* Free the per-folder heap clip buffers in one double-buffer slot. The
+ * folders[] array itself is a fixed struct member (no free needed); only the
+ * clip_names/clip_bars pointers are heap. Runs on the worker thread. */
+static void free_folder_slot(folder_entry_t *folders, int count) {
+    if (!folders) return;
+    for (int i = 0; i < count; i++) {
+        if (folders[i].clip_names) { free(folders[i].clip_names); folders[i].clip_names = NULL; }
+        if (folders[i].clip_bars) { free(folders[i].clip_bars); folders[i].clip_bars = NULL; }
+        folders[i].clip_count = 0;
+    }
 }
 
-/* Free the cached library/song scans, if any. */
+/* Free the cached library/song scans, if any. Runs on the worker thread (or
+ * on destroy_instance after the worker is joined). */
 static void free_library_cache(engine_t *e) {
-    if (e->lib_cache) { free_folders(e->lib_cache, e->lib_cache_count); e->lib_cache = NULL; }
-    e->lib_cache_count = 0;
-    e->lib_cache_valid = 0;
-    if (e->song_cache) { free_songs(e->song_cache); e->song_cache = NULL; }
-    e->song_cache_count = 0;
-    e->song_cache_valid = 0;
+    free_folder_slot(e->folders[0], e->folder_count[0]);
+    free_folder_slot(e->folders[1], e->folder_count[1]);
+    e->folder_count[0] = 0;
+    e->folder_count[1] = 0;
+    atomic_store_explicit(&e->folder_active, 0, memory_order_relaxed);
+    atomic_store_explicit(&e->folder_dirty, 0, memory_order_relaxed);
+    e->song_count[0] = 0;
+    e->song_count[1] = 0;
+    atomic_store_explicit(&e->song_active, 0, memory_order_relaxed);
+    atomic_store_explicit(&e->song_dirty, 0, memory_order_relaxed);
     clip_lookup_free(e);
 }
 
-/* Return the cached folder scan, scanning once and reusing it until the
- * library_root changes or scan_library is requested. */
+/* Return the active folder scan slot. The worker scans into the inactive slot
+ * and flips folder_active when done; the audio thread only reads slot
+ * [folder_active]. Zero allocation, zero I/O. */
 static folder_entry_t* get_cached_folders(engine_t *e, int *out_count) {
-    if (!e->lib_cache_valid) {
-        if (e->lib_cache) { free_folders(e->lib_cache, e->lib_cache_count); e->lib_cache = NULL; }
-        e->lib_cache = scan_library_heap(e, &e->lib_cache_count);
-        e->lib_cache_valid = 1;
-    }
-    *out_count = e->lib_cache_count;
-    return e->lib_cache;
+    int active = atomic_load_explicit(&e->folder_active, memory_order_acquire);
+    *out_count = e->folder_count[active];
+    return e->folders[active];
 }
 
 /* Lazy whole-library clip index. Walks the library ONCE (via the cached
@@ -1915,38 +2075,33 @@ static void clip_lookup_free(engine_t *e) {
     e->clip_index_valid = 0;
 }
 
-/* Return the cached song scan, scanning once and reusing it. */
+/* Return the active song scan slot. Same double-buffer discipline as
+ * get_cached_folders. */
 static song_entry_t* get_cached_songs(engine_t *e, int *out_count) {
-    if (!e->song_cache_valid) {
-        if (e->song_cache) { free_songs(e->song_cache); e->song_cache = NULL; }
-        e->song_cache = scan_songs_heap(e, &e->song_cache_count);
-        e->song_cache_valid = 1;
-    }
-    *out_count = e->song_cache_count;
-    return e->song_cache;
+    int active = atomic_load_explicit(&e->song_active, memory_order_acquire);
+    *out_count = e->song_count[active];
+    return e->songs[active];
 }
 
-static song_entry_t* scan_songs_heap(engine_t *e, int *out_count) {
+static void scan_songs_into(engine_t *e, song_entry_t *songs, int *out_count) {
     *out_count = 0;
     char songs_dir[MAX_PATH_LEN];
     char parent[MAX_PATH_LEN];
     /* library_root is a folder; derive sibling Songs dir without using '..'
      * because some host file functions do not normalize relative paths. */
     int n = snprintf(parent, sizeof(parent), "%s", e->library_root);
-    if (n < 0 || (size_t)n >= sizeof(parent)) return NULL;
+    if (n < 0 || (size_t)n >= sizeof(parent)) return;
     char *last_slash = strrchr(parent, '/');
-    if (!last_slash) return NULL;
+    if (!last_slash) return;
     *last_slash = '\0';
     n = snprintf(songs_dir, sizeof(songs_dir), "%s/Songs", parent);
-    if (n < 0 || (size_t)n >= sizeof(songs_dir)) return NULL;
+    if (n < 0 || (size_t)n >= sizeof(songs_dir)) return;
 
     DIR *d = opendir(songs_dir);
-    if (!d) return NULL;
-    song_entry_t *songs = calloc(MAX_SOURCE_FOLDERS, sizeof(song_entry_t));
-    if (!songs) { closedir(d); return NULL; }
+    if (!d) return;
     int count = 0;
     struct dirent *ent;
-    while ((ent = readdir(d)) && count < MAX_SOURCE_FOLDERS) {
+    while ((ent = readdir(d)) && count < SONG_CACHE_MAX) {
         if (ent->d_name[0] == '.') continue;
         size_t len = strlen(ent->d_name);
         if (len < 6 || strcasecmp(ent->d_name + len - 5, ".json") != 0) continue;
@@ -1984,7 +2139,6 @@ static song_entry_t* scan_songs_heap(engine_t *e, int *out_count) {
     closedir(d);
     qsort(songs, count, sizeof(song_entry_t), song_entry_cmp);
     *out_count = count;
-    return songs;
 }
 
 static int scan_clip_bars(const char *path, uint32_t *out_bars) {
@@ -2331,15 +2485,13 @@ static void scan_library_recursive(engine_t *e, const char *dir,
     closedir(d);
 }
 
-static folder_entry_t* scan_library_heap(engine_t *e, int *out_count) {
+static void scan_library_into(engine_t *e, folder_entry_t *folders, int *out_count) {
     *out_count = 0;
     DIR *d = opendir(e->library_root);
-    if (!d) return NULL;
-    folder_entry_t *folders = calloc(MAX_SOURCE_FOLDERS, sizeof(folder_entry_t));
-    if (!folders) { closedir(d); return NULL; }
+    if (!d) return;
     int count = 0;
     struct dirent *ent;
-    while ((ent = readdir(d)) && count < MAX_SOURCE_FOLDERS) {
+    while ((ent = readdir(d)) && count < FOLDER_CACHE_MAX) {
         if (ent->d_name[0] == '.') continue;
         char full_path[MAX_PATH_LEN];
         int n = snprintf(full_path, sizeof(full_path), "%s/%s", e->library_root, ent->d_name);
@@ -2360,7 +2512,41 @@ static folder_entry_t* scan_library_heap(engine_t *e, int *out_count) {
     closedir(d);
     qsort(folders, count, sizeof(folder_entry_t), folder_entry_cmp);
     *out_count = count;
-    return folders;
+}
+
+/* The engine's deferred work, run on the worker thread each wake. Currently
+ * handles the folder/song scan double-buffers: if a rescan was requested
+ * (folder_dirty/song_dirty), scan into the inactive slot and flip active.
+ * Runs on the worker thread, so file I/O and allocation are safe here. */
+static void arranger_worker_iterate(engine_t *e) {
+    if (!e) return;
+
+    /* Copy the audio-thread-requested library root into the worker's working
+     * copy before any scan/build that reads it. */
+    copy_trunc(e->library_root, sizeof(e->library_root), e->library_root_requested);
+
+    /* Folder scan. */
+    if (atomic_load_explicit(&e->folder_dirty, memory_order_acquire)) {
+        int active = atomic_load_explicit(&e->folder_active, memory_order_acquire);
+        int target = 1 - active;
+        /* Free the previous contents of the target slot (worker-side). */
+        free_folder_slot(e->folders[target], e->folder_count[target]);
+        e->folder_count[target] = 0;
+        scan_library_into(e, e->folders[target], &e->folder_count[target]);
+        /* Publish: the audio thread only reads slot [active]. */
+        atomic_store_explicit(&e->folder_active, target, memory_order_release);
+        atomic_store_explicit(&e->folder_dirty, 0, memory_order_release);
+    }
+
+    /* Song scan. */
+    if (atomic_load_explicit(&e->song_dirty, memory_order_acquire)) {
+        int active = atomic_load_explicit(&e->song_active, memory_order_acquire);
+        int target = 1 - active;
+        e->song_count[target] = 0;
+        scan_songs_into(e, e->songs[target], &e->song_count[target]);
+        atomic_store_explicit(&e->song_active, target, memory_order_release);
+        atomic_store_explicit(&e->song_dirty, 0, memory_order_release);
+    }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -2783,13 +2969,17 @@ static void* arr_create_instance(const char *module_dir, const char *config_json
     engine_t *e = calloc(1, sizeof(engine_t));
     if (!e) return NULL;
     /* Log the build version unconditionally (not gated behind g_dsp_debug) so
-     * a fresh module load always records which dsp.so is in memory. */
+     * a fresh module load always records which dsp.so is in memory. Routed
+     * through the ring buffer so this one-time call still obeys the "no
+     * logging on the audio thread" rule. */
     {
         char ver[64];
         snprintf(ver, sizeof(ver), "%s", DSP_BUILD_VERSION);
-        if (g_host && g_host->log) g_host->log(ver);
+        log_ring_enqueue(&g_log_ring, ver);
     }
     snprintf(e->library_root, sizeof(e->library_root),
+             "/data/UserData/UserLibrary/Arranger/MidiLibrary");
+    snprintf(e->library_root_requested, sizeof(e->library_root_requested),
              "/data/UserData/UserLibrary/Arranger/MidiLibrary");
     e->guard_fraction = 0.125;
     e->swap_guard_fraction = 0.25; /* 25% of a beat at mid-clip swap boundaries */
@@ -2799,12 +2989,33 @@ static void* arr_create_instance(const char *module_dir, const char *config_json
     e->schwung_channel = 9;  /* channel 10 for GM drums */
     e->last_event_channel_override = -1; /* no per-event override by default */
     e->loop = 1;          /* default to looping for performance mode */
+
+    /* Initialize the worker thread's wake semaphore and running flag, then
+     * spawn it. The worker demotes itself off SCHED_FIFO as its first action
+     * (see arranger_worker_thread). */
+    if (sem_init(&e->worker_wake, 0, 0) != 0) {
+        free(e);
+        return NULL;
+    }
+    atomic_store_explicit(&e->worker_running, 1, memory_order_release);
+    if (pthread_create(&e->worker_thread, NULL, arranger_worker_thread, e) != 0) {
+        sem_destroy(&e->worker_wake);
+        free(e);
+        return NULL;
+    }
     return e;
 }
 
 static void arr_destroy_instance(void *instance) {
     engine_t *e = instance;
     if (!e) return;
+    /* Stop and join the worker thread before any cleanup. Once joined, nothing
+     * is rendering, so the audio-thread-safety rules no longer apply and the
+     * direct free()/clear calls below are safe. */
+    atomic_store_explicit(&e->worker_running, 0, memory_order_release);
+    sem_post(&e->worker_wake); /* wake the worker so it observes the flag and exits */
+    pthread_join(e->worker_thread, NULL);
+    sem_destroy(&e->worker_wake);
     clear_song(e);
     free_library_cache(e);
     free(e);
@@ -2879,13 +3090,21 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
     }
 
     if (strcmp(key, "library_root") == 0) {
-        snprintf(e->library_root, sizeof(e->library_root), "%s", val);
-        free_library_cache(e);
+        /* Store the requested root on the audio thread; the worker copies it
+         * into its working copy and rescans on the next wake. No I/O here. */
+        snprintf(e->library_root_requested, sizeof(e->library_root_requested), "%s", val);
+        atomic_store_explicit(&e->folder_dirty, 1, memory_order_release);
+        atomic_store_explicit(&e->song_dirty, 1, memory_order_release);
+        sem_post(&e->worker_wake);
         return;
     }
     if (strcmp(key, "scan_library") == 0) {
-        /* Explicit request to refresh the cached library/song scans. */
-        free_library_cache(e);
+        /* Explicit request to refresh the cached library/song scans. Just
+         * flags the worker; it rescans into the inactive slot and flips
+         * active when done. No I/O on the audio thread. */
+        atomic_store_explicit(&e->folder_dirty, 1, memory_order_release);
+        atomic_store_explicit(&e->song_dirty, 1, memory_order_release);
+        sem_post(&e->worker_wake);
         return;
     }
     if (strcmp(key, "debug") == 0) {
@@ -3275,7 +3494,7 @@ static int arr_get_param(void *instance, const char *key, char *buf, int buf_len
         return snprintf(buf, buf_len, "%u", e->swap_guard_suppressed);
     }
     if (strcmp(key, "library_root") == 0) {
-        return snprintf(buf, buf_len, "%s", e->library_root);
+        return snprintf(buf, buf_len, "%s", e->library_root_requested);
     }
     if (strcmp(key, "folder_count") == 0) {
         int n = 0;
