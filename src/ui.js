@@ -47,6 +47,14 @@ import {
     createMenuStack
 } from '/data/UserData/schwung/shared/menu_stack.mjs';
 
+import {
+    fontPrint4x5
+} from '/data/UserData/schwung/shared/param_pages/font4x5.mjs';
+
+import {
+    asciiFold
+} from '/data/UserData/schwung/shared/param_pages/render_page.mjs';
+
 import * as os from 'os';
 
 const { print, clear_screen, setTimeout } = globalThis;
@@ -338,6 +346,8 @@ let perfLastUpDownScrollRow = -1;   /* last scroll row the up/down button LEDs w
 let perfSelectedSection = -1;       /* section selected while stopped in performance view */
 let perfSelectedSong = -1;          /* song selected while stopped in performance view */
 let perfStoppedKeepSelection = false; /* if true, perfStop() preserves perfSelectedSection/perfSelectedSong */
+let perfSetTotalSec = 0;            /* cached total duration of the whole setlist (sec) */
+let perfSetTotalKeyCached = "";     /* cache key for perfSetTotalSec */
 
 /* ── Jam mode state ─────────────────────────────────────────────────── */
 let jamGrooves = [];                /* grooves for the selected folder: { path, name, type, bars } */
@@ -403,10 +413,12 @@ const jamHeaderScroller = createTextScroller();
  * NSec / Next). Kept separate from the shared menu/header scrollers so long
  * song and section names scroll in place without fighting other scrollers. */
 const perfLineScrollers = [0, 1, 2, 3].map(() => createTextScroller());
-/* Max name chars visible per line. Screen is 128px wide starting at x=2
- * (126px usable = 21 chars at 6px each); the widest prefix " NSec: " is 7
- * chars, leaving 14 for the name. The scroller scrolls the full name. */
-const PERF_LINE_MAX_CHARS = 14;
+/* Max name chars visible per line. The performance display now uses the
+ * Menu Header's proportional 4x5 face, which is narrower than the device
+ * 6px font, so 14 chars of name plus the widest 7-char prefix (" NSec: ")
+ * always fit within the 126px usable width. The scroller scrolls the full
+ * name. */
+const PERF_LINE_MAX_CHARS = 28;
 
 const PAD_PREVIEW_DELAY_MS = 250; /* delay before pad tap triggers insert preview */
 
@@ -4178,6 +4190,17 @@ function drawSetlistClick() {
     });
 }
 
+/* The Menu Header's proportional 4x5 face, drawn through the device's
+ * fill_rect. The performance display uses it so its text matches the Menu
+ * Header chrome. font4x5 is uppercase-only, so text is ascii-folded and
+ * uppercased (the same register the Menu Header uses) before drawing. */
+const perfCtx = {
+    fillRect: (x, y, w, h, color) => fill_rect(x, y, w, h, color)
+};
+function perfPrint(x, y, text, color) {
+    fontPrint4x5(perfCtx, x, y, asciiFold(String(text)).toUpperCase(), color);
+}
+
 /* Resolve the effective current song for the performance display, falling
  * back to the setlist entry when no song has been loaded yet. */
 function getPerfDisplaySong() {
@@ -4257,8 +4280,10 @@ function drawPerformance() {
     /* Scroll each info line independently so long song/section names marquee
      * instead of being hard-truncated. */
     const perfLines = [songName, secName, nextSecName || "—", nextSongName || "—"];
-    const perfPrefixes = ["Now:  ", " Sec:  ", " NSec: ", "Next: "];
-    const perfYs = [2, 16, 30, 44];
+    const perfPrefixes = ["Now:  ", " Sec:  ", " NSc:  ", "Next: "];
+    /* 12px line pitch: the 4x5 face is 5 rows tall, so 12px keeps the same
+     * 7px gap between lines the 7-row device font had at 14px. */
+    const perfYs = [2, 14, 26, 38];
     for (let i = 0; i < 4; i++) {
         const scroller = perfLineScrollers[i];
         scroller.setSelected(perfLines[i]);
@@ -4267,8 +4292,32 @@ function drawPerformance() {
         if (text.length > PERF_LINE_MAX_CHARS) {
             text = scroller.getScrolledText(text, PERF_LINE_MAX_CHARS);
         }
-        print(2, perfYs[i], perfPrefixes[i] + text, 1);
+        perfPrint(2, perfYs[i], perfPrefixes[i] + text, 1);
     }
+    /* Song time as it progresses, plus the total song and set durations. The
+     * current position comes from the DSP transport's 0-based fractional bar
+     * (bar_frac) mapped against the full song; during the count-in click the
+     * song has not started, so it reads 0:00. */
+    const songTotal = fullSong ? songDurationSec(fullSong) : 0;
+    let curSec = 0;
+    if (perfPlaying && !perfClickPlaying && lastDspTransport && lastDspTransport.running) {
+        const dspBarFrac = (typeof lastDspTransport.bar_frac === "number")
+            ? lastDspTransport.bar_frac : ((lastDspTransport.bar || 1) - 1);
+        const fullBarFrac = dspBarFrac + previewBarOffset;
+        const bpm = lastDspTransport.bpm || (fullSong ? (fullSong.tempo_bpm || 120) : 120);
+        /* Quarter-note beats per bar, not time_sig_num: 6/8 has 3 quarter
+         * notes per bar, so a bar lasts 3*(60/bpm) seconds. */
+        const qbpb = qtrBeatsPerBar(fullSong || { time_sig_num: lastDspTransport.time_sig_num, time_sig_den: lastDspTransport.time_sig_den });
+        curSec = fullBarFrac * qbpb * (60 / bpm);
+    }
+    const setKey = perfSetTotalKey();
+    if (setKey !== perfSetTotalKeyCached) {
+        perfSetTotalKeyCached = setKey;
+        perfSetTotalSec = computeSetTotalSec();
+    }
+    const timeLine = "Time: " + formatTime(curSec) + "/" + formatTime(songTotal) +
+        "  Set: " + formatTime(perfSetTotalSec);
+    perfPrint(2, 50, timeLine, 1);
     /* Draw any active overlay (e.g. a missing-clip warning) on top of the
      * performance display. */
     drawOverlay();
@@ -4380,13 +4429,13 @@ function drawJam() {
     const shortFolder = shortSongName(folderName);
     jamHeaderScroller.setSelected(shortFolder);
     jamHeaderScroller.tick();
-    /* The screen fits ~21 chars. The "Jam: " prefix takes 5, and the play
-     * indicator (●) on the right takes ~2, so the folder name gets 14 chars
+    /* The screen fits ~32 chars. The "Jam: " prefix takes 5, and the play
+     * indicator (*) on the right takes ~2, so the folder name gets 14 chars
      * while playing and 16 otherwise. Scroll longer names within that width. */
-    const maxName = jamPlaying ? 14 : 16;
+    const maxName = jamPlaying ? 26 : 28;
     let header = shortFolder;
     if (header.length > maxName) header = jamHeaderScroller.getScrolledText(header, maxName);
-    drawMenuHeader("Jam: " + header, jamPlaying ? "●" : "");
+    drawMenuHeader("Jam: " + header, jamPlaying ? "*" : "");
 
     const grooveCols = 4;
     const fillCols = 4;
@@ -6663,6 +6712,70 @@ function clipEffBars(clip) {
     const startFrac = (startBeat - 1) / bpb;
     const endFrac = (bpb - endBeat) / bpb;
     return Math.max(0.25, ((clip.end_bar - clip.start_bar) - startFrac - endFrac) / speed);
+}
+
+/* Total bars across all sections of a song, self-contained (does not depend
+ * on the currentSong global, so it is safe to call for any setlist song). */
+function songTotalBars(song) {
+    if (!song || !song.sections) return 0;
+    const bpb = (song.time_sig_num > 0) ? song.time_sig_num : 4;
+    let bars = 0;
+    for (const sec of song.sections) {
+        for (const c of (sec.clips || [])) {
+            const speed = (typeof c.speed === "number" && c.speed > 0) ? c.speed : 1.0;
+            const startBeat = (c.start_beat !== undefined && c.start_beat > 0) ? c.start_beat : 1;
+            const endBeat = (c.end_beat !== undefined && c.end_beat > 0) ? c.end_beat : bpb;
+            const startFrac = (startBeat - 1) / bpb;
+            const endFrac = (bpb - endBeat) / bpb;
+            bars += Math.max(0.25, ((c.end_bar - c.start_bar) - startFrac - endFrac) / speed);
+        }
+    }
+    return bars;
+}
+
+/* Quarter-note beats per bar for a song's time signature. A bar in 6/8 has
+ * 6 eighth-note beats but only 3 quarter-note beats (num*4/den), and it is
+ * quarter notes that define the BPM. Using time_sig_num directly would make
+ * 6/8 bars count as 6 quarter notes and the time advance 2x too fast. */
+function qtrBeatsPerBar(song) {
+    const num = (song && song.time_sig_num > 0) ? song.time_sig_num : 4;
+    const den = (song && song.time_sig_den > 0) ? song.time_sig_den : 4;
+    return num * 4 / den;
+}
+
+/* Duration of a song in seconds at its own tempo/time-sig. */
+function songDurationSec(song) {
+    if (!song) return 0;
+    const bpm = song.tempo_bpm || 120;
+    return songTotalBars(song) * qtrBeatsPerBar(song) * (60 / bpm);
+}
+
+/* Format seconds as M:SS. */
+function formatTime(sec) {
+    const s = Math.max(0, Math.floor(sec));
+    const m = Math.floor(s / 60);
+    const ss = s % 60;
+    return m + ":" + (ss < 10 ? "0" : "") + ss;
+}
+
+/* Cache key for the setlist total: the setlist path plus every song's path
+ * and click bars, so the total is recomputed only when the setlist changes. */
+function perfSetTotalKey() {
+    if (!currentSetlist) return "";
+    let k = currentSetlist.path || "";
+    for (const e of currentSetlist.songs) k += "|" + (e.path || "") + ":" + (e.click_bars || 0);
+    return k;
+}
+
+/* Total duration of the whole setlist in seconds (sum of every song). */
+function computeSetTotalSec() {
+    if (!currentSetlist) return 0;
+    let total = 0;
+    for (const e of currentSetlist.songs) {
+        const song = readJson(e.path);
+        if (song) total += songDurationSec(song);
+    }
+    return total;
 }
 
 function sectionBars(sec) {
