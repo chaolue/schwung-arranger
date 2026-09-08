@@ -108,12 +108,69 @@ const VIEW_PERF_SETLIST = "perf_setlist";
 const VIEW_JAM_FOLDER = "jam_folder";
 const VIEW_JAM = "jam";
 const VIEW_SECTION_PICK = "section_pick";
+const VIEW_CHORD_PICK = "chord_pick";
+const VIEW_INSTRUMENT = "instrument";
 
 /* Section names offered when adding a new section via Shift + Loop. */
 const SECTION_NAMES = [
     "Intro", "Verse", "Prechorus", "Chorus", "Interlude", "Instrumental",
     "Turn", "Bridge", "Down Bridge", "Down Chorus", "Outro"
 ];
+
+/* ── Chord track ─────────────────────────────────────────────────────── */
+
+/* The four Move Row buttons select which track the Song Builder shows:
+ *   0 = Drum track (existing), 1 = Chord track, 2/3 = Instrument tracks. */
+const TRACK_DRUM = 0;
+const TRACK_CHORD = 1;
+const TRACK_INSTRUMENT_1 = 2;
+const TRACK_INSTRUMENT_2 = 3;
+
+/* The 12 major keys, in chromatic order. Each entry is the tonic note name. */
+const KEYS = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+
+/* Semitone offsets of the 12 pitch classes from C. */
+const PITCH_CLASS = {
+    "C": 0, "C#": 1, "Db": 1, "D": 2, "D#": 3, "Eb": 3, "E": 4, "F": 5,
+    "F#": 6, "Gb": 6, "G": 7, "G#": 8, "Ab": 8, "A": 9, "A#": 10, "Bb": 10, "B": 11
+};
+
+/* Diatonic chord qualities for a major key, by scale degree (0-based).
+ * I=maj, ii=min, iii=min, IV=maj, V=maj, vi=min, vii°=dim. */
+const DIATONIC_QUALITY = ["maj", "min", "min", "maj", "maj", "min", "dim"];
+
+/* Chord qualities offered in the chord picker (beyond the diatonic default).
+ * Each maps to a semitone offset for the third/fifth/seventh. */
+const CHORD_QUALITIES = ["maj", "min", "dim", "aug", "7", "m7", "maj7", "dim7", "sus2", "sus4"];
+
+/* Semitone intervals for each chord quality relative to the root. */
+const CHORD_INTERVALS = {
+    "maj":  [0, 4, 7],
+    "min":  [0, 3, 7],
+    "dim":  [0, 3, 6],
+    "aug":  [0, 4, 8],
+    "7":    [0, 4, 7, 10],
+    "m7":   [0, 3, 7, 10],
+    "maj7": [0, 4, 7, 11],
+    "dim7": [0, 3, 6, 9],
+    "sus2": [0, 2, 7],
+    "sus4": [0, 5, 7]
+};
+
+/* Display label for a chord quality (used in the picker and on the display). */
+const CHORD_QUALITY_LABEL = {
+    "maj": "", "min": "m", "dim": "dim", "aug": "aug", "7": "7",
+    "m7": "m7", "maj7": "maj7", "dim7": "dim7", "sus2": "sus2", "sus4": "sus4"
+};
+
+/* The 12 note names, used to render a chord's root/bass. */
+const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+
+/* The 12 bass-note choices for a slash chord (C/G = C over G bass). */
+const BASS_NOTES = NOTE_NAMES;
+
+/* Default key for a new song. */
+const DEFAULT_KEY = "C";
 
 /* ── State ───────────────────────────────────────────────────────────── */
 
@@ -240,7 +297,25 @@ let songSettingsFocus = 0;
 let songSettingsPendingBpm = 120;
 let songSettingsPendingNum = 4;
 let songSettingsPendingDen = 4;
+let songSettingsPendingKey = DEFAULT_KEY;
 let songSettingsEditing = false;
+
+/* ── Chord / instrument track state ─────────────────────────────────── */
+
+/* Which track the Song Builder currently shows (TRACK_DRUM/CHORD/INST_1/2). */
+let builderTrack = TRACK_DRUM;
+/* The bar (0-based within the section) the chord-track cursor is on. */
+let chordCursorBar = 0;
+/* Chord picker state: which bar is being edited, and the current selection. */
+let chordPickBar = -1;
+let chordPickDegree = 0;      /* 0-based scale degree (0..6) */
+let chordPickQuality = 0;     /* index into CHORD_QUALITIES */
+let chordPickBass = -1;       /* index into BASS_NOTES, -1 = no slash bass */
+let chordPickFocus = 0;       /* 0 = degree, 1 = quality, 2 = bass */
+/* Instrument track being edited (TRACK_INSTRUMENT_1 or _2), or -1. */
+let instrumentEditTrack = -1;
+let instrumentFocus = 0;
+let instrumentEditing = false;
 
 let selectedOutputIndex = 0;
 let optionsFocus = 0;      /* 0 = Output, 1 = MIDI channel, 2 = Click channel, 3 = Swap guard, 4 = DSP debug */
@@ -435,7 +510,7 @@ const SCROLLABLE_MENU_VIEWS = new Set([
     VIEW_ROOT, VIEW_FOLDER_LIST, VIEW_BUILDER, VIEW_TRIM, VIEW_SONG_SETTINGS,
     VIEW_SONG_BANK, VIEW_OPTIONS, VIEW_SETLIST_BANK, VIEW_SETLIST_EDIT,
     VIEW_SETLIST_PICK, VIEW_SETLIST_CLICK, VIEW_PERF_SETLIST, VIEW_PERFORMANCE,
-    VIEW_JAM_FOLDER, VIEW_JAM, VIEW_SECTION_PICK
+    VIEW_JAM_FOLDER, VIEW_JAM, VIEW_SECTION_PICK, VIEW_CHORD_PICK, VIEW_INSTRUMENT
 ]);
 const MENU_SCROLL_TICK_MS = 30; /* ~25fps redraw for marquee animation (halves the ~2s scroll-start delay) */
 let lastMenuScrollTick = 0;
@@ -851,6 +926,7 @@ function newSong(folderName) {
         ppq: 240,
         sync_mode: "internal",
         locked: false,
+        key: DEFAULT_KEY,
         created: new Date().toISOString(),
         modified: new Date().toISOString(),
         sections: [newSection("Intro")]
@@ -858,7 +934,171 @@ function newSong(folderName) {
 }
 
 function newSection(name = "Section") {
-    return { id: "sec-" + Date.now(), name, clips: [] };
+    return { id: "sec-" + Date.now(), name, clips: [], chords: [] };
+}
+
+/* ── Chord theory helpers ───────────────────────────────────────────── */
+
+/* Semitone offset of a note name (e.g. "C" -> 0, "G" -> 7). Returns -1 for
+ * an unknown name. */
+function noteSemitone(name) {
+    if (!name) return -1;
+    const v = PITCH_CLASS[name];
+    return (v === undefined) ? -1 : v;
+}
+
+/* The diatonic chord (root note name + quality) for a scale degree in a major
+ * key. degree is 0-based (0 = tonic). Returns { root, quality }. */
+function diatonicChord(key, degree) {
+    const keyPc = noteSemitone(key);
+    if (keyPc < 0) return { root: "C", quality: "maj" };
+    const d = ((degree % 7) + 7) % 7;
+    /* Major scale semitone steps from the tonic: 0,2,4,5,7,9,11. */
+    const scaleSteps = [0, 2, 4, 5, 7, 9, 11];
+    const rootPc = (keyPc + scaleSteps[d]) % 12;
+    return { root: NOTE_NAMES[rootPc], quality: DIATONIC_QUALITY[d] };
+}
+
+/* The MIDI note number for a note name at a given octave (C4 = 60). */
+function noteNameToMidi(name, octave) {
+    const pc = noteSemitone(name);
+    if (pc < 0) return 60;
+    return (octave + 1) * 12 + pc;
+}
+
+/* The MIDI note number for a chord's root (or its bass note when a slash
+ * chord like C/G is set), at the given octave. */
+function chordBassMidi(chord, octave) {
+    if (!chord) return 60;
+    const bass = chord.bass || chord.root;
+    return noteNameToMidi(bass, octave);
+}
+
+/* The MIDI note numbers for a chord's full voicing (root position) at the
+ * given octave. */
+function chordVoicingMidi(chord, octave) {
+    if (!chord) return [60];
+    const rootPc = noteSemitone(chord.root);
+    if (rootPc < 0) return [60];
+    const intervals = CHORD_INTERVALS[chord.quality] || CHORD_INTERVALS["maj"];
+    const base = (octave + 1) * 12;
+    return intervals.map(iv => base + rootPc + iv);
+}
+
+/* Render a chord object as a display string, e.g. "C", "Dm", "C/G", "Dm7". */
+function chordLabel(chord) {
+    if (!chord) return "";
+    const root = chord.root || "C";
+    const q = CHORD_QUALITY_LABEL[chord.quality] || "";
+    let s = root + q;
+    if (chord.bass && chord.bass !== root) s += "/" + chord.bass;
+    return s;
+}
+
+/* The number of bars in a section (used to size the per-bar chord array). */
+function sectionChordBars(sec) {
+    return Math.max(1, Math.ceil(sectionBars(sec)));
+}
+
+/* Get the chord at a 0-based bar index within a section, or null. */
+function chordAtBar(sec, barIndex) {
+    if (!sec || !sec.chords) return null;
+    return sec.chords[barIndex] || null;
+}
+
+/* Set (or clear) the chord at a 0-based bar index within a section. */
+function setChordAtBar(sec, barIndex, chord) {
+    if (!sec) return;
+    if (!sec.chords) sec.chords = [];
+    if (chord) {
+        sec.chords[barIndex] = chord;
+    } else {
+        delete sec.chords[barIndex];
+    }
+    unsavedChanges = true;
+}
+
+/* Transpose a chord object by a number of semitones (used when the song key
+ * changes so existing chords follow the new key). */
+function transposeChord(chord, semitones) {
+    if (!chord) return null;
+    const out = { quality: chord.quality || "maj" };
+    const rootPc = noteSemitone(chord.root);
+    if (rootPc >= 0) out.root = NOTE_NAMES[((rootPc + semitones) % 12 + 12) % 12];
+    else out.root = chord.root;
+    if (chord.bass) {
+        const bassPc = noteSemitone(chord.bass);
+        if (bassPc >= 0) out.bass = NOTE_NAMES[((bassPc + semitones) % 12 + 12) % 12];
+        else out.bass = chord.bass;
+    }
+    return out;
+}
+
+/* Transpose every chord in the song by the semitone delta between two keys.
+ * Called when the song key changes so set chords follow the new key. */
+function transposeSongChords(song, oldKey, newKey) {
+    if (!song || !song.sections) return;
+    const oldPc = noteSemitone(oldKey);
+    const newPc = noteSemitone(newKey);
+    if (oldPc < 0 || newPc < 0) return;
+    const delta = newPc - oldPc;
+    if (delta === 0) return;
+    for (const sec of song.sections) {
+        if (!sec.chords) continue;
+        for (let i = 0; i < sec.chords.length; i++) {
+            if (sec.chords[i]) sec.chords[i] = transposeChord(sec.chords[i], delta);
+        }
+    }
+}
+
+/* ── Instrument track helpers ───────────────────────────────────────── */
+
+/* The instrument config for a track index (TRACK_INSTRUMENT_1 or _2). */
+function instrumentForTrack(track) {
+    if (!currentSong) return null;
+    if (!currentSong.instruments) currentSong.instruments = [];
+    const idx = track - TRACK_INSTRUMENT_1;
+    if (idx < 0 || idx > 1) return null;
+    if (!currentSong.instruments[idx]) {
+        currentSong.instruments[idx] = {
+            enabled: false,
+            output: "external",
+            channel: 1,
+            octave: 3,
+            follow_note: 0,
+            voicing: "bass",
+            bars: []
+        };
+    }
+    return currentSong.instruments[idx];
+}
+
+/* The instrument's per-section per-bar on/off map, sized to the song. */
+function instrumentBars(inst) {
+    if (!inst) return [];
+    if (!inst.bars) inst.bars = [];
+    if (!currentSong) return inst.bars;
+    for (let s = 0; s < currentSong.sections.length; s++) {
+        if (!inst.bars[s]) inst.bars[s] = [];
+    }
+    return inst.bars;
+}
+
+/* Whether the instrument sends a chord on a given section/bar (default on). */
+function instrumentBarOn(inst, sectionIndex, barIndex) {
+    const bars = instrumentBars(inst);
+    const sec = bars[sectionIndex];
+    if (!sec) return true;
+    return sec[barIndex] !== false;
+}
+
+/* Toggle the instrument's chord on/off for a section/bar. */
+function toggleInstrumentBar(inst, sectionIndex, barIndex) {
+    const bars = instrumentBars(inst);
+    if (!bars[sectionIndex]) bars[sectionIndex] = [];
+    const cur = bars[sectionIndex][barIndex] !== false;
+    bars[sectionIndex][barIndex] = !cur;
+    unsavedChanges = true;
 }
 
 function resolveClipSource(source, folderName) {
@@ -914,7 +1154,35 @@ function toEngineSongJson(song) {
             }
             clipsOut.push(clipOut);
         }
-        secOut.push({ name: sec.name || "Section", clips: clipsOut });
+        /* Emit the per-bar chord array for this section. Each entry is a
+         * {root, quality, bass} object or null. */
+        const chordsOut = [];
+        if (sec.chords && sec.chords.length > 0) {
+            for (let i = 0; i < sec.chords.length; i++) {
+                const ch = sec.chords[i];
+                chordsOut.push(ch ? {
+                    root: ch.root || "C",
+                    quality: ch.quality || "maj",
+                    bass: ch.bass || ""
+                } : null);
+            }
+        }
+        secOut.push({ name: sec.name || "Section", clips: clipsOut, chords: chordsOut });
+    }
+    /* Emit the instrument tracks (Step 2). Each is a config object; the DSP
+     * uses the chord track to emit notes on the instrument's channel. */
+    const instrumentsOut = [];
+    for (const inst of (song.instruments || [])) {
+        instrumentsOut.push({
+            enabled: !!inst.enabled,
+            output: inst.output || "external",
+            channel: (typeof inst.channel === "number" && inst.channel >= 1 && inst.channel <= 16) ? inst.channel : 1,
+            octave: (typeof inst.octave === "number") ? inst.octave : 3,
+            follow_note: (typeof inst.follow_note === "number") ? inst.follow_note : 0,
+            voicing: inst.voicing || "bass",
+            /* Per-section per-bar on/off map: 1 = send chord, 0 = muted. */
+            bars: (inst.bars || []).map(sec => (sec || []).map(b => (b ? 1 : 0)))
+        });
     }
     return JSON.stringify({
         source_folder: song.source_folder || "",
@@ -924,7 +1192,9 @@ function toEngineSongJson(song) {
         time_sig_den: song.time_sig_den || 4,
         ppq: song.ppq || 240,
         sync_mode: song.sync_mode || "internal",
-        sections: secOut
+        key: song.key || DEFAULT_KEY,
+        sections: secOut,
+        instruments: instrumentsOut
     });
 }
 
@@ -939,11 +1209,17 @@ function toUiSong(engineLike) {
         time_sig_num: s.time_sig_num || (s.time_signature ? s.time_signature[0] : 4),
         time_sig_den: s.time_sig_den || (s.time_signature ? s.time_signature[1] : 4),
         locked: !!(s.locked),
+        key: s.key || DEFAULT_KEY,
         created: s.created || new Date().toISOString(),
         modified: s.modified || new Date().toISOString(),
         sections: (s.sections || []).map(sec => ({
             id: sec.id || ("sec-" + Date.now()),
             name: sec.name || "Section",
+            chords: (sec.chords || []).map(c => (c ? {
+                root: c.root || "C",
+                quality: c.quality || "maj",
+                bass: c.bass || ""
+            } : null)),
             clips: (sec.clips || []).map(c => {
                 const src = c.source || c.path || "";
                 /* Backfill a clip's source_folder for existing songs whose
@@ -978,6 +1254,15 @@ function toUiSong(engineLike) {
                     advanced: !!(c.advanced)
                 };
             })
+        })),
+        instruments: (s.instruments || []).map(inst => ({
+            enabled: !!inst.enabled,
+            output: inst.output || "external",
+            channel: (typeof inst.channel === "number" && inst.channel >= 1 && inst.channel <= 16) ? inst.channel : 1,
+            octave: (typeof inst.octave === "number") ? inst.octave : 3,
+            follow_note: (typeof inst.follow_note === "number") ? inst.follow_note : 0,
+            voicing: inst.voicing || "bass",
+            bars: (inst.bars || []).map(sec => (sec || []).map(b => !!b))
         }))
     };
 }
@@ -4710,6 +4995,37 @@ function handleFolderListInput(cc, value) {
 
 function handleBuilderInput(cc, value) {
     const locked = songIsLocked();
+    /* Move Row buttons switch the builder track. Row 1 = drum, Row 2 = chord,
+     * Row 3/4 = instrument tracks. */
+    if (cc === MoveRow1 && value > 0) {
+        builderTrack = TRACK_DRUM;
+        stepLedsDirty = true;
+        ledDirtyAll = true;
+        needsRedraw = true;
+        return;
+    }
+    if (cc === MoveRow2 && value > 0) {
+        builderTrack = TRACK_CHORD;
+        chordCursorBar = 0;
+        stepLedsDirty = true;
+        ledDirtyAll = true;
+        needsRedraw = true;
+        return;
+    }
+    if (cc === MoveRow3 && value > 0) {
+        builderTrack = TRACK_INSTRUMENT_1;
+        stepLedsDirty = true;
+        ledDirtyAll = true;
+        needsRedraw = true;
+        return;
+    }
+    if (cc === MoveRow4 && value > 0) {
+        builderTrack = TRACK_INSTRUMENT_2;
+        stepLedsDirty = true;
+        ledDirtyAll = true;
+        needsRedraw = true;
+        return;
+    }
     if (cc === MoveMainKnob) {
         const delta = decodeDelta(value);
         if (shiftHeld) {
@@ -8107,6 +8423,8 @@ globalThis.tick = function() {
                 case VIEW_PERFORMANCE: drawPerformance(); break;
                 case VIEW_JAM_FOLDER: drawJamFolder(); break;
                 case VIEW_JAM: drawJam(); break;
+                case VIEW_CHORD_PICK: drawChordPick(); break;
+                case VIEW_INSTRUMENT: drawInstrument(); break;
             }
         }
         needsRedraw = false;
@@ -8174,6 +8492,8 @@ globalThis.onMidiMessageInternal = function(data) {
             case VIEW_PERFORMANCE: handlePerformanceInput(cc, value); break;
             case VIEW_JAM_FOLDER: handleJamFolderInput(cc, value); break;
             case VIEW_JAM: handleJamInput(cc, value); break;
+            case VIEW_CHORD_PICK: handleChordPickInput(cc, value); break;
+            case VIEW_INSTRUMENT: handleInstrumentInput(cc, value); break;
         }
     } else if (status === MidiNoteOn || status === MidiNoteOff) {
         if (isTextEntryActive()) {
