@@ -129,6 +129,8 @@ static void *arranger_worker_thread(void *arg);
 #define MAX_CLIPS_PER_FOLDER 512
 #define MAX_PATH_LEN       512
 #define MAX_JSON_LEN       8192
+#define MAX_SECTION_BARS   256   /* max bars per section for chord/instrument arrays */
+#define MAX_INSTRUMENTS    2     /* two instrument tracks (Bass, Keys/Pads) */
 
 /* Fixed double-buffer capacities for the folder/song scan caches. The worker
  * scans into the inactive slot; the audio thread reads the active slot. */
@@ -195,11 +197,33 @@ typedef struct {
     int8_t  channel;             /* MIDI channel override for this clip; -1 = engine output channel */
 } section_clip_t;
 
+/* A chord on a bar: root note name, quality, optional bass note (slash chord). */
+typedef struct {
+    char root[8];
+    char quality[8];
+    char bass[8];            /* "" = no slash bass */
+    uint8_t set;             /* 1 if this bar has a chord */
+} chord_t;
+
+/* An instrument track: emits chord-derived notes on its own output/channel. */
+typedef struct {
+    uint8_t enabled;
+    int output_target;       /* 0=external, 1=move, 2=schwung */
+    int channel;             /* 0-15 */
+    int octave;              /* octave offset applied to the emitted note */
+    uint8_t follow_note;     /* drum note to follow (e.g. 36 = kick); 0 = off */
+    uint8_t voicing;         /* 0 = bass (root/bass note), 1 = full chord */
+    /* Per-section per-bar on/off map: 1 = send, 0 = muted. */
+    uint8_t bars[MAX_SONG_SECTIONS][MAX_SECTION_BARS];
+} instrument_t;
+
 typedef struct {
     char name[64];
     int clip_count;
     section_clip_t clips[MAX_SECTION_CLIPS];
     uint32_t bars;           /* total bars after assembly */
+    int chord_count;         /* number of bars with a chord set */
+    chord_t chords[MAX_SECTION_BARS];
 } section_t;
 
 typedef struct {
@@ -211,6 +235,9 @@ typedef struct {
     int section_count;
     section_t sections[MAX_SONG_SECTIONS];
     uint32_t total_bars;
+    char key[8];             /* song key (tonic note name) */
+    int instrument_count;
+    instrument_t instruments[MAX_INSTRUMENTS];
 } song_t;
 
 /* Forward declarations for the library/song scan types and functions, used by
@@ -222,6 +249,9 @@ static void scan_library_into(engine_t *e, folder_entry_t *folders, int *out_cou
 static void scan_songs_into(engine_t *e, song_entry_t *songs, int *out_count);
 static const char* clip_lookup_find(engine_t *e, const char *leaf);
 static void clip_lookup_free(engine_t *e);
+static void parse_chords_and_instruments(const char *json, song_t *song);
+static void parse_section_chords(const char *arr, section_t *sec);
+static void parse_instrument_bars(const char *arr, instrument_t *inst);
 
 /* One lightweight snapshot of a folder under library_root.
  * Clips are stored as a single concatenated buffer to keep the entry small.
@@ -501,6 +531,12 @@ typedef struct engine {
     int output_target;       /* 0=external, 1=move, 2=schwung */
     int move_channel;        /* 0-15 */
     int schwung_channel;     /* 0-15 */
+
+    /* Instrument-track emission state. Tracks the last chord emitted per
+     * instrument so a chord change can send note-offs for the previous chord
+     * (avoiding stuck notes). */
+    chord_t last_inst_chord[MAX_INSTRUMENTS];
+    uint8_t last_inst_chord_set[MAX_INSTRUMENTS];
 
     /* Folder/song scan caches as fixed double-buffers. The worker scans into
      * slot [1 - active] and flips active when done; the audio thread only
@@ -1395,6 +1431,7 @@ static int build_timeline_targeted(engine_t *e, song_t *song, double tempo_bpm,
     uint32_t cursor = 0;
     for (int s = 0; s < song->section_count; s++) {
         section_t *sec = &song->sections[s];
+        uint32_t sec_start_tick = cursor;
         for (int c = 0; c < sec->clip_count; c++) {
             section_clip_t *sc = &sec->clips[c];
             clip_t *clip = NULL;
@@ -1511,6 +1548,12 @@ static int build_timeline_targeted(engine_t *e, song_t *song, double tempo_bpm,
 
             cursor += clip_dur;
             if (cursor > *out_end_tick) *out_end_tick = cursor;
+        }
+        /* Record the section's bar count (in song ticks) so the instrument
+         * emitter can map a playhead tick to a section/bar. */
+        if (ticks_per_bar > 0) {
+            sec->bars = (cursor - sec_start_tick) / ticks_per_bar;
+            if (sec->bars < 1) sec->bars = 1;
         }
     }
 
@@ -1656,6 +1699,217 @@ static int json_get_double_at(const char *cursor, const char *key, double *out) 
 }
 
 /* -------------------------------------------------------------------------- */
+/* Chord / instrument note helpers                                            */
+/* -------------------------------------------------------------------------- */
+
+/* Map a note name (e.g. "C", "C#", "Db", "B") to a semitone offset from C.
+ * Returns -1 for an unrecognised name. */
+static int note_name_semitone(const char *name) {
+    if (!name || !name[0]) return -1;
+    switch (name[0]) {
+        case 'C': return (name[1] == '#') ? 1 : 0;
+        case 'D': return (name[1] == '#') ? 3 : ((name[1] == 'b') ? 1 : 2);
+        case 'E': return (name[1] == 'b') ? 3 : 4;
+        case 'F': return (name[1] == '#') ? 6 : 5;
+        case 'G': return (name[1] == '#') ? 8 : ((name[1] == 'b') ? 6 : 7);
+        case 'A': return (name[1] == '#') ? 10 : ((name[1] == 'b') ? 8 : 9);
+        case 'B': return (name[1] == 'b') ? 10 : 11;
+        default: return -1;
+    }
+}
+
+/* Semitone intervals for each chord quality (relative to the root). Mirrors
+ * CHORD_INTERVALS in ui.js. */
+static int chord_quality_intervals(const char *quality, int *out, int max) {
+    static const int maj[3]  = {0, 4, 7};
+    static const int min[3]  = {0, 3, 7};
+    static const int dim[3]  = {0, 3, 6};
+    static const int aug[3]  = {0, 4, 8};
+    static const int s7[4]   = {0, 4, 7, 10};
+    static const int m7[4]   = {0, 3, 7, 10};
+    static const int maj7[4] = {0, 4, 7, 11};
+    static const int dim7[4] = {0, 3, 6, 9};
+    static const int sus2[3] = {0, 2, 7};
+    static const int sus4[3] = {0, 5, 7};
+    const int *src = maj; int n = 3;
+    if (!quality) { src = maj; n = 3; }
+    else if (strcmp(quality, "min") == 0) { src = min; n = 3; }
+    else if (strcmp(quality, "dim") == 0) { src = dim; n = 3; }
+    else if (strcmp(quality, "aug") == 0) { src = aug; n = 3; }
+    else if (strcmp(quality, "7") == 0) { src = s7; n = 4; }
+    else if (strcmp(quality, "m7") == 0) { src = m7; n = 4; }
+    else if (strcmp(quality, "maj7") == 0) { src = maj7; n = 4; }
+    else if (strcmp(quality, "dim7") == 0) { src = dim7; n = 4; }
+    else if (strcmp(quality, "sus2") == 0) { src = sus2; n = 3; }
+    else if (strcmp(quality, "sus4") == 0) { src = sus4; n = 3; }
+    int count = n < max ? n : max;
+    for (int i = 0; i < count; i++) out[i] = src[i];
+    return count;
+}
+
+/* Emit a single note-on/off for an instrument, routed to the instrument's own
+ * output target and channel (independent of the engine's drum routing). */
+static void emit_instrument_event(engine_t *e, const instrument_t *inst,
+                                  uint8_t status, uint8_t note, uint8_t vel) {
+    (void)e;
+    if (!g_host) return;
+    uint8_t high = status & 0xF0;
+    uint8_t cin = 0x0F;
+    if (high == 0x80)      cin = 0x08;
+    else if (high == 0x90) cin = 0x09;
+    else if (high == 0xB0) cin = 0x0B;
+    uint8_t ch = (uint8_t)(inst->channel & 0x0F);
+    uint8_t cable = 2;
+    if (inst->output_target == OUTPUT_TARGET_SCHWUNG) cable = 0;
+    uint8_t msg[4] = { (cable << 4) | cin, high | ch, note, vel };
+    if (inst->output_target == OUTPUT_TARGET_SCHWUNG) {
+        if (g_host->midi_send_internal) g_host->midi_send_internal(msg, 4);
+    } else if (inst->output_target == OUTPUT_TARGET_MOVE) {
+        if (g_host->midi_inject_to_move) g_host->midi_inject_to_move(msg, 4);
+    } else {
+        if (g_host->midi_send_external) g_host->midi_send_external(msg, 4);
+    }
+}
+
+/* Emit the chord for a given section/bar on an instrument. voicing 0 = bass
+ * note (root, or slash bass), 1 = full chord. Returns the number of notes
+ * emitted (so the caller can send matching note-offs). */
+static int emit_instrument_chord(engine_t *e, const instrument_t *inst,
+                                 const chord_t *ch, uint8_t vel) {
+    if (!ch || !ch->set) return 0;
+    int root_pc = note_name_semitone(ch->root);
+    if (root_pc < 0) root_pc = 0;
+    int base = (inst->octave + 1) * 12;
+    if (inst->voicing) {
+        /* Full chord voicing. */
+        int intervals[4];
+        int n = chord_quality_intervals(ch->quality, intervals, 4);
+        for (int i = 0; i < n; i++) {
+            int note = base + root_pc + intervals[i];
+            if (note < 0) note = 0;
+            if (note > 127) note = 127;
+            emit_instrument_event(e, inst, 0x90, (uint8_t)note, vel);
+        }
+        return n;
+    } else {
+        /* Bass note: slash bass if set, else root. */
+        const char *bass = (ch->bass[0]) ? ch->bass : ch->root;
+        int bass_pc = note_name_semitone(bass);
+        if (bass_pc < 0) bass_pc = root_pc;
+        int note = base + bass_pc;
+        if (note < 0) note = 0;
+        if (note > 127) note = 127;
+        emit_instrument_event(e, inst, 0x90, (uint8_t)note, vel);
+        return 1;
+    }
+}
+
+/* Send note-offs for the chord previously emitted on an instrument (so a
+ * chord change doesn't leave the old notes ringing). */
+static void emit_instrument_chord_off(engine_t *e, const instrument_t *inst,
+                                      const chord_t *ch) {
+    if (!ch || !ch->set) return;
+    int root_pc = note_name_semitone(ch->root);
+    if (root_pc < 0) root_pc = 0;
+    int base = (inst->octave + 1) * 12;
+    if (inst->voicing) {
+        int intervals[4];
+        int n = chord_quality_intervals(ch->quality, intervals, 4);
+        for (int i = 0; i < n; i++) {
+            int note = base + root_pc + intervals[i];
+            if (note < 0) note = 0;
+            if (note > 127) note = 127;
+            emit_instrument_event(e, inst, 0x80, (uint8_t)note, 0);
+        }
+    } else {
+        const char *bass = (ch->bass[0]) ? ch->bass : ch->root;
+        int bass_pc = note_name_semitone(bass);
+        if (bass_pc < 0) bass_pc = root_pc;
+        int note = base + bass_pc;
+        if (note < 0) note = 0;
+        if (note > 127) note = 127;
+        emit_instrument_event(e, inst, 0x80, (uint8_t)note, 0);
+    }
+}
+
+/* Find the chord active at a given bar within a section. A chord set on an
+ * earlier bar carries forward until the next chord (or the section end). */
+static const chord_t *chord_at_bar(const section_t *sec, uint32_t bar) {
+    if (!sec) return NULL;
+    const chord_t *last = NULL;
+    for (int b = 0; b < sec->chord_count && b < MAX_SECTION_BARS; b++) {
+        if (sec->chords[b].set) last = &sec->chords[b];
+        if ((uint32_t)b == bar) break;
+    }
+    return last;
+}
+
+/* Map an absolute playhead tick to a (section, bar-within-section) pair.
+ * Returns the section index, or -1 if the tick is out of range. */
+static int tick_to_section_bar(const song_t *song, uint32_t tick,
+                               uint32_t ticks_per_bar, uint32_t *out_bar) {
+    if (!song || ticks_per_bar == 0) return -1;
+    uint32_t remaining = tick;
+    for (int s = 0; s < song->section_count; s++) {
+        uint32_t sec_bars = song->sections[s].bars;
+        if (sec_bars < 1) sec_bars = 1;
+        uint32_t sec_ticks = sec_bars * ticks_per_bar;
+        if (remaining < sec_ticks) {
+            if (out_bar) *out_bar = remaining / ticks_per_bar;
+            return s;
+        }
+        remaining -= sec_ticks;
+    }
+    return -1;
+}
+
+/* Emit the chord for every enabled instrument at a given absolute tick. Used
+ * at bar boundaries (follow_note == 0). */
+static void emit_instruments_at_tick(engine_t *e, uint32_t tick) {
+    if (!e || e->song.instrument_count == 0) return;
+    uint32_t bar = 0;
+    int sec_idx = tick_to_section_bar(&e->song, tick, e->ticks_per_bar, &bar);
+    if (sec_idx < 0) return;
+    section_t *sec = &e->song.sections[sec_idx];
+    const chord_t *ch = chord_at_bar(sec, bar);
+    for (int i = 0; i < e->song.instrument_count && i < MAX_INSTRUMENTS; i++) {
+        instrument_t *inst = &e->song.instruments[i];
+        if (!inst->enabled) continue;
+        if (inst->follow_note > 0) continue; /* follow-note instruments emit on the drum note */
+        /* Respect the per-bar mute map (1 = send, 0 = muted). */
+        if (bar < MAX_SECTION_BARS && inst->bars[sec_idx][bar] == 0) continue;
+        /* Send note-offs for the previous chord before the new one. */
+        if (e->last_inst_chord_set[i]) {
+            emit_instrument_chord_off(e, inst, &e->last_inst_chord[i]);
+            e->last_inst_chord_set[i] = 0;
+        }
+        if (ch && ch->set) {
+            emit_instrument_chord(e, inst, ch, 100);
+            e->last_inst_chord[i] = *ch;
+            e->last_inst_chord_set[i] = 1;
+        }
+    }
+}
+
+/* Emit the chord for follow-note instruments when a matching drum note-on
+ * fires. Called from the event drain path. */
+static void emit_instruments_follow(engine_t *e, uint8_t note, uint32_t tick) {
+    if (!e || e->song.instrument_count == 0) return;
+    uint32_t bar = 0;
+    int sec_idx = tick_to_section_bar(&e->song, tick, e->ticks_per_bar, &bar);
+    if (sec_idx < 0) return;
+    section_t *sec = &e->song.sections[sec_idx];
+    const chord_t *ch = chord_at_bar(sec, bar);
+    for (int i = 0; i < e->song.instrument_count && i < MAX_INSTRUMENTS; i++) {
+        instrument_t *inst = &e->song.instruments[i];
+        if (!inst->enabled) continue;
+        if (inst->follow_note == 0 || inst->follow_note != note) continue;
+        if (bar < MAX_SECTION_BARS && inst->bars[sec_idx][bar] == 0) continue;
+        if (ch && ch->set) emit_instrument_chord(e, inst, ch, 100);
+    }
+}
+
+/* -------------------------------------------------------------------------- */
 /* Song loading from JSON                                                     */
 /* -------------------------------------------------------------------------- */
 
@@ -1669,6 +1923,8 @@ static int parse_song_json(engine_t *e, const char *json, song_t *song,
                            uint32_t *out_tpbar) {
     json_get_string(json, "source_folder", song->source_folder, sizeof(song->source_folder));
     json_get_string(json, "name", song->name, sizeof(song->name));
+    json_get_string(json, "key", song->key, sizeof(song->key));
+    if (!song->key[0]) copy_trunc(song->key, sizeof(song->key), "C");
     double tmp_d = 120.0;
     json_get_double_at(json, "tempo_bpm", &tmp_d);
     song->tempo_bpm = tmp_d;
@@ -1844,7 +2100,216 @@ static int parse_song_json(engine_t *e, const char *json, song_t *song,
     }
 
     song->section_count = section_idx + 1;
+
+    /* Parse the per-section "chords" arrays and the top-level "instruments"
+     * array. These are parsed in a separate pass (rather than inside the
+     * depth-tracking clip loop) because their nesting differs: chords are a
+     * depth-1 array of objects/null, instruments are a top-level array of
+     * objects with a nested per-section "bars" array. */
+    parse_chords_and_instruments(json, song);
+
     return 0;
+}
+
+/* Parse the per-section "chords" arrays and the top-level "instruments" array
+ * into `song`. Chords are stored per-bar (null entries are skipped); a chord
+ * object is {root, quality, bass}. Instruments are {enabled, output, channel,
+ * octave, follow_note, voicing, bars:[[1,0,...],...]}. */
+static void parse_chords_and_instruments(const char *json, song_t *song) {
+    /* --- Chords: walk each section object and read its "chords" array. --- */
+    const char *sec_pos = strstr(json, "\"sections\"");
+    if (sec_pos) {
+        const char *arr_start = strchr(sec_pos, '[');
+        if (arr_start) {
+            int depth = 0, in_string = 0, escape = 0;
+            int section_idx = -1;
+            const char *p = arr_start;
+            while (*p) {
+                char c = *p;
+                if (escape) { escape = 0; p++; continue; }
+                if (c == '\\') { escape = 1; p++; continue; }
+                if (c == '"') { in_string = !in_string; p++; continue; }
+                if (in_string) { p++; continue; }
+                if (c == '{') {
+                    depth++;
+                    if (depth == 1) section_idx++;
+                    p++;
+                    continue;
+                }
+                if (c == '}') { depth--; p++; continue; }
+                if (c == '[') { p++; continue; }
+                if (c == ']') { if (depth == 0) break; p++; continue; }
+                /* At section depth, look for the "chords" key. */
+                if (depth == 1 && section_idx >= 0 && section_idx < MAX_SONG_SECTIONS &&
+                    c == '"' && strncmp(p, "\"chords\"", 8) == 0) {
+                    const char *ch_arr = strchr(p + 8, '[');
+                    if (ch_arr) {
+                        parse_section_chords(ch_arr, &song->sections[section_idx]);
+                    }
+                }
+                p++;
+            }
+        }
+    }
+
+    /* --- Instruments: read the top-level "instruments" array. --- */
+    const char *inst_pos = strstr(json, "\"instruments\"");
+    if (!inst_pos) return;
+    const char *inst_arr = strchr(inst_pos, '[');
+    if (!inst_arr) return;
+    int depth = 0, in_string = 0, escape = 0;
+    int inst_idx = -1;
+    const char *p = inst_arr;
+    while (*p) {
+        char c = *p;
+        if (escape) { escape = 0; p++; continue; }
+        if (c == '\\') { escape = 1; p++; continue; }
+        if (c == '"') {
+            in_string = !in_string;
+            /* Parse a key when entering a string at instrument depth. */
+            if (in_string && depth == 1 && inst_idx >= 0 && inst_idx < MAX_INSTRUMENTS) {
+                instrument_t *inst = &song->instruments[inst_idx];
+                if (strncmp(p + 1, "enabled", 7) == 0) {
+                    int v; if (json_get_int_at(p, "enabled", &v)) inst->enabled = (uint8_t)(v ? 1 : 0);
+                } else if (strncmp(p + 1, "output", 6) == 0) {
+                    char out[16];
+                    if (json_get_string_at(p, "output", out, sizeof(out))) {
+                        if (strcmp(out, "move") == 0) inst->output_target = OUTPUT_TARGET_MOVE;
+                        else if (strcmp(out, "schwung") == 0) inst->output_target = OUTPUT_TARGET_SCHWUNG;
+                        else inst->output_target = OUTPUT_TARGET_EXTERNAL;
+                    }
+                } else if (strncmp(p + 1, "channel", 7) == 0) {
+                    int v; if (json_get_int_at(p, "channel", &v)) {
+                        if (v >= 1 && v <= 16) inst->channel = v - 1;
+                    }
+                } else if (strncmp(p + 1, "octave", 6) == 0) {
+                    int v; if (json_get_int_at(p, "octave", &v)) inst->octave = v;
+                } else if (strncmp(p + 1, "follow_note", 11) == 0) {
+                    int v; if (json_get_int_at(p, "follow_note", &v)) inst->follow_note = (uint8_t)v;
+                } else if (strncmp(p + 1, "voicing", 7) == 0) {
+                    char v[16];
+                    if (json_get_string_at(p, "voicing", v, sizeof(v))) {
+                        inst->voicing = (strcmp(v, "chord") == 0) ? 1 : 0;
+                    }
+                } else if (strncmp(p + 1, "bars", 4) == 0) {
+                    /* "bars": [[1,0,...], [1,1,...], ...] — per-section arrays. */
+                    const char *bars_arr = strchr(p + 4, '[');
+                    if (bars_arr) parse_instrument_bars(bars_arr, inst);
+                }
+            }
+            p++;
+            continue;
+        }
+        if (in_string) { p++; continue; }
+        if (c == '{') {
+            depth++;
+            if (depth == 1) {
+                inst_idx++;
+                if (inst_idx >= MAX_INSTRUMENTS) break;
+                instrument_t *inst = &song->instruments[inst_idx];
+                memset(inst, 0, sizeof(*inst));
+                inst->output_target = OUTPUT_TARGET_EXTERNAL;
+                inst->channel = 0;
+                inst->octave = 3;
+                inst->voicing = 0;
+            }
+            p++;
+            continue;
+        }
+        if (c == '}') { depth--; p++; continue; }
+        if (c == '[') { p++; continue; }
+        if (c == ']') { if (depth == 0) break; p++; continue; }
+        p++;
+    }
+    song->instrument_count = inst_idx + 1;
+}
+
+/* Parse a section's "chords" array: [ {root,quality,bass}, null, ... ]. */
+static void parse_section_chords(const char *arr, section_t *sec) {
+    if (!arr || !sec) return;
+    int depth = 0, in_string = 0, escape = 0;
+    int bar = -1;
+    const char *p = arr;
+    while (*p) {
+        char c = *p;
+        if (escape) { escape = 0; p++; continue; }
+        if (c == '\\') { escape = 1; p++; continue; }
+        if (c == '"') {
+            in_string = !in_string;
+            if (in_string && depth == 1 && bar >= 0 && bar < MAX_SECTION_BARS) {
+                chord_t *ch = &sec->chords[bar];
+                if (strncmp(p + 1, "root", 4) == 0) {
+                    char v[8];
+                    if (json_get_string_at(p, "root", v, sizeof(v))) copy_trunc(ch->root, sizeof(ch->root), v);
+                } else if (strncmp(p + 1, "quality", 7) == 0) {
+                    char v[8];
+                    if (json_get_string_at(p, "quality", v, sizeof(v))) copy_trunc(ch->quality, sizeof(ch->quality), v);
+                } else if (strncmp(p + 1, "bass", 4) == 0) {
+                    char v[8];
+                    if (json_get_string_at(p, "bass", v, sizeof(v))) copy_trunc(ch->bass, sizeof(ch->bass), v);
+                }
+            }
+            p++;
+            continue;
+        }
+        if (in_string) { p++; continue; }
+        if (c == '{') {
+            depth++;
+            if (depth == 1) {
+                bar++;
+                if (bar >= MAX_SECTION_BARS) break;
+                chord_t *ch = &sec->chords[bar];
+                memset(ch, 0, sizeof(*ch));
+                ch->set = 1;
+                copy_trunc(ch->quality, sizeof(ch->quality), "maj");
+            }
+            p++;
+            continue;
+        }
+        if (c == '}') { depth--; p++; continue; }
+        if (c == '[') { p++; continue; }
+        if (c == ']') { if (depth == 0) break; p++; continue; }
+        /* A null entry advances the bar index without setting a chord. */
+        if (c == 'n' && depth == 0 && strncmp(p, "null", 4) == 0) {
+            bar++;
+            p += 4;
+            continue;
+        }
+        p++;
+    }
+    sec->chord_count = bar + 1;
+}
+
+/* Parse an instrument's "bars" array: [[1,0,...], [1,1,...], ...]. */
+static void parse_instrument_bars(const char *arr, instrument_t *inst) {
+    if (!arr || !inst) return;
+    int depth = 0, in_string = 0, escape = 0;
+    int section = -1, bar = -1;
+    const char *p = arr;
+    while (*p) {
+        char c = *p;
+        if (escape) { escape = 0; p++; continue; }
+        if (c == '\\') { escape = 1; p++; continue; }
+        if (c == '"') { in_string = !in_string; p++; continue; }
+        if (in_string) { p++; continue; }
+        if (c == '[') {
+            depth++;
+            if (depth == 1) { section++; bar = -1; }
+            else if (depth == 2) { bar++; }
+            p++;
+            continue;
+        }
+        if (c == ']') { depth--; p++; continue; }
+        if (c == '0' || c == '1') {
+            if (depth == 2 && section >= 0 && section < MAX_SONG_SECTIONS &&
+                bar >= 0 && bar < MAX_SECTION_BARS) {
+                inst->bars[section][bar] = (uint8_t)(c - '0');
+            }
+            p++;
+            continue;
+        }
+        p++;
+    }
 }
 
 /* Load a song JSON into the active engine song and rebuild the active
@@ -2595,6 +3060,11 @@ static void drain_events_up_to(engine_t *e, uint32_t target) {
         const smf_event_t *ev = &e->timeline[e->event_cursor];
         if (ev->tick >= target) break;
         e->last_event_channel_override = ev->channel_override;
+        /* Follow-note instruments: emit the chord when a matching drum
+         * note-on fires (e.g. bass follows the kick). */
+        if ((ev->status & 0xF0) == 0x90 && ev->data2 > 0) {
+            emit_instruments_follow(e, ev->data1, ev->tick);
+        }
         if (e->emit_directly) {
             emit_direct_event(e, ev->status, ev->data1, ev->data2, ev->len);
         } else {
@@ -2786,6 +3256,8 @@ static void update_bar_counter(engine_t *e) {
     if (bar != e->last_bar) {
         e->bar_counter++;
         e->last_bar = bar;
+        /* Emit the chord for non-follow instruments at each bar boundary. */
+        emit_instruments_at_tick(e, e->playhead_tick);
     }
 }
 
@@ -3272,6 +3744,7 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
         e->last_playhead_tick = 0;
         e->tick_remainder = 0.0;
         e->last_bar = 0;
+        for (int i = 0; i < MAX_INSTRUMENTS; i++) e->last_inst_chord_set[i] = 0;
         e->flash_end_tick = initial_flash_end_tick(e);
         queue_clear(e);
         dsp_host_log("PLAY tempo=%.1f tpb=%u ts=%d/%d bars=%u",
@@ -3301,6 +3774,7 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
         e->last_playhead_tick = 0;
         e->tick_remainder = 0.0;
         e->last_bar = (uint32_t)bar;
+        for (int i = 0; i < MAX_INSTRUMENTS; i++) e->last_inst_chord_set[i] = 0;
         e->flash_end_tick = initial_flash_end_tick(e);
         queue_clear(e);
         dsp_host_log("PLAY_FROM_BAR bar=%d playhead=%u running=1",
