@@ -4637,6 +4637,7 @@ function openSongSettings() {
     songSettingsPendingBpm = currentSong.tempo_bpm || 120;
     songSettingsPendingNum = currentSong.time_sig_num || 4;
     songSettingsPendingDen = currentSong.time_sig_den || 4;
+    songSettingsPendingKey = currentSong.key || DEFAULT_KEY;
     currentView = VIEW_SONG_SETTINGS;
     menuStack.push({ title: "Settings", selectedIndex: 0 });
     needsRedraw = true;
@@ -4654,6 +4655,7 @@ function drawSongSettings() {
         { key: "name", label: "Name", value: currentSong ? shortSongName(currentSong.name) : "" },
         { key: "bpm", label: "Tempo", value: String(songSettingsPendingBpm) },
         { key: "num", label: "Time Signature", value: songSettingsPendingNum + "/" + songSettingsPendingDen },
+        { key: "key", label: "Key", value: songSettingsPendingKey },
         { key: "lock", label: "Lock Song", value: songIsLocked() ? "On" : "Off" }
     ];
     drawMenuList({
@@ -4677,10 +4679,19 @@ function commitSongSettings() {
     const newBpm = Math.max(20, Math.min(300, Math.round(songSettingsPendingBpm)));
     const newNum = Math.max(1, Math.min(16, songSettingsPendingNum));
     const newDen = [1, 2, 4, 8, 16].includes(songSettingsPendingDen) ? songSettingsPendingDen : 4;
+    const newKey = KEYS.includes(songSettingsPendingKey) ? songSettingsPendingKey : DEFAULT_KEY;
     if (newBpm !== currentSong.tempo_bpm || newNum !== currentSong.time_sig_num || newDen !== currentSong.time_sig_den) {
         currentSong.tempo_bpm = newBpm;
         currentSong.time_sig_num = newNum;
         currentSong.time_sig_den = newDen;
+        unsavedChanges = true;
+    }
+    /* Changing the key transposes existing chords so the song stays in the
+     * same relative harmony. */
+    const oldKey = currentSong.key || DEFAULT_KEY;
+    if (newKey !== oldKey) {
+        transposeSongChords(currentSong, oldKey, newKey);
+        currentSong.key = newKey;
         unsavedChanges = true;
     }
     menuStack.pop();
@@ -4716,13 +4727,17 @@ function handleSongSettingsInput(cc, value) {
                         songSettingsPendingNum = Math.max(1, Math.min(16, songSettingsPendingNum - 1));
                     }
                 }
+            } else if (songSettingsFocus === 3) {
+                const idx = KEYS.indexOf(songSettingsPendingKey);
+                const next = ((idx + delta) % KEYS.length + KEYS.length) % KEYS.length;
+                songSettingsPendingKey = KEYS[next];
             }
         } else {
-            songSettingsFocus = Math.max(0, Math.min(3, songSettingsFocus + delta));
+            songSettingsFocus = Math.max(0, Math.min(4, songSettingsFocus + delta));
         }
         needsRedraw = true;
     } else if (cc === MoveMainButton && value > 0) {
-        if (songSettingsFocus === 3) {
+        if (songSettingsFocus === 4) {
             /* Lock Song row: toggle the lock. Toggling is always allowed
              * (so a locked song can be unlocked here). */
             currentSong.locked = !locked;
