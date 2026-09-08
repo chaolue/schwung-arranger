@@ -66,6 +66,12 @@ const SCREEN_HEIGHT = 64;
 
 const LIBRARY_ROOT = "/data/UserData/UserLibrary/Arranger/MidiLibrary";
 const SONGS_DIR = "/data/UserData/UserLibrary/Arranger/Songs";
+/* Automatic per-song backups. Each save writes a timestamped copy of the
+ * previous version into this dot-folder so the DSP song scan (which skips
+ * dot-entries) and the Song Bank list never see them. Max backups kept per
+ * song is MAX_SONG_BACKUPS. */
+const SONGS_BACKUP_DIR = SONGS_DIR + "/.backups";
+const MAX_SONG_BACKUPS = 5;
 const SETLISTS_DIR = "/data/UserData/UserLibrary/Arranger/Setlists";
 const SETTINGS_PATH = "/data/UserData/UserLibrary/Arranger/settings.json";
 /* Per-module settings persisted by Schwung Manager (the web UI) via
@@ -461,6 +467,46 @@ function readJson(path) {
 function writeJson(path, obj) {
     ensureDir(path.substring(0, path.lastIndexOf("/")));
     host_write_file(path, JSON.stringify(obj, null, 2));
+}
+
+/* Keep a rolling set of the most recent versions of each song, stored in a
+ * hidden .backups folder so the DSP song scan and the Song Bank list never
+ * see them. Called immediately BEFORE the current save so the last MAX_N
+ * saves are preserved ("go back to check after a change"). Purely background;
+ * has no UI. Failures are swallowed so a full backup dir never breaks a save. */
+function backupCurrentSong() {
+    if (!currentSong || !activeSongFile) return;
+    if (typeof os.readdir !== "function" || typeof os.remove !== "function") return;
+    const dir = SONGS_BACKUP_DIR + "/" + safeFileName(currentSong.name || "song");
+    try { ensureDir(dir); } catch (e) { return; }
+    /* Timestamp down to the second; guard against two saves in the same
+     * millisecond by appending a counter if the file already exists. */
+    const stamp0 = new Date().toISOString().replace(/[:.]/g, "-");
+    let stamp = stamp0;
+    let n = 1;
+    let path = dir + "/" + stamp + ".json";
+    while (host_file_exists(path)) {
+        stamp = stamp0 + "-" + (++n);
+        path = dir + "/" + stamp + ".json";
+    }
+    try {
+        host_write_file(path, JSON.stringify(currentSong, null, 2));
+    } catch (e) { return; }
+    /* Trim to the newest MAX_SONG_BACKUPS, in lexicographic order (the
+     * timestamped names sort chronologically). */
+    let names = [];
+    try {
+        const raw = os.readdir(dir);
+        const list = Array.isArray(raw) ? (Array.isArray(raw[0]) ? raw[0] : raw) : [];
+        for (const nm of list) {
+            if (typeof nm === "string" && nm.endsWith(".json")) names.push(nm);
+        }
+    } catch (e) { return; }
+    names.sort();
+    while (names.length > MAX_SONG_BACKUPS) {
+        const old = names.shift();
+        try { os.remove(dir + "/" + old); } catch (e) {}
+    }
 }
 
 /* Generate a click MIDI file (a single note per beat, for `bars` bars) and
@@ -1034,6 +1080,11 @@ function normalizeSongForSave(song) {
 
 function saveCurrentSong() {
     if (!currentSong) return;
+    /* Only persist (and thus create a backup of) a song that actually has
+     * unsaved changes. Editing screens call saveCurrentSong on exit even
+     * when nothing was modified; bailing here avoids rewriting the file and
+     * spawning a duplicate backup each time a song is opened and closed. */
+    if (!unsavedChanges) return;
     currentSong.modified = new Date().toISOString();
     const path = activeSongFile || songPath(currentSong.name);
     activeSongFile = path;
@@ -1041,6 +1092,9 @@ function saveCurrentSong() {
      * rounding and per-clip source_folder that the DSP playback uses. The
      * in-memory currentSong is updated in place so the UI stays consistent. */
     normalizeSongForSave(currentSong);
+    /* Preserve the previous version in the background backup store before
+     * overwriting it, so the last few saves of this song can be inspected. */
+    backupCurrentSong();
     writeJson(path, currentSong);
     unsavedChanges = false;
     /* Invalidate the DSP's cached song scan so a newly saved song appears in
@@ -1059,11 +1113,17 @@ function loadSongFile(path) {
     if (!obj) { logDebug("loadSongFile: readJson returned null for " + path); return false; }
     activeSongFile = path;
     currentSong = toUiSong(obj);
+    /* A freshly loaded song starts with no pending edits (unless the upgrade
+     * below changes it). This prevents a stale dirty flag from a previously
+     * edited song causing a spurious save when the new song is merely opened
+     * and closed. */
+    unsavedChanges = false;
     /* Upgrade leaf-only source_folder values to full paths so the DSP resolves
      * clips directly and the folder picker reopens at the exact category.
      * Persist the upgrade immediately so the saved file is corrected. */
     if (upgradeSongSourceFolders(currentSong)) {
         normalizeSongForSave(currentSong);
+        backupCurrentSong();
         writeJson(path, currentSong);
         logDebug("loadSongFile: upgraded source_folder paths in " + path);
     }
@@ -1584,6 +1644,7 @@ function persistResolvedClipFolders() {
         unsavedChanges = true;
         if (activeSongFile) {
             normalizeSongForSave(currentSong);
+            backupCurrentSong();
             writeJson(activeSongFile, currentSong);
             unsavedChanges = false;
         }
@@ -3984,10 +4045,17 @@ function drawSongSettings() {
 
 function commitSongSettings() {
     if (!currentSong) return;
-    currentSong.tempo_bpm = Math.max(20, Math.min(300, Math.round(songSettingsPendingBpm)));
-    currentSong.time_sig_num = Math.max(1, Math.min(16, songSettingsPendingNum));
-    currentSong.time_sig_den = [1, 2, 4, 8, 16].includes(songSettingsPendingDen) ? songSettingsPendingDen : 4;
-    unsavedChanges = true;
+    /* Only mark the song dirty when a value actually changed, so opening Song
+     * Settings and backing out without editing doesn't trigger a save/backup. */
+    const newBpm = Math.max(20, Math.min(300, Math.round(songSettingsPendingBpm)));
+    const newNum = Math.max(1, Math.min(16, songSettingsPendingNum));
+    const newDen = [1, 2, 4, 8, 16].includes(songSettingsPendingDen) ? songSettingsPendingDen : 4;
+    if (newBpm !== currentSong.tempo_bpm || newNum !== currentSong.time_sig_num || newDen !== currentSong.time_sig_den) {
+        currentSong.tempo_bpm = newBpm;
+        currentSong.time_sig_num = newNum;
+        currentSong.time_sig_den = newDen;
+        unsavedChanges = true;
+    }
     menuStack.pop();
     currentView = VIEW_BUILDER;
     stepLedsDirty = true;
@@ -4045,7 +4113,10 @@ function handleSongSettingsInput(cc, value) {
                 onConfirm: (newName) => {
                     if (!newName || newName.trim().length === 0) return;
                     const trimmed = newName.trim();
-                    if (currentSong) currentSong.name = trimmed;
+                    if (currentSong) {
+                        currentSong.name = trimmed;
+                        unsavedChanges = true;
+                    }
                     saveCurrentSong();
                     needsRedraw = true;
                 },
@@ -4600,6 +4671,7 @@ function handleFolderListInput(cc, value) {
                 activeSongFile = newPath;
                 currentSong = newSong(folder);
                 currentSong.name = songName;
+                unsavedChanges = false;
                 currentSectionIndex = 0;
                 builderCursor = 0;
                 currentView = VIEW_BUILDER;
@@ -4813,6 +4885,7 @@ function startNewSong(folderName) {
     currentMode = MODE_BUILDER;
     activeSongFile = null;
     currentSong = newSong(folderName);
+    unsavedChanges = false;
     currentSectionIndex = 0;
     currentView = VIEW_BUILDER;
     menuStack.push({ title: "Arrange", selectedIndex: 0 });
