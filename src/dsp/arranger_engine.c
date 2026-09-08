@@ -1872,12 +1872,17 @@ static void emit_instruments_at_tick(engine_t *e, uint32_t tick) {
     if (sec_idx < 0) return;
     section_t *sec = &e->song.sections[sec_idx];
     const chord_t *ch = chord_at_bar(sec, bar);
+    arr_log("EMIT_INST tick=%u sec=%d bar=%u chord=%s", tick, sec_idx, bar,
+            (ch && ch->set) ? ch->root : "null");
     for (int i = 0; i < e->song.instrument_count && i < MAX_INSTRUMENTS; i++) {
         instrument_t *inst = &e->song.instruments[i];
         if (!inst->enabled) continue;
         if (inst->follow_note > 0) continue; /* follow-note instruments emit on the drum note */
         /* Respect the per-bar mute map (1 = send, 0 = muted). */
-        if (bar < MAX_SECTION_BARS && inst->bars[sec_idx][bar] == 0) continue;
+        if (bar < MAX_SECTION_BARS && inst->bars[sec_idx][bar] == 0) {
+            arr_log("EMIT_INST[%d] muted bar=%u", i, bar);
+            continue;
+        }
         /* Send note-offs for the previous chord before the new one. */
         if (e->last_inst_chord_set[i]) {
             emit_instrument_chord_off(e, inst, &e->last_inst_chord[i]);
@@ -1887,6 +1892,22 @@ static void emit_instruments_at_tick(engine_t *e, uint32_t tick) {
             emit_instrument_chord(e, inst, ch, 100);
             e->last_inst_chord[i] = *ch;
             e->last_inst_chord_set[i] = 1;
+            arr_log("EMIT_INST[%d] sent chord root=%s ch=%d oct=%d voicing=%d",
+                    i, ch->root, inst->channel, inst->octave, inst->voicing);
+        }
+    }
+}
+
+/* Send note-offs for every instrument that currently has a chord sounding.
+ * Called on stop so instrument notes don't ring on after playback ends. */
+static void emit_instruments_all_off(engine_t *e) {
+    if (!e) return;
+    for (int i = 0; i < e->song.instrument_count && i < MAX_INSTRUMENTS; i++) {
+        instrument_t *inst = &e->song.instruments[i];
+        if (!inst->enabled) continue;
+        if (e->last_inst_chord_set[i]) {
+            emit_instrument_chord_off(e, inst, &e->last_inst_chord[i]);
+            e->last_inst_chord_set[i] = 0;
         }
     }
 }
@@ -2128,7 +2149,23 @@ static void parse_chords_and_instruments(const char *json, song_t *song) {
                 char c = *p;
                 if (escape) { escape = 0; p++; continue; }
                 if (c == '\\') { escape = 1; p++; continue; }
-                if (c == '"') { in_string = !in_string; p++; continue; }
+                if (c == '"') {
+                    in_string = !in_string;
+                    /* On entering a string at section depth, detect the
+                     * "chords" key and parse its array. This must happen here
+                     * (not after the generic quote handling) because the quote
+                     * is consumed by this branch. */
+                    if (in_string && depth == 1 && section_idx >= 0 &&
+                        section_idx < MAX_SONG_SECTIONS &&
+                        strncmp(p, "\"chords\"", 8) == 0) {
+                        const char *ch_arr = strchr(p + 8, '[');
+                        if (ch_arr) {
+                            parse_section_chords(ch_arr, &song->sections[section_idx]);
+                        }
+                    }
+                    p++;
+                    continue;
+                }
                 if (in_string) { p++; continue; }
                 if (c == '{') {
                     depth++;
@@ -2139,14 +2176,6 @@ static void parse_chords_and_instruments(const char *json, song_t *song) {
                 if (c == '}') { depth--; p++; continue; }
                 if (c == '[') { p++; continue; }
                 if (c == ']') { if (depth == 0) break; p++; continue; }
-                /* At section depth, look for the "chords" key. */
-                if (depth == 1 && section_idx >= 0 && section_idx < MAX_SONG_SECTIONS &&
-                    c == '"' && strncmp(p, "\"chords\"", 8) == 0) {
-                    const char *ch_arr = strchr(p + 8, '[');
-                    if (ch_arr) {
-                        parse_section_chords(ch_arr, &song->sections[section_idx]);
-                    }
-                }
                 p++;
             }
         }
@@ -2170,7 +2199,13 @@ static void parse_chords_and_instruments(const char *json, song_t *song) {
             if (in_string && depth == 1 && inst_idx >= 0 && inst_idx < MAX_INSTRUMENTS) {
                 instrument_t *inst = &song->instruments[inst_idx];
                 if (strncmp(p + 1, "enabled", 7) == 0) {
-                    int v; if (json_get_int_at(p, "enabled", &v)) inst->enabled = (uint8_t)(v ? 1 : 0);
+                    /* "enabled" is serialized as a JSON boolean (true/false),
+                     * not a number, so atoi() would read 0 for "true". Parse
+                     * the raw value and accept true/1 as enabled. */
+                    char v[16];
+                    if (json_get_string_at(p, "enabled", v, sizeof(v))) {
+                        inst->enabled = (strcmp(v, "true") == 0 || strcmp(v, "1") == 0) ? 1 : 0;
+                    }
                 } else if (strncmp(p + 1, "output", 6) == 0) {
                     char out[16];
                     if (json_get_string_at(p, "output", out, sizeof(out))) {
@@ -2212,6 +2247,11 @@ static void parse_chords_and_instruments(const char *json, song_t *song) {
                 inst->channel = 0;
                 inst->octave = 3;
                 inst->voicing = 0;
+                /* Bars are "on by default" (send the chord). A bar is only
+                 * muted when the JSON explicitly sets it to 0. Initialise the
+                 * whole map to 1 so an instrument with no per-bar toggles (or
+                 * a sparse bars array) still sends every chord. */
+                memset(inst->bars, 1, sizeof(inst->bars));
             }
             p++;
             continue;
@@ -2222,6 +2262,27 @@ static void parse_chords_and_instruments(const char *json, song_t *song) {
         p++;
     }
     song->instrument_count = inst_idx + 1;
+
+    /* Diagnostic: confirm what was parsed so instrument emission can be
+     * verified against the song JSON. */
+    arr_log("PARSE_INST count=%d", song->instrument_count);
+    for (int i = 0; i < song->instrument_count && i < MAX_INSTRUMENTS; i++) {
+        instrument_t *inst = &song->instruments[i];
+        arr_log("PARSE_INST[%d] enabled=%d output=%d channel=%d octave=%d follow=%d voicing=%d",
+                i, inst->enabled, inst->output_target, inst->channel,
+                inst->octave, inst->follow_note, inst->voicing);
+    }
+    for (int s = 0; s < song->section_count; s++) {
+        section_t *sec = &song->sections[s];
+        arr_log("PARSE_CHORD section=%d chord_count=%d", s, sec->chord_count);
+        for (int b = 0; b < sec->chord_count && b < MAX_SECTION_BARS; b++) {
+            if (sec->chords[b].set) {
+                arr_log("PARSE_CHORD[%d][%d] root=%s quality=%s bass=%s",
+                        s, b, sec->chords[b].root, sec->chords[b].quality,
+                        sec->chords[b].bass);
+            }
+        }
+    }
 }
 
 /* Parse a section's "chords" array: [ {root,quality,bass}, null, ... ]. */
@@ -2280,7 +2341,10 @@ static void parse_section_chords(const char *arr, section_t *sec) {
     sec->chord_count = bar + 1;
 }
 
-/* Parse an instrument's "bars" array: [[1,0,...], [1,1,...], ...]. */
+/* Parse an instrument's "bars" array: [[1,0,...], [1,1,...], ...]. Each inner
+ * array is one section; each 0/1 value is one bar (on/off). The bar index
+ * advances per VALUE (comma-separated), not per '[' — an inner array has a
+ * single '[' but many values. */
 static void parse_instrument_bars(const char *arr, instrument_t *inst) {
     if (!arr || !inst) return;
     int depth = 0, in_string = 0, escape = 0;
@@ -2295,15 +2359,17 @@ static void parse_instrument_bars(const char *arr, instrument_t *inst) {
         if (c == '[') {
             depth++;
             if (depth == 1) { section++; bar = -1; }
-            else if (depth == 2) { bar++; }
             p++;
             continue;
         }
         if (c == ']') { depth--; p++; continue; }
         if (c == '0' || c == '1') {
-            if (depth == 2 && section >= 0 && section < MAX_SONG_SECTIONS &&
-                bar >= 0 && bar < MAX_SECTION_BARS) {
-                inst->bars[section][bar] = (uint8_t)(c - '0');
+            if (depth == 2) {
+                bar++;
+                if (section >= 0 && section < MAX_SONG_SECTIONS &&
+                    bar >= 0 && bar < MAX_SECTION_BARS) {
+                    inst->bars[section][bar] = (uint8_t)(c - '0');
+                }
             }
             p++;
             continue;
@@ -3433,7 +3499,7 @@ static void engine_clear_error(engine_t *e) {
 
 /* DSP build version stamp. Keep in sync with UI_BUILD_VERSION in ui.js so the
  * running dsp.so can be confirmed from .dsp_log on module load. */
-static const char *const DSP_BUILD_VERSION = "arranger-dsp-2026-09-04e";
+static const char *const DSP_BUILD_VERSION = "arranger-dsp-2026-09-09c";
 
 static void* arr_create_instance(const char *module_dir, const char *config_json) {
     (void)module_dir;
@@ -3747,6 +3813,9 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
         for (int i = 0; i < MAX_INSTRUMENTS; i++) e->last_inst_chord_set[i] = 0;
         e->flash_end_tick = initial_flash_end_tick(e);
         queue_clear(e);
+        /* Emit the first bar's chord immediately (update_bar_counter only
+         * fires on a bar *change*, so bar 0 would otherwise be silent). */
+        emit_instruments_at_tick(e, 0);
         dsp_host_log("PLAY tempo=%.1f tpb=%u ts=%d/%d bars=%u",
                      e->tempo_bpm, e->ticks_per_beat,
                      e->time_sig_num, e->time_sig_den,
@@ -3777,6 +3846,8 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
         for (int i = 0; i < MAX_INSTRUMENTS; i++) e->last_inst_chord_set[i] = 0;
         e->flash_end_tick = initial_flash_end_tick(e);
         queue_clear(e);
+        /* Emit the chord for the bar playback starts on. */
+        emit_instruments_at_tick(e, e->playhead_tick);
         dsp_host_log("PLAY_FROM_BAR bar=%d playhead=%u running=1",
                      bar, e->playhead_tick);
         return;
@@ -3786,6 +3857,8 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
         e->flash_end_tick = 0;
         queue_clear(e);
         emit_all_notes_off(e);
+        /* Send note-offs for any instrument chords still sounding. */
+        emit_instruments_all_off(e);
         dsp_host_log("STOP");
         return;
     }

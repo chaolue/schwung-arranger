@@ -8,7 +8,7 @@
  * confirmed from the logs (see init()/playCurrentSong()) instead of guessing
  * whether a new file actually loaded. Keep the DSP dsp_build_version in
  * arranger_engine.c in sync so both sides are verifiable. */
-const UI_BUILD_VERSION = "arranger-ui-2026-09-04e";
+const UI_BUILD_VERSION = "arranger-ui-2026-09-09c";
 
 import {
     MidiNoteOn, MidiNoteOff, MidiCC,
@@ -1181,8 +1181,11 @@ function toEngineSongJson(song) {
             octave: (typeof inst.octave === "number") ? inst.octave : 3,
             follow_note: (typeof inst.follow_note === "number") ? inst.follow_note : 0,
             voicing: inst.voicing || "bass",
-            /* Per-section per-bar on/off map: 1 = send chord, 0 = muted. */
-            bars: (inst.bars || []).map(sec => (sec || []).map(b => (b ? 1 : 0)))
+            /* Per-section per-bar on/off map: 1 = send chord, 0 = muted.
+             * Bars are "on by default": only an explicit `false` mutes a bar;
+             * an unset (undefined) bar sends. Serialize accordingly so the DSP
+             * (which also defaults bars to "send") matches the UI. */
+            bars: (inst.bars || []).map(sec => (sec || []).map(b => (b === false ? 0 : 1)))
         });
     }
     return JSON.stringify({
