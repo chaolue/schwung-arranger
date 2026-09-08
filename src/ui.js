@@ -21,6 +21,7 @@ import {
     MoveRow1, MoveRow2, MoveRow3, MoveRow4,
     Black, White, BrightRed,
     WhiteLedOff, WhiteLedDim, WhiteLedBright,
+    AzureBlue, DarkAzure,
     MovePads, MoveSteps
 } from '/data/UserData/schwung/shared/constants.mjs';
 
@@ -2671,6 +2672,10 @@ const GROOVE_VARIATION_COLOURS = [11, 12, 13, 14]; /* Neon Green, Teal Green, Mu
  * the 16 step buttons, indicating there are additional bars to scroll to. */
 const MORE_BARS_COLOUR = 45; /* Muted Blue — distinct from clip colours */
 
+/* Chord/instrument track step LED colours. */
+const CHORD_COLOUR = AzureBlue;      /* bar has a chord set */
+const CHORD_DIM_COLOUR = DarkAzure;  /* chord set but muted for this instrument */
+
 /* Pure palette colours (indexed 0-127) used for transport/state LEDs. */
 const PureGreen = 126;   /* solid green */
 const PureRed = 127;     /* solid red */
@@ -3735,9 +3740,52 @@ function updateLEDs() {
     } else if (currentView === VIEW_JAM) {
         drawJamStepLEDs(forceSteps);
         stepLedsDirty = false;
+    } else if (currentView === VIEW_BUILDER && builderTrack !== TRACK_DRUM) {
+        drawChordStepLEDs(forceSteps);
+        stepLedsDirty = false;
     } else if (currentView === VIEW_BUILDER || currentView === VIEW_PERFORMANCE) {
         drawBuilderStepLEDs(forceSteps);
         stepLedsDirty = false;
+    }
+}
+
+/* Draw the step LEDs for the chord/instrument track. Each step maps to a bar
+ * of the current section (same scroll window as the drum track). A bar with a
+ * chord set lights up; the cursor bar flashes. In an instrument track, bars
+ * where the chord is muted are dimmed/off. */
+function drawChordStepLEDs(force) {
+    const secIndex = chordDisplaySectionIndex();
+    const sec = currentSong ? currentSong.sections[secIndex] : null;
+    if (!sec) {
+        for (let s = 0; s < NUM_STEPS; s++) stepColor(s, Black, force);
+        return;
+    }
+    const totalBars = sectionChordBars(sec);
+    const maxScroll = totalBars > NUM_STEPS ? totalBars - NUM_STEPS : 0;
+    if (stepScrollOffset > maxScroll) stepScrollOffset = maxScroll;
+    if (stepScrollOffset < 0) stepScrollOffset = 0;
+    const inst = (builderTrack === TRACK_INSTRUMENT_1 || builderTrack === TRACK_INSTRUMENT_2)
+        ? instrumentForTrack(builderTrack) : null;
+    for (let s = 0; s < NUM_STEPS; s++) {
+        const barIndex = stepScrollOffset + s;
+        if (barIndex >= totalBars) {
+            stepColor(s, Black, force);
+            continue;
+        }
+        const chord = chordAtBar(sec, barIndex);
+        let on = !!chord;
+        if (inst && chord) on = instrumentBarOn(inst, secIndex, barIndex);
+        if (barIndex === chordCursorBar) {
+            /* Cursor bar: flash white. */
+            stepColor(s, White, force);
+        } else if (on) {
+            stepColor(s, CHORD_COLOUR, force);
+        } else if (chord && inst) {
+            /* A chord exists but is muted for this instrument: dim. */
+            stepColor(s, CHORD_DIM_COLOUR, force);
+        } else {
+            stepColor(s, Black, force);
+        }
     }
 }
 
@@ -3856,6 +3904,9 @@ function drawFolderList() {
 }
 
 function drawBuilder() {
+    /* The chord and instrument tracks have their own displays. */
+    if (builderTrack === TRACK_CHORD) { drawChordTrack(); return; }
+    if (builderTrack === TRACK_INSTRUMENT_1 || builderTrack === TRACK_INSTRUMENT_2) { drawInstrumentTrack(); return; }
     const playingIdx = (playbackState === "playing" && builderDisplaySection >= 0) ? builderDisplaySection : playbackSectionIndex;
     const displayIdx = playbackState === "playing" ? playingIdx : currentSectionIndex;
     const sec = currentSong ? currentSong.sections[displayIdx] : null;
@@ -3935,6 +3986,297 @@ function drawScrollingOverlay(scroller, name, bars) {
 function drawBuilderPreviewOverlay() {
     if (!padPreviewScheduled || !builderPreviewName) return;
     drawScrollingOverlay(builderPreviewScroller, builderPreviewName, builderPreviewBars);
+}
+
+/* ── Chord track display ────────────────────────────────────────────── */
+
+/* The section index the chord track is currently showing (mirrors the drum
+ * track's section navigation). */
+function chordDisplaySectionIndex() {
+    return playbackState === "playing"
+        ? (builderDisplaySection >= 0 ? builderDisplaySection : playbackSectionIndex)
+        : currentSectionIndex;
+}
+
+/* Draw the chord track: section name, key, and the current/next chord. */
+function drawChordTrack() {
+    const secIndex = chordDisplaySectionIndex();
+    const sec = currentSong ? currentSong.sections[secIndex] : null;
+    const key = currentSong ? (currentSong.key || DEFAULT_KEY) : DEFAULT_KEY;
+    drawMenuHeader(scrollHeader("Chords: " + (currentSong ? shortSongName(currentSong.name) : ""), 24), key);
+    if (!sec) {
+        print(2, LIST_TOP_Y, "No section.", 1);
+        drawOverlay();
+        return;
+    }
+    const totalBars = sectionChordBars(sec);
+    /* Current chord = the chord on the cursor bar (or the last chord before
+     * it, so a held chord carries forward). */
+    let curChord = null;
+    for (let b = chordCursorBar; b >= 0; b--) {
+        const c = chordAtBar(sec, b);
+        if (c) { curChord = c; break; }
+    }
+    /* Next chord = the first chord after the cursor bar. */
+    let nextChord = null;
+    let nextBar = -1;
+    for (let b = chordCursorBar + 1; b < totalBars; b++) {
+        const c = chordAtBar(sec, b);
+        if (c) { nextChord = c; nextBar = b; break; }
+    }
+    print(2, LIST_TOP_Y, "Sec: " + (sec.name || "Section"), 1);
+    print(2, LIST_TOP_Y + 9, "Now: " + (curChord ? chordLabel(curChord) : "—"), 1);
+    print(2, LIST_TOP_Y + 18, "Next: " + (nextChord ? chordLabel(nextChord) + " (bar " + (nextBar + 1) + ")" : "—"), 1);
+    print(2, LIST_TOP_Y + 27, "Bar " + (chordCursorBar + 1) + "/" + totalBars + "  Key " + key, 1);
+    drawOverlay();
+}
+
+/* Draw the instrument track display (mirrors the chord track, with per-bar
+ * on/off toggles). */
+function drawInstrumentTrack() {
+    const secIndex = chordDisplaySectionIndex();
+    const sec = currentSong ? currentSong.sections[secIndex] : null;
+    const inst = instrumentForTrack(builderTrack);
+    const key = currentSong ? (currentSong.key || DEFAULT_KEY) : DEFAULT_KEY;
+    const label = builderTrack === TRACK_INSTRUMENT_1 ? "Inst 1" : "Inst 2";
+    drawMenuHeader(scrollHeader(label + ": " + (currentSong ? shortSongName(currentSong.name) : ""), 22), inst && inst.enabled ? "ON" : "OFF");
+    if (!sec) {
+        print(2, LIST_TOP_Y, "No section.", 1);
+        drawOverlay();
+        return;
+    }
+    const totalBars = sectionChordBars(sec);
+    let curChord = null;
+    for (let b = chordCursorBar; b >= 0; b--) {
+        const c = chordAtBar(sec, b);
+        if (c) { curChord = c; break; }
+    }
+    const on = inst ? instrumentBarOn(inst, secIndex, chordCursorBar) : true;
+    print(2, LIST_TOP_Y, "Sec: " + (sec.name || "Section"), 1);
+    print(2, LIST_TOP_Y + 9, "Now: " + (curChord ? chordLabel(curChord) : "—"), 1);
+    print(2, LIST_TOP_Y + 18, "Bar " + (chordCursorBar + 1) + "/" + totalBars + "  " + (on ? "Send" : "Mute"), 1);
+    print(2, LIST_TOP_Y + 27, "Key " + key + "  Ch " + (inst ? inst.channel : 1), 1);
+    drawOverlay();
+}
+
+/* Handle a step-button press while in the chord or instrument track. The step
+ * buttons map to the section's bars (with the same scroll window as the drum
+ * track). In the chord track, pressing a step opens the chord picker for that
+ * bar. In an instrument track, pressing a step toggles the chord on/off for
+ * that bar. */
+function handleStepPress(stepIndex, velocity) {
+    if (velocity === 0) return;
+    if (currentView !== VIEW_BUILDER) return;
+    if (builderTrack === TRACK_DRUM) return;
+    const secIndex = chordDisplaySectionIndex();
+    const sec = currentSong ? currentSong.sections[secIndex] : null;
+    if (!sec) return;
+    const totalBars = sectionChordBars(sec);
+    const barIndex = stepScrollOffset + stepIndex;
+    if (barIndex < 0 || barIndex >= totalBars) return;
+    chordCursorBar = barIndex;
+    if (builderTrack === TRACK_CHORD) {
+        openChordPick(barIndex);
+    } else {
+        /* Instrument track: toggle the chord on/off for this bar. */
+        const inst = instrumentForTrack(builderTrack);
+        if (inst) toggleInstrumentBar(inst, secIndex, barIndex);
+        stepLedsDirty = true;
+        needsRedraw = true;
+    }
+}
+
+/* ── Chord picker ───────────────────────────────────────────────────── */
+
+/* Open the chord picker for a bar. degree/quality/bass are initialised from
+ * the existing chord (if any) or the diatonic default for the bar's scale
+ * degree. */
+function openChordPick(barIndex) {
+    const secIndex = chordDisplaySectionIndex();
+    const sec = currentSong ? currentSong.sections[secIndex] : null;
+    if (!sec) return;
+    chordPickBar = barIndex;
+    const existing = chordAtBar(sec, barIndex);
+    if (existing) {
+        /* Map the existing chord back to a scale degree + quality + bass. */
+        const key = currentSong ? (currentSong.key || DEFAULT_KEY) : DEFAULT_KEY;
+        const keyPc = noteSemitone(key);
+        const rootPc = noteSemitone(existing.root);
+        const scaleSteps = [0, 2, 4, 5, 7, 9, 11];
+        let degree = 0;
+        if (keyPc >= 0 && rootPc >= 0) {
+            const rel = ((rootPc - keyPc) % 12 + 12) % 12;
+            const d = scaleSteps.indexOf(rel);
+            if (d >= 0) degree = d;
+        }
+        chordPickDegree = degree;
+        const qIdx = CHORD_QUALITIES.indexOf(existing.quality);
+        chordPickQuality = qIdx >= 0 ? qIdx : 0;
+        chordPickBass = existing.bass ? BASS_NOTES.indexOf(existing.bass) : -1;
+    } else {
+        /* Default to the diatonic chord for the bar's scale degree. */
+        chordPickDegree = barIndex % 7;
+        chordPickQuality = 0;
+        chordPickBass = -1;
+    }
+    chordPickFocus = 0;
+    currentView = VIEW_CHORD_PICK;
+    menuStack.push({ title: "Chord", selectedIndex: 0 });
+    needsRedraw = true;
+}
+
+/* The chord currently selected in the picker. */
+function chordPickChord() {
+    const key = currentSong ? (currentSong.key || DEFAULT_KEY) : DEFAULT_KEY;
+    const d = diatonicChord(key, chordPickDegree);
+    const chord = { root: d.root, quality: CHORD_QUALITIES[chordPickQuality] };
+    if (chordPickBass >= 0) chord.bass = BASS_NOTES[chordPickBass];
+    return chord;
+}
+
+function drawChordPick() {
+    const key = currentSong ? (currentSong.key || DEFAULT_KEY) : DEFAULT_KEY;
+    const chord = chordPickChord();
+    drawMenuHeader("Chord (bar " + (chordPickBar + 1) + ")", key);
+    const degreeNames = ["I", "ii", "iii", "IV", "V", "vi", "vii°"];
+    const items = [
+        { key: "degree", label: "Degree", value: degreeNames[chordPickDegree] + " (" + diatonicChord(key, chordPickDegree).root + ")" },
+        { key: "quality", label: "Quality", value: CHORD_QUALITY_LABEL[CHORD_QUALITIES[chordPickQuality]] || "maj" },
+        { key: "bass", label: "Bass", value: chordPickBass >= 0 ? BASS_NOTES[chordPickBass] : "—" },
+        { key: "clear", label: "Delete Chord", value: "" }
+    ];
+    drawMenuList({
+        items,
+        selectedIndex: chordPickFocus,
+        getLabel: (item) => item.label,
+        getValue: (item) => item.value,
+        valueAlignRight: true,
+        labelGap: 2,
+        listArea: { topY: LIST_TOP_Y, bottomY: LIST_INDICATOR_BOTTOM_Y }
+    });
+    /* Show the resulting chord label at the bottom. */
+    print(2, LIST_INDICATOR_BOTTOM_Y + 2, "= " + chordLabel(chord), 1);
+}
+
+function handleChordPickInput(cc, value) {
+    if (cc === MoveMainKnob) {
+        const delta = decodeDelta(value);
+        if (chordPickFocus === 0) {
+            chordPickDegree = ((chordPickDegree + delta) % 7 + 7) % 7;
+        } else if (chordPickFocus === 1) {
+            chordPickQuality = Math.max(0, Math.min(CHORD_QUALITIES.length - 1, chordPickQuality + delta));
+        } else if (chordPickFocus === 2) {
+            chordPickBass = Math.max(-1, Math.min(BASS_NOTES.length - 1, chordPickBass + delta));
+        } else {
+            chordPickFocus = Math.max(0, Math.min(3, chordPickFocus + delta));
+        }
+        needsRedraw = true;
+    } else if (cc === MoveMainButton && value > 0) {
+        if (chordPickFocus === 3) {
+            /* Delete the chord on this bar. */
+            const secIndex = chordDisplaySectionIndex();
+            const sec = currentSong ? currentSong.sections[secIndex] : null;
+            if (sec) setChordAtBar(sec, chordPickBar, null);
+            menuStack.pop();
+            currentView = VIEW_BUILDER;
+            stepLedsDirty = true;
+            needsRedraw = true;
+            return;
+        }
+        /* Cycle focus to the next field. */
+        chordPickFocus = (chordPickFocus + 1) % 3;
+        needsRedraw = true;
+    } else if (cc === MoveBack && value > 0) {
+        /* Commit the chord. */
+        const secIndex = chordDisplaySectionIndex();
+        const sec = currentSong ? currentSong.sections[secIndex] : null;
+        if (sec) setChordAtBar(sec, chordPickBar, chordPickChord());
+        menuStack.pop();
+        currentView = VIEW_BUILDER;
+        stepLedsDirty = true;
+        needsRedraw = true;
+    }
+}
+
+/* ── Instrument track menu ──────────────────────────────────────────── */
+
+function openInstrumentMenu(track) {
+    instrumentEditTrack = track;
+    instrumentFocus = 0;
+    instrumentEditing = false;
+    currentView = VIEW_INSTRUMENT;
+    menuStack.push({ title: track === TRACK_INSTRUMENT_1 ? "Inst 1" : "Inst 2", selectedIndex: 0 });
+    needsRedraw = true;
+}
+
+function drawInstrument() {
+    const inst = instrumentForTrack(instrumentEditTrack);
+    drawMenuHeader(instrumentEditTrack === TRACK_INSTRUMENT_1 ? "Inst 1" : "Inst 2", inst && inst.enabled ? "ON" : "OFF");
+    const items = [
+        { key: "enabled", label: "Enabled", value: inst && inst.enabled ? "On" : "Off" },
+        { key: "output", label: "Output", value: inst ? (OUTPUT_LABELS[inst.output] || inst.output) : "External" },
+        { key: "channel", label: "MIDI Channel", value: String(inst ? inst.channel : 1) },
+        { key: "octave", label: "Octave", value: String(inst ? inst.octave : 3) },
+        { key: "follow", label: "Follow Note", value: inst && inst.follow_note > 0 ? String(inst.follow_note) : "Off" },
+        { key: "voicing", label: "Voicing", value: inst && inst.voicing === "chord" ? "Chord" : "Bass" }
+    ];
+    drawMenuList({
+        items,
+        selectedIndex: instrumentFocus,
+        getLabel: (item) => item.label,
+        getValue: (item) => item.value,
+        valueAlignRight: true,
+        editMode: instrumentEditing,
+        labelGap: 2,
+        prioritizeSelectedValue: true,
+        selectedMinLabelChars: 6,
+        listArea: { topY: LIST_TOP_Y, bottomY: LIST_INDICATOR_BOTTOM_Y }
+    });
+}
+
+function handleInstrumentInput(cc, value) {
+    const inst = instrumentForTrack(instrumentEditTrack);
+    if (!inst) return;
+    if (cc === MoveMainKnob) {
+        const delta = decodeDelta(value);
+        if (instrumentEditing) {
+            if (instrumentFocus === 0) {
+                inst.enabled = !inst.enabled;
+            } else if (instrumentFocus === 1) {
+                const idx = Math.max(0, Math.min(OUTPUT_TARGETS.length - 1, OUTPUT_TARGETS.indexOf(inst.output) + delta));
+                inst.output = OUTPUT_TARGETS[idx];
+            } else if (instrumentFocus === 2) {
+                inst.channel = Math.max(1, Math.min(16, inst.channel + delta));
+            } else if (instrumentFocus === 3) {
+                inst.octave = Math.max(-1, Math.min(8, inst.octave + delta));
+            } else if (instrumentFocus === 4) {
+                inst.follow_note = Math.max(0, Math.min(127, inst.follow_note + delta));
+            } else if (instrumentFocus === 5) {
+                inst.voicing = (inst.voicing === "chord") ? "bass" : "chord";
+            }
+            unsavedChanges = true;
+        } else {
+            instrumentFocus = Math.max(0, Math.min(5, instrumentFocus + delta));
+        }
+        needsRedraw = true;
+    } else if (cc === MoveMainButton && value > 0) {
+        if (instrumentFocus === 0) {
+            inst.enabled = !inst.enabled;
+            unsavedChanges = true;
+        } else {
+            instrumentEditing = !instrumentEditing;
+        }
+        needsRedraw = true;
+    } else if (cc === MoveBack && value > 0) {
+        if (instrumentEditing) {
+            instrumentEditing = false;
+            needsRedraw = true;
+        } else {
+            menuStack.pop();
+            currentView = VIEW_BUILDER;
+            needsRedraw = true;
+        }
+    }
 }
 
 function openTrimView() {
@@ -6757,6 +7099,11 @@ function handleJamPad(padIndex, velocity) {
 }
 
 function handlePadPress(note, velocity) {
+    /* Step buttons (notes 16-31) drive the chord/instrument track bar grid. */
+    if (note >= MoveStep1 && note <= MoveStep16) {
+        handleStepPress(note - MoveStep1, velocity);
+        return;
+    }
     if (currentView === VIEW_BUILDER) {
         handleBuilderPad(note, velocity);
         return;
