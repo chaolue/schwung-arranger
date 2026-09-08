@@ -5398,7 +5398,11 @@ function handleBuilderInput(cc, value) {
     } else if (cc === MoveShift) {
         shiftHeld = value > 0;
     } else if (cc === MoveMenu && value > 0) {
-        openSongSettings();
+        if (builderTrack === TRACK_INSTRUMENT_1 || builderTrack === TRACK_INSTRUMENT_2) {
+            openInstrumentMenu(builderTrack);
+        } else {
+            openSongSettings();
+        }
     } else if (cc === MoveMainButton && value > 0) {
         if (shiftHeld) {
             openSongSettings();
