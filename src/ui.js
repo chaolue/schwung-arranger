@@ -266,6 +266,35 @@ let pendingSongJson = null;
 let dspTimelineInfo = null;
 let lastDspState = null;
 
+/* Async build confirmation (rearch2.md Step 3). song_json/preload_song_json
+ * now return instantly -- the actual build happens on the DSP's worker
+ * thread -- so a blocking set_param call returning is no longer proof that
+ * the build finished, only that the DSP received it. Every caller that
+ * needs to know "did MY specific request actually land" captures the
+ * relevant *_published_gen from the already-fresh lastDspState (updated
+ * every tick by updateDspState, so this costs nothing extra) as a baseline
+ * BEFORE issuing the write, then registers here; updateDspState below fires
+ * onReady once that generation has changed. A later call overwrites an
+ * earlier one, matching the DSP's own "coalesce to latest" semantics for
+ * the same channel. This sits alongside, not instead of, the reactive
+ * active_source/bar_frac reconciliation further down in updateDspState,
+ * which answers "what is the DSP actually playing" rather than "did my
+ * request finish". */
+let pendingPrimaryConfirm = null;  // { gen, onReady }
+let pendingStagingConfirm = null;  // { gen, onReady }
+
+function requestPrimaryBuild(setFn, onReady) {
+    const baseGen = (lastDspState && lastDspState.primary_published_gen) || 0;
+    setFn();
+    pendingPrimaryConfirm = { gen: baseGen, onReady: onReady };
+}
+
+function requestStagingBuild(setFn, onReady) {
+    const baseGen = (lastDspState && lastDspState.staging_published_gen) || 0;
+    setFn();
+    pendingStagingConfirm = { gen: baseGen, onReady: onReady };
+}
+
 let shiftHeld = false;
 let needsRedraw = true;
 let ledQueue = [];
@@ -505,6 +534,8 @@ let jamActiveSource = "";           /* last active clip source reported by DSP s
 let jamVisibleFillList = [];
 let lastJamLedKey = "";             /* last jam LED state key, to log only on change */
 let lastJamStepKey = "";            /* last jam step LED state key, to log only on change */
+let lastJamPreviewStepKey = "";     /* last jam PREVIEW step LED state key, to log only on change */
+let lastJamPreviewQueueKey = "";    /* last jam PREVIEW queue-diagnostic key, to log only on change */
 
 /* Jam preview (pad-held one-shot while stopped). Mirrors the builder pad
  * preview: press a pad while stopped, hold past the delay to hear the clip
@@ -514,6 +545,13 @@ let jamPreviewClip = null;          /* clip armed/playing for jam preview */
 let jamPreviewTriggerTime = 0;      /* when the jam pad press happened */
 let jamPreviewScheduled = false;    /* true once the jam one-shot preview playback started */
 let jamPreviewStartTime = 0;        /* when the jam preview playback started */
+/* True once the DSP has actually been observed running since this preview
+ * was scheduled. song_json/play are now async (Step 3), so there is a real
+ * window right after jamPlayClip is called where the DSP hasn't started yet
+ * and lastDspState.running is still false -- distinct from the clip having
+ * actually played and finished. The "preview finished on its own" check
+ * below must only fire on that second case. */
+let jamPreviewObservedRunning = false;
 
 /* Jam hold-overlay (pad held while playback is running): shows the name of the
  * held groove/fill in the display overlay without queueing it. A quick press
@@ -1870,20 +1908,24 @@ function deleteSetlist(setlist) {
  * built so a subsequent play_from_bar seek is instant, but we must NOT send
  * `play` (which starts from tick 0 and would play the song's first note before
  * the seek lands — a double-note blip). */
-function buildSongTimelineOnly() {
+function buildSongTimelineOnly(onConfirmed) {
     if (!currentSong) return;
     if (typeof host_module_set_param !== "function") return;
     const json = toEngineSongJson(currentSong);
     const block = typeof host_module_set_param_blocking === "function";
     const set = block ? host_module_set_param_blocking : host_module_set_param;
-    const t = block ? 500 : undefined;
+    const t = block ? 100 : undefined; /* delivery-only budget now -- see playCurrentSong */
     set("library_root", LIBRARY_ROOT, t);
     pushOutputRoutingToDsp();
     set("loop", "0", t);
-    set("song_json", json, t);
+    requestPrimaryBuild(function () {
+        set("song_json", json, t);
+    }, function () {
+        if (onConfirmed) onConfirmed();
+    });
 }
 
-function playCurrentSong(preloadStaged) {
+function playCurrentSong(preloadStaged, onConfirmed) {
     if (!currentSong) { logDebug("playCurrentSong: no currentSong"); return; }
     lastLoggedDspError = null;
     const json = toEngineSongJson(currentSong);
@@ -1896,83 +1938,80 @@ function playCurrentSong(preloadStaged) {
             " bars=" + (dspTimelineInfo ? dspTimelineInfo.total_bars : "?") + " t=" + Date.now());
         logDebug("playCurrentSong: BUILD=" + UI_BUILD_VERSION + " song=" + currentSong.name + " sections=" + secCount + " clips=" + clipCount + " json_len=" + json.length + " output=" + outputTarget);
         logDebug("playCurrentSong json=" + json.slice(0, 600));
-        /* The song_json → loop → play sequence MUST be delivered in order and
-         * fully consumed before the next write. host_module_set_param is
-         * fire-and-forget over a SINGLE shared shadow_param SHM slot, so a
-         * later write clobbers an earlier one before it is consumed. The DSP
-         * log showed song_json arriving and building (a ~600ms build for a
-         * large song) but the subsequent `play` write being dropped — the song
-         * built but never started. Use the BLOCKING variant so each write is
-         * fully processed before the next, guaranteeing `play` reaches the DSP
-         * after the timeline is ready. */
+        /* song_json now builds asynchronously on the DSP's worker thread and
+         * returns instantly regardless of song complexity -- the blocking
+         * variant is still used so each write is fully delivered into the
+         * single shared shadow_param SHM slot before the next one (a later
+         * write can otherwise clobber an earlier one before it's consumed),
+         * but the budget only needs to cover delivery now, not build time. */
         const block = typeof host_module_set_param_blocking === "function";
         const set = block ? host_module_set_param_blocking : host_module_set_param;
-        const t = block ? 500 : undefined;
-        /* song_json can trigger a long SYNCHRONOUS timeline build on the DSP
-         * side (the log showed ~1.7s for a 14-section song whose clips need a
-         * recursive folder search). The 500ms blocking-write timeout below
-         * expires while the build is still running, so the subsequent `play`
-         * write waits on the still-busy SHM slot and gets dropped — the song
-         * builds a valid timeline but never starts. Give the final `play`
-         * write a larger blocking budget (it is cheap once the build
-         * finishes) so it reliably waits out the build and starts playback.
-         * Capped at 1000ms so a slow build doesn't stall the UI for long. */
-        const tPlay = block ? 1000 : undefined;
+        const t = block ? 100 : undefined;
         /* Ensure library_root is set first so clip resolution works. */
         set("library_root", LIBRARY_ROOT, t);
         pushOutputRoutingToDsp();
         set("loop", "0", t);
-        set("song_json", json, t);
-        if (typeof host_module_get_param === "function") {
-            const afterJsonErr = host_module_get_param("error");
-            const afterJsonInfo = host_module_get_param("timeline_info");
-            logDebug("playCurrentSong after song_json: error=" + (afterJsonErr || "null") + " timeline_info=" + (afterJsonInfo || "null"));
-            /* If a clip file is missing, surface it on the display so the user
-             * knows which clip is the problem. */
-            if (afterJsonErr && afterJsonErr.indexOf("clip not found") >= 0) {
-                showMissingClipOverlay();
+        /* The error/timeline_info/resolved_clips checks that used to follow
+         * song_json immediately only became meaningful once the build
+         * actually finished (which, when this ran synchronously, was
+         * guaranteed by the time the call returned). Now that the build
+         * happens on the worker, they -- and "play" itself -- move into
+         * requestPrimaryBuild's onReady, which fires once the DSP confirms
+         * primary_published_gen actually advanced. */
+        requestPrimaryBuild(function () {
+            set("song_json", json, t);
+        }, function () {
+            if (typeof host_module_get_param === "function") {
+                const afterJsonErr = host_module_get_param("error");
+                const afterJsonInfo = host_module_get_param("timeline_info");
+                logDebug("playCurrentSong after song_json: error=" + (afterJsonErr || "null") + " timeline_info=" + (afterJsonInfo || "null"));
+                /* If a clip file is missing, surface it on the display so the
+                 * user knows which clip is the problem. */
+                if (afterJsonErr && afterJsonErr.indexOf("clip not found") >= 0) {
+                    showMissingClipOverlay();
+                }
+                /* If any clip resolved to a different folder than the song
+                 * stored (i.e. the file moved), persist the corrected
+                 * source_folder so the next play resolves directly instead of
+                 * re-searching. */
+                persistResolvedClipFolders();
             }
-            /* If any clip resolved to a different folder than the song stored
-             * (i.e. the file moved), persist the corrected source_folder so
-             * the next play resolves directly instead of re-searching. */
-            persistResolvedClipFolders();
-        }
-        set("loop", dspLoopEnabled ? "1" : "0", t);
-        /* Start the click FIRST, then preload the full song into staging.
-         * The preload builds the full song timeline on the control thread and
-         * can take well over the 500ms blocking-write timeout (the DSP log
-         * showed ~1.8s for a 14-section song). If the preload ran before
-         * play=1, its long blocking write would clobber the subsequent `play`
-         * write in the shared shadow_param SHM slot — the click never started
-         * and the first song never played. Sending play first starts the click
-         * immediately; the preload then stages the full song while the click
-         * plays, so the click→song swap still fires sample-accurately at the
-         * click's end. */
-        set("play", "1", tPlay);
-        if (preloadStaged) {
-            preloadPerfSongToStaging();
-        }
-        if (typeof host_module_get_param === "function") {
-            const info = host_module_get_param("timeline_info");
-            const err = host_module_get_param("error");
-            logDebug("playCurrentSong post: timeline_info=" + (info || "null") + " error=" + (err || "null"));
-        }
+            set("loop", dspLoopEnabled ? "1" : "0", t);
+            /* Start the click FIRST, then preload the full song into staging,
+             * so the preload's (now-async, but still delivery-blocking) write
+             * can't clobber this "play" write in the shared shadow_param SHM
+             * slot -- the click starts immediately; the preload then stages
+             * the full song while the click plays, so the click->song swap
+             * still fires sample-accurately at the click's end. */
+            set("play", "1", t);
+            if (preloadStaged) {
+                preloadPerfSongToStaging();
+            }
+            if (typeof host_module_get_param === "function") {
+                const info = host_module_get_param("timeline_info");
+                const err = host_module_get_param("error");
+                logDebug("playCurrentSong post: timeline_info=" + (info || "null") + " error=" + (err || "null"));
+            }
+            /* Clear stale transport/end state so perfTick doesn't act on old
+             * data, and only now flip to "playing" -- confirmed by the DSP,
+             * not assumed the instant song_json was issued. */
+            lastDspState = null;
+            lastDspTransport = null;
+            playbackState = "playing";
+            playbackStartTime = Date.now();
+            playbackSectionIndex = currentSectionIndex;
+            lastStepBeatKey = "";
+            lastStepBarIndex = -1;
+            lastTransportBar = 0;
+            maxBeatThisBar = 0;
+            transportBeatsPerBar = 0;
+            lastSubdivisionIndex = 0;
+            needsRedraw = true;
+            if (onConfirmed) onConfirmed();
+        });
     } else {
         logDebug("playCurrentSong: host_module_set_param unavailable");
     }
-    /* Clear stale transport/end state so perfTick doesn't act on old data. */
-    lastDspState = null;
-    lastDspTransport = null;
-    playbackState = "playing";
-    playbackStartTime = Date.now();
-    playbackSectionIndex = currentSectionIndex;
-    lastStepBeatKey = "";
-    lastStepBarIndex = -1;
-    lastTransportBar = 0;
-    maxBeatThisBar = 0;
-    transportBeatsPerBar = 0;
-    lastSubdivisionIndex = 0;
-    needsRedraw = true;
 }
 
 /* Persist corrected clip source_folder values reported by the DSP. When a clip
@@ -2113,8 +2152,17 @@ function updateDspState() {
         const info = host_module_get_param("timeline_info");
         if (info) dspTimelineInfo = JSON.parse(info);
     } catch (e) { dspTimelineInfo = null; }
+    /* Declared outside the try below (not `const st = ...` inside it) so the
+     * catch block can safely reference it in its error log. `const` inside a
+     * try is block-scoped to the try and NOT visible in the paired catch --
+     * referencing it there throws a SECOND, unrelated ReferenceError that
+     * masks whatever actually failed, and (being uncaught) crashes tick()
+     * and closes the module entirely. This is exactly what happened on
+     * device: a real TypeError below (see next comment) was masked by this
+     * scoping bug, surfacing only as "ReferenceError: 'st' is not defined". */
+    let st;
     try {
-        const st = host_module_get_param("state");
+        st = host_module_get_param("state");
         if (st) {
             lastDspState = JSON.parse(st);
             /* Log only when the DSP-reported active source changes, so the
@@ -2122,13 +2170,37 @@ function updateDspState() {
             if (jamPlaying && lastDspState.active_source !== jamActiveSource) {
                 logJam("STATE active_source=" + lastDspState.active_source + " jamActiveSource=" + jamActiveSource);
             }
+            /* Fire any pending async-build confirmation whose generation has
+             * now advanced -- see requestPrimaryBuild/requestStagingBuild.
+             * Capture both generations BEFORE invoking either callback: an
+             * onReady callback (e.g. playCurrentSong's) sets
+             * lastDspState = null as part of its own "clear stale state"
+             * reset, so if the primary callback ran first and nulled it out,
+             * the staging check right below would then dereference null and
+             * throw -- exactly what happened on device when
+             * jamStartWithIntroFill fires both a primary (fill) and a
+             * staging (return groove) request together and both confirm on
+             * the same tick. */
+            const primaryGen = lastDspState.primary_published_gen;
+            const stagingGen = lastDspState.staging_published_gen;
+            if (pendingPrimaryConfirm && primaryGen !== pendingPrimaryConfirm.gen) {
+                const cb = pendingPrimaryConfirm.onReady;
+                pendingPrimaryConfirm = null;
+                cb();
+            }
+            if (pendingStagingConfirm && stagingGen !== pendingStagingConfirm.gen) {
+                const cb = pendingStagingConfirm.onReady;
+                pendingStagingConfirm = null;
+                cb();
+            }
         }
     } catch (e) {
         if (jamPlaying) logJam("STATE parse error=" + e + " raw=" + String(st));
         lastDspState = null;
     }
+    let tr;
     try {
-        const tr = host_module_get_param("transport");
+        tr = host_module_get_param("transport");
         if (tr) {
             lastDspTransport = JSON.parse(tr);
         }
@@ -2158,8 +2230,17 @@ function updateDspState() {
     }
     /* Jam mode: keep the UI in sync with any clip the DSP has auto-swapped to
      * (e.g. a non-looping fill returning to its groove). The DSP exposes the
-     * active clip's source path in state.active_source. */
-    if (jamPlaying && lastDspState && lastDspState.active_source &&
+     * active clip's source path in state.active_source. Also require
+     * lastDspState.running: active_source is only meaningful while the DSP
+     * is actually playing something -- the DSP now clears it on "stop", but
+     * this check is a second, independent guard against ever trusting it
+     * while stopped, since a stale-but-nonempty active_source here was
+     * exactly what caused a just-released preview's clip to flash back in
+     * as jamCurrentClip the instant jamPlaying next went true for an
+     * unrelated tap (jamPlaying flips synchronously on tap, but this poll
+     * can still be looking at state captured before that -- guarding on
+     * jamPlaying alone isn't enough). */
+    if (jamPlaying && lastDspState && lastDspState.running && lastDspState.active_source &&
         lastDspState.active_source !== jamActiveSource) {
         jamActiveSource = lastDspState.active_source;
         /* Find the matching clip in the currently loaded folder. The DSP
@@ -2273,17 +2354,42 @@ function updateDspState() {
         }
     }
 
+    /* Track whether the preview's play request has actually landed on the
+     * DSP yet. song_json/play are async now, so "not running" can mean
+     * either "genuinely finished" or "the build/play hasn't confirmed yet" --
+     * only the transition INTO running, observed at least once, distinguishes
+     * them from "never started". */
+    if (jamPreviewScheduled && ((lastDspState && lastDspState.running) || (lastDspTransport && lastDspTransport.running))) {
+        jamPreviewObservedRunning = true;
+    }
+
     /* If a jam preview one-shot finished on its own (non-looping clip ended),
      * clear the preview state and return to the stopped Jam grid. This must
      * run before the generic DSP-stop branch below so it isn't mistaken for a
-     * normal clip that ended. */
-    if (jamPreviewScheduled && ((lastDspState && !lastDspState.running) || (lastDspTransport && !lastDspTransport.running))) {
+     * normal clip that ended. Gated on jamPreviewObservedRunning so this
+     * doesn't fire while the (now-async) song_json/play request for this
+     * preview is still in flight and simply hasn't landed yet -- see its
+     * declaration. */
+    if (jamPreviewScheduled && jamPreviewObservedRunning &&
+        ((lastDspState && !lastDspState.running) || (lastDspTransport && !lastDspTransport.running))) {
         logJam("PREVIEW finished on its own");
         hideOverlay();
         jamPreviewPad = -1;
         jamPreviewClip = null;
         jamPreviewScheduled = false;
         jamPreviewStartTime = 0;
+        jamPreviewObservedRunning = false;
+        /* jamStopPlayback() (used on a manual release) clears these two so
+         * drawJamLEDs's isCurrent check stops matching the pad and it
+         * returns to its normal colour. This path resets the other preview
+         * fields above but was missing this -- so a preview that finished
+         * naturally WHILE STILL HELD left jamCurrentClip pointing at the
+         * finished clip forever, and the pad stayed white indefinitely
+         * (ledDirtyAll below forces a redraw, but with jamCurrentClip still
+         * matching, that redraw just reasserts white instead of clearing
+         * it). */
+        jamCurrentClip = null;
+        jamCurrentType = "";
         playbackState = "stopped";
         playbackSectionIndex = currentSectionIndex;
         previewBarOffset = 0;
@@ -3663,14 +3769,47 @@ function drawJamStepLEDs(force) {
                 const bpm = lastDspTransport.bpm || 120;
                 pFlash = updateStepFlash(pBar + 1, pBeat + 1, bpm, pBeatsPerBar);
             }
+            /* Diagnostic for the "steps don't fill for the clip's full bar
+             * count" report: log every input to the fill/flash decision
+             * below, but only when something actually changes, so this
+             * doesn't flood the log every tick. */
+            const pKey = (pclip.name || pclip.path) + "|clipBars=" + pclip.bars + "|clipPlayBars=" + clipPlayBars(pclip) +
+                "|pBars=" + pBars + "|dspRunning=" + !!(lastDspTransport && lastDspTransport.running) +
+                "|dspBar=" + (lastDspTransport ? lastDspTransport.bar : "?") +
+                "|pBar=" + pBar + "|pFlash=" + pFlash + "|observedRunning=" + jamPreviewObservedRunning;
+            if (pKey !== lastJamPreviewStepKey) {
+                lastJamPreviewStepKey = pKey;
+                logJam("PREVIEW-LEDS " + pKey);
+            }
+            /* Diagnostic: confirm the colour fill loop actually QUEUES a
+             * message per step, rather than trusting that the computed
+             * inputs above (already confirmed correct) reach the hardware.
+             * Logs the queue-length delta and, on the first draw of a new
+             * preview (or whenever the queued count looks wrong), every
+             * per-step color decision and whether stepColor's dedup
+             * (lastStepState) suppressed it. */
+            const qBefore = ledQueue.length;
+            const perStep = [];
             for (let s = 0; s < NUM_STEPS; s++) {
+                let want;
                 if (s >= pBars) {
-                    stepColor(s, Black, force);
+                    want = Black;
                 } else if (s === pBar) {
-                    stepColor(s, pFlash ? White : Black, force);
+                    want = pFlash ? White : Black;
                 } else {
-                    stepColor(s, pColour, force);
+                    want = pColour;
                 }
+                const before = lastStepState[s];
+                stepColor(s, want, force);
+                const queued = lastStepState[s] !== before || force;
+                perStep.push(s + ":want=" + want + ":prev=" + before + ":" + (queued ? "QUEUED" : "skip"));
+            }
+            const qAfter = ledQueue.length;
+            const qKey = pKey + "|qDelta=" + (qAfter - qBefore);
+            if (qKey !== lastJamPreviewQueueKey) {
+                lastJamPreviewQueueKey = qKey;
+                logJam("PREVIEW-QUEUE qBefore=" + qBefore + " qAfter=" + qAfter + " delta=" + (qAfter - qBefore) +
+                    " force=" + force + " pColour=" + pColour + " steps=[" + perStep.join(",") + "]");
             }
             return;
         }
@@ -3802,6 +3941,27 @@ function updateLEDs() {
         lastLedView = currentView;
     }
     if (ledDirtyAll) {
+        /* Confirmed via device logging (PREVIEW-QUEUE/PREVIEW-WIPE): the
+         * ledQueue can carry a large backlog (LEDS_PER_TICK throttles
+         * draining to 8/tick, so a burst of traffic outpaces it), and this
+         * wipe discards whatever hasn't been sent yet. But stepColor/
+         * padColor already updated lastStepState/lastPadState at QUEUE time,
+         * not at delivery -- so a wiped message leaves those caches claiming
+         * a color was sent when it never reached the hardware, and every
+         * later redraw's dedup check (color === lastState) then wrongly
+         * skips resending it forever. Invalidate both caches here so the
+         * draw calls below (and every later one this view triggers) treat
+         * every LED as unknown and actually resend it. This was reproducing
+         * exactly as "some step LEDs never fill in" during a Jam preview:
+         * the flashing step keeps changing color so it keeps re-queuing
+         * (and recovers on its own), but the static-colour steps only ever
+         * got sent once, and if that single send landed in a backlog that
+         * got wiped, nothing ever corrected it again. */
+        if (ledQueue.length > 0) {
+            lastStepState.fill(255);
+            lastPadState.fill(255);
+            lastButtonState.clear();
+        }
         ledQueue.length = 0;
         switch (currentView) {
             case VIEW_BUILDER: drawBuilderLEDs(); break;
@@ -6628,7 +6788,7 @@ function jamClipToSongJson(clip) {
  * fire-and-forget call can overwrite the shared shadow-param slot. `resumeTick`
  * is the position (in ticks) at which the staged clip should start when it is
  * swapped in (0 = from the start). */
-function jamPreloadClip(clip, resumeTick) {
+function jamPreloadClip(clip, resumeTick, onConfirmed) {
     if (!clip) return;
     if (typeof host_module_set_param !== "function") return;
     const json = jamClipToSongJson(clip);
@@ -6637,18 +6797,31 @@ function jamPreloadClip(clip, resumeTick) {
     const loopVal = nonLoop ? "0" : "1";
     const rTick = resumeTick || 0;
     logJam("PRELOAD clip=" + (clip.name || clip.path) + " type=" + (clip.type || "?") + " bpm=" + jamBpm + " loop=" + loopVal + " resume=" + rTick + " json_len=" + json.length);
-    if (typeof host_module_set_param_blocking === "function") {
-        host_module_set_param_blocking("preload_song_json", json, 500);
-        host_module_set_param_blocking("loop", loopVal, 100);
-        host_module_set_param_blocking("swap_resume", String(rTick), 100);
-    } else {
-        host_module_set_param("preload_song_json", json);
-        host_module_set_param("loop", loopVal);
-        host_module_set_param("swap_resume", String(rTick));
-    }
-    jamStagedClip = clip;
-    jamStagedIsFill = isFill;
-    jamStagedResumeTick = rTick;
+    /* preload_song_json now builds asynchronously on the DSP's worker thread
+     * and returns instantly -- the blocking write still guarantees delivery
+     * into the single shared shadow_param slot (it just no longer also waits
+     * out a build), so it keeps a short 100ms delivery-only budget instead of
+     * the old 500ms build-covering one. jamStagedClip (and every downstream
+     * consumer chained off it: jamStartClip's canSwap, jamSwapStaged,
+     * jamFireNext) is set only once the DSP confirms staging_published_gen
+     * actually advanced, not the instant this call returns -- see
+     * requestStagingBuild. */
+    requestStagingBuild(function () {
+        if (typeof host_module_set_param_blocking === "function") {
+            host_module_set_param_blocking("preload_song_json", json, 100);
+            host_module_set_param_blocking("staging_loop", loopVal, 100);
+            host_module_set_param_blocking("swap_resume", String(rTick), 100);
+        } else {
+            host_module_set_param("preload_song_json", json);
+            host_module_set_param("staging_loop", loopVal);
+            host_module_set_param("swap_resume", String(rTick));
+        }
+    }, function () {
+        jamStagedClip = clip;
+        jamStagedIsFill = isFill;
+        jamStagedResumeTick = rTick;
+        if (onConfirmed) onConfirmed();
+    });
 }
 
 /* Swap the staged timeline into the active DSP playback at the current musical
@@ -6681,11 +6854,12 @@ function jamSwapStaged(clip) {
      * to the groove. Sending loop here guarantees the swapped-in clip uses
      * the correct loop mode. */
     const swapLoop = isNonLoopingClip(clip) ? "0" : "1";
+    const rejectedBefore = (lastDspState && lastDspState.staging_swap_rejected) || 0;
     if (typeof host_module_set_param_blocking === "function") {
-        host_module_set_param_blocking("loop", swapLoop, 100);
+        host_module_set_param_blocking("staging_loop", swapLoop, 100);
         host_module_set_param_blocking("swap", targetTick, 500);
     } else {
-        host_module_set_param("loop", swapLoop);
+        host_module_set_param("staging_loop", swapLoop);
         host_module_set_param("swap", targetTick);
     }
     /* Confirm the mid-clip swap guard was applied: read the DSP's count of
@@ -6695,6 +6869,20 @@ function jamSwapStaged(clip) {
         try {
             const suppressed = host_module_get_param("swap_guard_suppressed");
             logJam("SWAP guard_suppressed=" + (suppressed || "0") + " fraction=" + swapGuardFraction);
+        } catch (e) {}
+    }
+    /* Regression tripwire: jamSwapStaged is only reachable via a confirmed
+     * canSwap (jamStagedClip is set only once preload_song_json's build is
+     * DSP-confirmed -- see jamPreloadClip), so this swap should never be
+     * rejected for lack of staging. If it is, something upstream is calling
+     * swap without waiting for confirmation -- exactly the class of bug that
+     * broke Jam mode before this rearchitecture. */
+    if (typeof host_module_get_param === "function") {
+        try {
+            const state = JSON.parse(host_module_get_param("state") || "{}");
+            if ((state.staging_swap_rejected || 0) > rejectedBefore) {
+                logJam("SWAP WARNING: staging_swap_rejected advanced -- swap fired without confirmed staging");
+            }
         } catch (e) {}
     }
     jamCurrentClip = clip;
@@ -6712,7 +6900,7 @@ function jamSwapStaged(clip) {
 
 /* Play a single clip looped through the DSP synchronously (used for the first
  * clip before any active timeline exists, or as a fallback). */
-function jamPlayClip(clip) {
+function jamPlayClip(clip, forceNonLoop) {
     if (!clip) return;
     const saved = currentSong;
     const savedLoop = dspLoopEnabled;
@@ -6735,32 +6923,47 @@ function jamPlayClip(clip) {
         }]
     }];
     currentSong = temp;
-    playCurrentSong();
-    /* Re-assert the correct loop mode on the DSP after playback starts. The
-     * DSP's song_json handler resets e->loop to 0, and the dspLoopEnabled
-     * restore below runs before a reliable loop value is guaranteed. */
-    if (typeof host_module_set_param === "function") {
-        host_module_set_param("loop", isNonLoopingClip(clip) ? "0" : "1");
-    }
+    /* currentSong/dspLoopEnabled are restored right after issuing the
+     * request (below), not after it confirms -- playCurrentSong already
+     * captures everything it needs (the JSON, via `json`) before this
+     * function returns, so restoring the caller's state immediately is
+     * safe. The "this clip is now actually playing" state (jamCurrentClip
+     * etc.), however, must wait for DSP confirmation -- see onConfirmed. */
+    playCurrentSong(false, function () {
+        /* Re-assert the correct loop mode on the DSP after playback starts.
+         * The DSP's song_json handler resets e->loop to 0, and this must
+         * happen after song_json is confirmed built, or it could be applied
+         * before the build (harmless, since e->loop is a plain scalar) but
+         * logically belongs with "the build just landed". forceNonLoop lets a
+         * caller (e.g. the Jam preview hold, a temporary one-shot audition)
+         * override the clip's own loop type -- it must go through here rather
+         * than as a separate write at the call site, since a separate write
+         * issued right after jamPlayClip() returns would run BEFORE this
+         * confirmed reassert and get overwritten by it. */
+        if (typeof host_module_set_param === "function") {
+            host_module_set_param("loop", forceNonLoop ? "0" : (isNonLoopingClip(clip) ? "0" : "1"));
+        }
+        jamCurrentClip = clip;
+        jamCurrentType = clip.type || "groove";
+        jamLastBarCounter = -1;
+        jamLastWrapCounter = -1;
+        jamLastSwapCounter = -1;
+        /* Wait one tick after starting a clip before evaluating boundaries, so
+         * the first bar=1 (which the DSP always reports at playback start)
+         * isn't mistaken for a loop wrap / groove finish. Without this, fills
+         * are cut instantly and a just-started groove immediately tries to
+         * "finish". */
+        jamSettling = true;
+        jamStagedClip = null;
+        playbackSectionIndex = 0;
+        resetStepFlash();
+        needsRedraw = true;
+        stepLedsDirty = true;
+        logJam("PLAY clip=" + (clip.name || clip.path) + " bars=" + (clip.bars || 1) +
+            " type=" + (clip.type || "?") + " loop=true (always loop in Jam mode) bpm=" + jamBpm);
+    });
     dspLoopEnabled = savedLoop;
     currentSong = saved;
-    jamCurrentClip = clip;
-    jamCurrentType = clip.type || "groove";
-    jamLastBarCounter = -1;
-    jamLastWrapCounter = -1;
-    jamLastSwapCounter = -1;
-    /* Wait one tick after starting a clip before evaluating boundaries, so the
-     * first bar=1 (which the DSP always reports at playback start) isn't
-     * mistaken for a loop wrap / groove finish. Without this, fills are cut
-     * instantly and a just-started groove immediately tries to "finish". */
-    jamSettling = true;
-    jamStagedClip = null;
-    playbackSectionIndex = 0;
-    resetStepFlash();
-    needsRedraw = true;
-    stepLedsDirty = true;
-    logJam("PLAY clip=" + (clip.name || clip.path) + " bars=" + (clip.bars || 1) +
-        " type=" + (clip.type || "?") + " loop=" + dspLoopEnabled + " bpm=" + jamBpm);
 }
 
 /* Stop Jam playback and reset all Jam state, so the display/pads/buttons
@@ -6848,15 +7051,20 @@ function jamQueueGroove(clip) {
         jamQueuedGrooveEscalated = true;
         jamQueue = []; /* clear any pending fills */
         jamFillQueued = false;
-        jamStagedClip = clip;
-        jamStagedIsFill = false;
-        jamPreloadClip(clip);
-        if (typeof host_module_set_param_blocking === "function") {
-            host_module_set_param_blocking("swap", "0", 100);
-        } else if (typeof host_module_set_param === "function") {
-            host_module_set_param("swap", "0");
-        }
+        /* jamStagedClip is set by jamPreloadClip itself, only once the DSP
+         * confirms the build published -- do not pre-assign it here, that
+         * would defeat the confirmation gate canSwap/jamSwapStaged rely on.
+         * Likewise, defer the "swap" write itself to onConfirmed: issuing it
+         * immediately would race the just-issued (now-async) preload -- see
+         * rearch2.md Step 3, "0.7". */
         const curBar = (lastDspTransport && lastDspTransport.bar) ? lastDspTransport.bar : 1;
+        jamPreloadClip(clip, undefined, function () {
+            if (typeof host_module_set_param_blocking === "function") {
+                host_module_set_param_blocking("swap", "0", 100);
+            } else if (typeof host_module_set_param === "function") {
+                host_module_set_param("swap", "0");
+            }
+        });
         jamScheduledSwapBar = curBar + 1;
         jamScheduledSwap = clip;
         logJam("PAD groove escalate schedule swap at bar " + jamScheduledSwapBar + " -> " + clip.name);
@@ -6896,16 +7104,18 @@ function jamQueueGroove(clip) {
             jamFillQueued = false;
             jamFillBaseBar = 1;
             jamFillsPlayedBars = 0;
-            jamPreloadClip(clip);
             /* Pre-schedule the swap at the end of the current groove (its loop
              * wrap point), so the DSP applies it sample-accurately at the groove
-             * end rather than at the next bar boundary. */
+             * end rather than at the next bar boundary. Deferred to
+             * onConfirmed -- see the escalate branch above for why. */
             const endTick = (dspTimelineInfo && dspTimelineInfo.end_tick) ? dspTimelineInfo.end_tick : 0;
-            if (typeof host_module_set_param_blocking === "function") {
-                host_module_set_param_blocking("swap", String(endTick), 100);
-            } else if (typeof host_module_set_param === "function") {
-                host_module_set_param("swap", String(endTick));
-            }
+            jamPreloadClip(clip, undefined, function () {
+                if (typeof host_module_set_param_blocking === "function") {
+                    host_module_set_param_blocking("swap", String(endTick), 100);
+                } else if (typeof host_module_set_param === "function") {
+                    host_module_set_param("swap", String(endTick));
+                }
+            });
             jamScheduledSwapBar = -1; /* groove-end swap, not a bar-boundary swap */
             jamScheduledSwap = clip;
             logJam("PAD groove schedule swap at groove end tick " + endTick + " -> " + clip.name);
@@ -6940,9 +7150,9 @@ function jamQueueFill(clip) {
      * and clear staging, so the current fill could not auto-swap and playback
      * would stop. Instead, just stage the new fill; the current fill's
      * auto-swap will promote it when it ends. */
-    jamPreloadClip(clip);
     if (jamCurrentClip && jamCurrentClip.type === "fill") {
         /* A fill is playing: stage the new fill, no pre-scheduled swap. */
+        jamPreloadClip(clip);
         jamScheduledSwapBar = -1;
         jamScheduledSwap = null;
         logJam("PAD fill queue while fill playing -> " + clip.name + " qLen=" + jamQueue.length);
@@ -6970,11 +7180,15 @@ function jamQueueFill(clip) {
     jamScheduledSwapBar = curBar + 1;
     jamScheduledSwap = clip;
     logJam("PAD fill queue at bar " + jamScheduledSwapBar + " -> " + clip.name + " qLen=" + jamQueue.length);
-    if (typeof host_module_set_param_blocking === "function") {
-        host_module_set_param_blocking("swap", String(tick), 100);
-    } else if (typeof host_module_set_param === "function") {
-        host_module_set_param("swap", String(tick));
-    }
+    /* Deferred to onConfirmed -- issuing "swap" immediately would race the
+     * just-issued (now-async) preload -- see jamQueueGroove above. */
+    jamPreloadClip(clip, undefined, function () {
+        if (typeof host_module_set_param_blocking === "function") {
+            host_module_set_param_blocking("swap", String(tick), 100);
+        } else if (typeof host_module_set_param === "function") {
+            host_module_set_param("swap", String(tick));
+        }
+    });
     needsRedraw = true;
     ledDirtyAll = true;
 }
@@ -7359,6 +7573,7 @@ function handleJamInput(cc, value) {
             jamPreviewClip = null;
             jamPreviewScheduled = false;
             jamPreviewStartTime = 0;
+            jamPreviewObservedRunning = false;
             stopPlayback();
             jamCurrentClip = null;
             jamCurrentType = "";
@@ -7416,6 +7631,14 @@ function handleJamPad(padIndex, velocity) {
     if (!clip) return;
 
     const isPress = velocity > 0;
+    /* Diagnostic: log EVERY pad press/release unconditionally (not just the
+     * hold-preview-specific PREVIEW start/release lines), so a repro can be
+     * matched against actual physical input rather than inferred from
+     * jamCurrentClip transitions alone -- a quick tap takes a different code
+     * path than a hold and doesn't log via the "PREVIEW" lines. */
+    logJam("PAD-EVENT " + (isPress ? "press" : "release") + " padIndex=" + padIndex +
+        " clip=" + (clip.name || clip.path) + " jamPlaying=" + jamPlaying +
+        " jamPreviewScheduled=" + jamPreviewScheduled + " jamCurrentClip=" + (jamCurrentClip ? jamCurrentClip.name : "null"));
     if (isPress) {
         if (!jamPlaying) {
             /* Playback stopped: arm a pad-held preview. If a preview is
@@ -7431,6 +7654,7 @@ function handleJamPad(padIndex, velocity) {
             jamPreviewTriggerTime = Date.now();
             jamPreviewScheduled = false;
             jamPreviewStartTime = 0;
+            jamPreviewObservedRunning = false;
             return;
         }
         /* Playback running: arm a hold-overlay. A quick press (released
@@ -7460,6 +7684,7 @@ function handleJamPad(padIndex, velocity) {
         jamPreviewClip = null;
         jamPreviewScheduled = false;
         jamPreviewStartTime = 0;
+        jamPreviewObservedRunning = false;
     }
     if (jamHoldPad === padIndex) {
         /* A held pad during playback: hide the hold-overlay. If it was a quick
@@ -8200,16 +8425,23 @@ function perfPlayCurrent() {
 function preloadPerfSongToStaging() {
     if (!perfFullSong || typeof host_module_set_param !== "function") return;
     const json = toEngineSongJson(perfFullSong);
-    if (typeof host_module_set_param_blocking === "function") {
-        host_module_set_param_blocking("preload_song_json", json, 500);
-        /* The staged song plays through once then stops (performance songs
-         * advance, they don't loop). */
-        host_module_set_param_blocking("loop", "0", 100);
-    } else {
-        host_module_set_param("preload_song_json", json);
-        host_module_set_param("loop", "0");
-    }
-    perfClickSongStaged = true;
+    /* perfClickSongStaged now flips only once the DSP confirms this build
+     * actually published, not the instant the (now-instantly-returning)
+     * preload_song_json call returns -- its consumer at the click->song
+     * transition depends on this being accurate (see the comment there). */
+    requestStagingBuild(function () {
+        if (typeof host_module_set_param_blocking === "function") {
+            host_module_set_param_blocking("preload_song_json", json, 100);
+            /* The staged song plays through once then stops (performance
+             * songs advance, they don't loop). */
+            host_module_set_param_blocking("staging_loop", "0", 100);
+        } else {
+            host_module_set_param("preload_song_json", json);
+            host_module_set_param("staging_loop", "0");
+        }
+    }, function () {
+        perfClickSongStaged = true;
+    });
 }
 
 /* Start a performance from the current setlist position. */
@@ -8361,53 +8593,7 @@ function perfQueueSong(songIndex) {
 /* Fire a queued section jump. If the full song is already loaded in the DSP,
  * seek to the target section's start bar and play from there (near-instant).
  * Otherwise fall back to rebuilding a sliced one-shot timeline. */
-function perfFireSectionJump(sectionIndex) {
-    const full = perfFullSong || currentSong;
-    if (!full || sectionIndex < 0 || sectionIndex >= full.sections.length) return;
-    const range = perfSectionBarRange(sectionIndex);
-    if (!range) return;
-    const startBar = range.startBar;
-    currentSectionIndex = sectionIndex;
-    dspLoopEnabled = false;
-    if (perfFullSongLoaded && typeof host_module_set_param === "function") {
-        /* Full song is in the DSP. If the seek was already scheduled
-         * sample-accurately at queue time (seek_bar_scheduled), the DSP has
-         * applied it at the boundary — do not re-seek here (that would jump
-         * early). Otherwise seek and play immediately. */
-        if (!perfSeekScheduled) {
-            previewBarOffset = 0;
-            host_module_set_param("play_from_bar", String(startBar));
-        } else {
-            /* The scheduled seek already set the playhead; just sync the
-             * offset for display. */
-            previewBarOffset = 0;
-        }
-        perfSeekScheduled = false;
-    } else {
-        /* Full song not yet in the DSP: load the FULL song timeline, then seek
-         * to the target section. Keeping the full song in the DSP means later
-         * section jumps use the fast seek path (play_from_bar) instead of a
-         * blocking rebuild, so live section changes are blip-free. Build the
-         * timeline WITHOUT `play` (which would start from tick 0 and play the
-         * song's first note before the seek lands — a double-note blip), then
-         * seek directly to the target bar. */
-        const temp = JSON.parse(JSON.stringify(full));
-        currentSong = temp;
-        previewBarOffset = 0;
-        buildSongTimelineOnly();
-        perfFullSongLoaded = true;
-        /* The build above can still be in flight (a first-time build with the
-         * whole-library clip fallback can exceed the blocking-write timeout).
-         * Use the BLOCKING variant with the same budget as playCurrentSong's
-         * `play` write so this seek reliably waits out the build and lands on
-         * the completed timeline — otherwise it could race the build over the
-         * shared shadow_param SHM slot and seek against a partial/stale
-         * timeline (wrong bar) or be dropped entirely. */
-        const set2 = typeof host_module_set_param_blocking === "function"
-            ? host_module_set_param_blocking : host_module_set_param;
-        set2("play_from_bar", String(startBar),
-             typeof host_module_set_param_blocking === "function" ? 1000 : undefined);
-    }
+function perfFinishSectionJumpUiState(sectionIndex) {
     /* Clear stale transport/end state so perfTick doesn't act on old data. */
     lastDspState = null;
     lastDspTransport = null;
@@ -8430,6 +8616,58 @@ function perfFireSectionJump(sectionIndex) {
     perfJumpPending = false;
     needsRedraw = true;
     stepLedsDirty = true;
+}
+
+function perfFireSectionJump(sectionIndex) {
+    const full = perfFullSong || currentSong;
+    if (!full || sectionIndex < 0 || sectionIndex >= full.sections.length) return;
+    const range = perfSectionBarRange(sectionIndex);
+    if (!range) return;
+    const startBar = range.startBar;
+    currentSectionIndex = sectionIndex;
+    dspLoopEnabled = false;
+    if (perfFullSongLoaded && typeof host_module_set_param === "function") {
+        /* Full song is already in the DSP and confirmed built -- this is a
+         * pure seek within an already-active timeline, no build in flight,
+         * so it stays immediate. If the seek was already scheduled
+         * sample-accurately at queue time (seek_bar_scheduled), the DSP has
+         * applied it at the boundary — do not re-seek here (that would jump
+         * early). Otherwise seek and play immediately. */
+        if (!perfSeekScheduled) {
+            previewBarOffset = 0;
+            host_module_set_param("play_from_bar", String(startBar));
+        } else {
+            /* The scheduled seek already set the playhead; just sync the
+             * offset for display. */
+            previewBarOffset = 0;
+        }
+        perfSeekScheduled = false;
+        perfFinishSectionJumpUiState(sectionIndex);
+    } else {
+        /* Full song not yet in the DSP: load the FULL song timeline, then seek
+         * to the target section. Keeping the full song in the DSP means later
+         * section jumps use the fast seek path (play_from_bar) instead of a
+         * blocking rebuild, so live section changes are blip-free. Build the
+         * timeline WITHOUT `play` (which would start from tick 0 and play the
+         * song's first note before the seek lands — a double-note blip), then
+         * seek directly to the target bar. The seek itself (and every "now
+         * playing" UI state update) waits for the DSP to confirm the build
+         * actually published -- see buildSongTimelineOnly/requestPrimaryBuild
+         * -- rather than racing it over the shared shadow_param SHM slot with
+         * a tuned timeout, which could otherwise seek against a partial/stale
+         * timeline (wrong bar) or be dropped entirely. */
+        const temp = JSON.parse(JSON.stringify(full));
+        currentSong = temp;
+        previewBarOffset = 0;
+        buildSongTimelineOnly(function () {
+            perfFullSongLoaded = true;
+            const set2 = typeof host_module_set_param_blocking === "function"
+                ? host_module_set_param_blocking : host_module_set_param;
+            set2("play_from_bar", String(startBar),
+                 typeof host_module_set_param_blocking === "function" ? 100 : undefined);
+            perfFinishSectionJumpUiState(sectionIndex);
+        });
+    }
 }
 
 /* Fire a queued song jump: load and start the target song one-shot. */
@@ -8995,21 +9233,25 @@ globalThis.tick = function() {
         if (elapsed >= PAD_PREVIEW_DELAY_MS) {
             jamPreviewScheduled = true;
             jamPreviewStartTime = Date.now();
+            jamPreviewObservedRunning = false;
             const clip = jamPreviewClip;
             const bars = clip.bars || 1;
             logJam("PREVIEW start one-shot -> " + (clip.name || clip.path) + " bars=" + bars);
             /* Play the clip as a one-shot (non-looping) from the start, using
              * the same single-clip path Jam uses. No return groove is staged:
-             * the preview is a temporary audition that ends on release. */
-            jamPreviewClip = clip;
-            jamPreviewScheduled = true;
-            jamPlayClip(clip);
-            /* A preview is a temporary audition: force the engine to stop at
-             * the end of the clip rather than loop. jamPlayClip sets loop on
-             * by default; re-assert non-loop for the preview. */
-            if (typeof host_module_set_param === "function") {
-                host_module_set_param("loop", "0");
-            }
+             * the preview is a temporary audition that ends on release.
+             * forceNonLoop=true tells jamPlayClip to set loop=0 itself, in
+             * its own DSP-confirmed callback, instead of this call site
+             * issuing a separate immediate "loop" write -- that write used to
+             * be safe because jamPlayClip's internal reassert (loop=1 by
+             * default) ran synchronously before it, so this one always had
+             * the last word. Now that jamPlayClip's reassert is deferred
+             * until the build is confirmed, an immediate write here would run
+             * BEFORE it and get overwritten back to loop=1 once confirmation
+             * lands -- exactly the bug class this rearchitecture exists to
+             * eliminate, just found in the preview path instead of Jam's
+             * main swap path. */
+            jamPlayClip(clip, true);
         }
     }
 

@@ -132,6 +132,19 @@ static void *arranger_worker_thread(void *arg);
 #define MAX_SECTION_BARS   256   /* max bars per section for chord/instrument arrays */
 #define MAX_INSTRUMENTS    2     /* two instrument tracks (Bass, Keys/Pads) */
 
+/* Cap on the ASSEMBLED, multi-clip timeline built by the async primary/staging
+ * channels (arranger_worker_iterate). Derived from MAX_CLIP_EVENTS (a per-clip
+ * cap) rather than restated, so the relationship is a declared invariant, not
+ * a coincidence. Real songs measured directly against this user's library:
+ * 1747-3744 events -> 17-37x headroom. */
+#define TIMELINE_MAX_EVENTS MAX_CLIP_EVENTS
+
+/* Request payload buffer size for the async song_json/preload_song_json
+ * channels. Matches SHADOW_PARAM_VALUE_LEN (the shadow_param transport's
+ * value field size, schwung/src/host/shadow_constants.h) -- a song_json
+ * string can never arrive larger than that over this transport. */
+#define MAX_SONG_JSON_LEN 131072
+
 /* Fixed double-buffer capacities for the folder/song scan caches. The worker
  * scans into the inactive slot; the audio thread reads the active slot. */
 #define FOLDER_CACHE_MAX 512
@@ -240,6 +253,77 @@ typedef struct {
     int instrument_count;
     instrument_t instruments[MAX_INSTRUMENTS];
 } song_t;
+
+/* -------------------------------------------------------------------------- */
+/* Async timeline build: primary (song_json) and staging (preload_song_json)  */
+/* channels. Both are drained by the one worker thread (arranger_engine.c's   */
+/* SCHED_OTHER worker) using the same fixed-double-buffer + generation-       */
+/* counter-coalescing house style already proven on hardware for the folder/  */
+/* song scan caches (folder_cache_t/song_cache_t below): worker writes only   */
+/* into slot [1-active], then flips active -- the audio thread never sees a   */
+/* partially-written slot and the worker never writes the slot being read.    */
+/*                                                                            */
+/* Two independent channels, not one shared request/buffer: song_json and    */
+/* preload_song_json are routinely issued back-to-back with zero tick gap    */
+/* (e.g. Jam mode staging an intro groove immediately after starting a fill), */
+/* and coalescing is only safe *within* one destination -- a shared slot      */
+/* would let the second call silently discard the first before the worker    */
+/* ever started it. Both channels still share the one worker thread and the  */
+/* one e->clips[]/clip_count parsed-MIDI cache, since builds must stay        */
+/* serialized regardless. */
+
+/* One instance of this per destination (primary, staging). smf_event_t = the
+ * assembled timeline; song_t = the render-relevant song structure (section
+ * bars/chords, instruments) that emit_instruments_at_tick/_follow/_all_off
+ * read every block -- publishing it alongside the events keeps that data
+ * from going stale/torn once song parsing moves off the audio thread. */
+typedef struct {
+    smf_event_t events[TIMELINE_MAX_EVENTS];
+    int         event_count;
+    uint32_t    end_tick;
+    double      tempo_bpm;
+    int         time_sig_num;
+    int         time_sig_den;
+    uint32_t    ticks_per_beat;
+    uint32_t    ticks_per_bar;
+    char        source[MAX_PATH_LEN];  /* source path of the first clip, for active_source */
+    song_t      song;
+    int         truncated;             /* 1 if event_count hit TIMELINE_MAX_EVENTS */
+    char        build_error[256];
+} timeline_slot_t;
+
+typedef struct {
+    timeline_slot_t   slot[2];
+    _Atomic(uint32_t) active;         /* which slot is safe to read */
+    _Atomic(uint32_t) request_gen;    /* bumped by set_param (audio thread) on every accepted request */
+    _Atomic(uint32_t) published_gen;  /* = the request_gen the worker actually built and published */
+
+    /* Request payload. Protected by request_seq (a seqlock): the audio thread
+     * bumps it to odd before writing request_json, then to even after, so the
+     * worker's read-with-retry can never observe a torn multi-byte string --
+     * unlike library_root_requested's plain copy_trunc (safe there only
+     * because a torn library path just causes a stale rescan; a torn
+     * song_json could silently build the wrong timeline). */
+    _Atomic(uint32_t) request_seq;
+    char              request_json[MAX_SONG_JSON_LEN];
+} timeline_channel_t;
+
+/* Diff of clips whose resolved location differs from their stored folder,
+ * published by the worker after a successful PRIMARY build so
+ * get_param("resolved_clips") never has to read e->clips[]/song live from the
+ * audio thread (worker-owned once builds move off-thread). Same house style
+ * as folder_cache_t/song_cache_t below. */
+#define RESOLVED_CLIPS_MAX 64
+typedef struct {
+    char source[MAX_PATH_LEN];
+    char folder[MAX_PATH_LEN];
+} resolved_clip_diff_t;
+
+typedef struct {
+    resolved_clip_diff_t slot[2][RESOLVED_CLIPS_MAX];
+    int                  count[2];
+    _Atomic(int)         active;
+} resolved_clips_cache_t;
 
 /* Forward declarations for the library/song scan types and functions, used by
  * the engine's cached scan fields below. */
@@ -372,12 +456,13 @@ typedef struct engine {
     char library_root_requested[MAX_PATH_LEN];
     char library_root[MAX_PATH_LEN];
 
-    /* Loaded clips (one per unique source file referenced by current song) */
+    /* Loaded clips (one per unique source file referenced by current song).
+     * Worker-owned: only ever touched from arranger_worker_iterate's build
+     * processing (parse_song_json/resolve_clip_index append to it), never
+     * from the audio thread, now that builds no longer run inline inside
+     * set_param. */
     clip_t clips[MAX_CLIPS_PER_FOLDER];
     int clip_count;
-
-    /* Current song */
-    song_t song;
 
     /* Playback */
     int running;
@@ -429,56 +514,51 @@ typedef struct engine {
      * actually being applied at swap boundaries. */
     uint32_t swap_guard_suppressed;
 
-    /* Old timeline handed off by engine_swap_to_staging on the audio thread.
-     * It is freed on the next control-thread preload call instead of inline,
-     * so the audio thread never calls free(). */
-    smf_event_t *retired_timeline;
+    /* Async primary (song_json) and staging (preload_song_json) build
+     * channels -- see timeline_channel_t above. Both drained by the one
+     * worker thread; set_param only ever writes request_json/request_seq/
+     * request_gen and posts worker_wake. */
+    timeline_channel_t primary_ch;
+    timeline_channel_t staging_ch;
+    resolved_clips_cache_t resolved_clips;
 
-    /* Assembled timeline */
-    smf_event_t *timeline;
-    int timeline_count;
-    uint32_t timeline_end_tick;
+    /* Audio-thread-owned "what's actually playing" buffer. Populated by a
+     * bounded copy (never a pointer handoff) from primary_ch.slot[active] at
+     * activation (set_param("play"/"play_from_bar")) or from staging_ch's/
+     * pending_swap_slot's active content at a swap boundary. Nothing here is
+     * ever freed -- there is nothing left to free once every buffer in this
+     * pipeline is a fixed array. */
+    timeline_slot_t live_slot;
+    uint32_t primary_committed_gen; /* = primary_ch.published_gen last copied into live_slot */
 
     /* Source path of the clip currently playing in the active timeline.
      * Exposed to the JS UI via the "state" get_param so Jam mode can keep
-     * the display/pads in sync with DSP-side auto-swaps. */
+     * the display/pads in sync with DSP-side auto-swaps. Set from
+     * live_slot.source at each promotion point. */
     char active_source[MAX_PATH_LEN];
 
-    /* Staging timeline for seamless clip switching (Jam mode). The next clip's
-     * timeline is built here ahead of time (via preload_song_json) while the
-     * current clip keeps playing; a "swap" then activates it instantly with
-     * no synchronous build_timeline delay at the musical boundary. */
-    smf_event_t *staging_timeline;
-    int staging_timeline_count;
-    uint32_t staging_timeline_end_tick;
-    int staging_ready;             /* 1 when a preloaded timeline is ready to swap */
-    double staging_tempo_bpm;      /* tempo to apply on swap */
-    int staging_time_sig_num;
-    int staging_time_sig_den;
-    uint32_t staging_ticks_per_beat;
-    uint32_t staging_ticks_per_bar;
-    int staging_loop;              /* loop flag to apply on swap */
-    char staging_source[MAX_PATH_LEN]; /* source path of the staged clip */
-    uint32_t staging_resume_tick;  /* resume position (ticks) for the staged clip on swap; 0 = start */
-    uint32_t swap_resume_tick;     /* resume position captured at swap time for the caller to apply */
+    /* Captured-at-schedule-time buffer for a scheduled clip swap (Jam mode
+     * "swap"), fixed-buffer analog of the old pending_swap_timeline pointer
+     * hand-off. Physically separate memory from staging_ch.slot[] -- a later
+     * preload's worker write can never alias it, so (unlike the old pointer
+     * dance) there is no hand-off discipline left to violate. */
+    timeline_slot_t pending_swap_slot;
+    uint32_t staging_consumed_gen;  /* = staging_ch.published_gen last captured/promoted */
+    int staging_loop;               /* loop flag to apply on swap; see set_param("staging_loop") */
+    uint32_t staging_resume_tick;   /* resume position (ticks) for the staged clip on swap; 0 = start */
+    uint32_t swap_resume_tick;      /* resume position captured at swap time for the caller to apply */
 
-    /* Scheduled clip swap for sample-accurate transitions in Jam mode. The
-     * clip to swap in is captured into a dedicated buffer at schedule time so
-     * a subsequent preload (e.g. the return groove) does not overwrite it
-     * before the swap fires. */
+    /* Diagnostic: bumped whenever set_param("swap") no-ops for lack of a
+     * published staging build. Under correct JS-side gating (only calling
+     * "swap" after staging_published_gen is confirmed) this should never
+     * move in normal use -- a live regression tripwire. */
+    _Atomic(uint32_t) staging_swap_rejected;
+
+    /* Scheduled clip swap for sample-accurate transitions in Jam mode. */
     uint32_t pending_swap_tick;    /* tick at which to swap -> active */
     int pending_swap;              /* 1 if a swap is scheduled */
     int pending_swap_loop;         /* loop flag captured at swap-schedule time, applied on swap */
-    smf_event_t *pending_swap_timeline;      /* captured timeline to swap in */
-    int pending_swap_timeline_count;
-    uint32_t pending_swap_timeline_end_tick;
-    double pending_swap_tempo_bpm;
-    int pending_swap_time_sig_num;
-    int pending_swap_time_sig_den;
-    uint32_t pending_swap_ticks_per_beat;
-    uint32_t pending_swap_ticks_per_bar;
-    uint32_t pending_swap_resume_tick;
-    char pending_swap_source[MAX_PATH_LEN];
+    uint32_t pending_swap_resume_tick; /* resume tick captured at swap-schedule time, applied on swap */
     /* Guard window start tick for the pending swap. Note-ons at or after this
      * tick (and before the swap boundary) are suppressed, so the guard applies
      * across every render block leading up to the swap, not just the block
@@ -993,8 +1073,9 @@ static int resolve_clip_index(engine_t *e, const char *source_path,
     char full_path[MAX_PATH_LEN];
 
     /* Fast path: if the exact clip (library_root/source_folder/source_path) is
-     * already loaded in the clip cache (which persists across songs via
-     * clear_song_keep_clips), return it immediately. This avoids repeated
+     * already loaded in the clip cache (which persists across builds, since
+     * the worker never clears e->clips[] between requests), return it
+     * immediately. This avoids repeated
      * access() filesystem checks for clips referenced many times in a song
      * (e.g. a count-in hihat used in dozens of sections) and for clips already
      * loaded by an earlier song in a setlist. Matching on the FULL expected
@@ -1197,46 +1278,14 @@ static void free_library_cache(engine_t *e);
 static void clear_song(engine_t *e) {
     for (int i = 0; i < e->clip_count; i++) free_clip(&e->clips[i]);
     e->clip_count = 0;
-    memset(&e->song, 0, sizeof(e->song));
-    if (e->timeline) { free(e->timeline); e->timeline = NULL; }
-    e->timeline_count = 0;
-    e->timeline_end_tick = 0;
+    e->live_slot.event_count = 0;
+    e->live_slot.end_tick = 0;
     e->playhead_tick = 0;
     e->event_cursor = 0;
     e->running = 0;
     free_library_cache(e);
     queue_clear(e);
-    if (e->staging_timeline) { free(e->staging_timeline); e->staging_timeline = NULL; }
-    e->staging_timeline_count = 0;
-    e->staging_timeline_end_tick = 0;
-    e->staging_ready = 0;
     e->staging_loop = 1;
-    if (e->pending_swap_timeline) { free(e->pending_swap_timeline); e->pending_swap_timeline = NULL; }
-    e->pending_swap_timeline_count = 0;
-    e->pending_swap_timeline_end_tick = 0;
-    e->pending_swap = 0;
-}
-
-/* Reset the song/timeline but keep the parsed clip cache. Used when reloading
- * a song (e.g. a section jump) so clips are not re-parsed from disk, which
- * causes an audible delay when jumping to a non-adjacent section. */
-static void clear_song_keep_clips(engine_t *e) {
-    memset(&e->song, 0, sizeof(e->song));
-    if (e->timeline) { free(e->timeline); e->timeline = NULL; }
-    e->timeline_count = 0;
-    e->timeline_end_tick = 0;
-    e->playhead_tick = 0;
-    e->event_cursor = 0;
-    e->running = 0;
-    queue_clear(e);
-    if (e->staging_timeline) { free(e->staging_timeline); e->staging_timeline = NULL; }
-    e->staging_timeline_count = 0;
-    e->staging_timeline_end_tick = 0;
-    e->staging_ready = 0;
-    e->staging_loop = 1;
-    if (e->pending_swap_timeline) { free(e->pending_swap_timeline); e->pending_swap_timeline = NULL; }
-    e->pending_swap_timeline_count = 0;
-    e->pending_swap_timeline_end_tick = 0;
     e->pending_swap = 0;
 }
 
@@ -1571,21 +1620,6 @@ static int build_timeline_targeted(engine_t *e, song_t *song, double tempo_bpm,
     return 0;
 }
 
-/* Build the assembled timeline from e->song into the active timeline fields.
- * This is the legacy synchronous entry point used by song_json. */
-static int build_timeline(engine_t *e) {
-    int rc = build_timeline_targeted(e, &e->song, e->tempo_bpm,
-                                     e->time_sig_num, e->time_sig_den,
-                                     e->ticks_per_beat, e->ticks_per_bar,
-                                     &e->timeline, &e->timeline_count,
-                                     &e->timeline_end_tick);
-    if (rc == 0) {
-        e->event_cursor = 0;
-        e->playhead_tick = 0;
-    }
-    return rc;
-}
-
 /* Serialize queued events into `buf` as JSON: [{"s":144,"d1":38,"d2":100}, ...].
  * Returns bytes written (not including null terminator). Used by ui.js to
  * drain Schwung-output events via shadow_send_midi_to_dsp. The queue is not
@@ -1915,22 +1949,22 @@ static const chord_t *chord_at_abs_bar(const song_t *song, uint32_t abs_bar) {
  * the note-on fires only when the chord changes, and the note-off is scheduled
  * `note_gap` before the next chord change (or the song end). */
 static void emit_instruments_at_tick(engine_t *e, uint32_t tick) {
-    if (!e || e->song.instrument_count == 0) return;
+    if (!e || e->live_slot.song.instrument_count == 0) return;
     uint32_t bar = 0;
-    int sec_idx = tick_to_section_bar(&e->song, tick, e->ticks_per_bar, &bar);
+    int sec_idx = tick_to_section_bar(&e->live_slot.song, tick, e->ticks_per_bar, &bar);
     if (sec_idx < 0) return;
-    section_t *sec = &e->song.sections[sec_idx];
+    section_t *sec = &e->live_slot.song.sections[sec_idx];
     const chord_t *ch = chord_at_bar(sec, bar);
     uint32_t abs_bar = tick / e->ticks_per_bar;
-    uint32_t total_bars = song_total_bars(&e->song);
+    uint32_t total_bars = song_total_bars(&e->live_slot.song);
     /* The chord at the next bar (or NULL past the song end). */
     const chord_t *next_ch = (abs_bar + 1 < total_bars)
-        ? chord_at_abs_bar(&e->song, abs_bar + 1) : NULL;
+        ? chord_at_abs_bar(&e->live_slot.song, abs_bar + 1) : NULL;
     arr_log("EMIT_INST tick=%u sec=%d bar=%u chord=%s next=%s", tick, sec_idx, bar,
             (ch && ch->set) ? ch->root : "null",
             (next_ch && next_ch->set) ? next_ch->root : "null");
-    for (int i = 0; i < e->song.instrument_count && i < MAX_INSTRUMENTS; i++) {
-        instrument_t *inst = &e->song.instruments[i];
+    for (int i = 0; i < e->live_slot.song.instrument_count && i < MAX_INSTRUMENTS; i++) {
+        instrument_t *inst = &e->live_slot.song.instruments[i];
         if (!inst->enabled) continue;
         if (inst->follow_note > 0) continue; /* follow-note instruments emit on the drum note */
         /* Respect the per-bar mute map (1 = send, 0 = muted). */
@@ -1977,8 +2011,8 @@ static void emit_instruments_at_tick(engine_t *e, uint32_t tick) {
  * Called on stop so instrument notes don't ring on after playback ends. */
 static void emit_instruments_all_off(engine_t *e) {
     if (!e) return;
-    for (int i = 0; i < e->song.instrument_count && i < MAX_INSTRUMENTS; i++) {
-        instrument_t *inst = &e->song.instruments[i];
+    for (int i = 0; i < e->live_slot.song.instrument_count && i < MAX_INSTRUMENTS; i++) {
+        instrument_t *inst = &e->live_slot.song.instruments[i];
         if (!inst->enabled) continue;
         if (e->last_inst_chord_set[i]) {
             emit_instrument_chord_off(e, inst, &e->last_inst_chord[i]);
@@ -2003,10 +2037,10 @@ static void schedule_instrument_note_off(engine_t *e, int i, const instrument_t 
  * playhead. Called each render block from advance_playhead. */
 static void fire_pending_instrument_notes_off(engine_t *e, uint32_t tick) {
     if (!e) return;
-    for (int i = 0; i < e->song.instrument_count && i < MAX_INSTRUMENTS; i++) {
+    for (int i = 0; i < e->live_slot.song.instrument_count && i < MAX_INSTRUMENTS; i++) {
         if (!e->pending_off_set[i]) continue;
         if (e->pending_off_tick[i] > tick) continue;
-        instrument_t *inst = &e->song.instruments[i];
+        instrument_t *inst = &e->live_slot.song.instruments[i];
         if (e->last_inst_chord_set[i]) {
             emit_instrument_chord_off(e, inst, &e->last_inst_chord[i]);
             e->last_inst_chord_set[i] = 0;
@@ -2019,8 +2053,8 @@ static void fire_pending_instrument_notes_off(engine_t *e, uint32_t tick) {
 /* Find the tick of the next note-on with the given note number at or after
  * `from_tick` in the assembled timeline. Returns 0 if none (past the end). */
 static uint32_t find_next_note_on_tick(engine_t *e, uint8_t note, uint32_t from_tick) {
-    for (int c = e->event_cursor; c < e->timeline_count; c++) {
-        const smf_event_t *ev = &e->timeline[c];
+    for (int c = e->event_cursor; c < e->live_slot.event_count; c++) {
+        const smf_event_t *ev = &e->live_slot.events[c];
         if (ev->tick < from_tick) continue;
         if ((ev->status & 0xF0) == 0x90 && ev->data2 > 0 && ev->data1 == note) {
             return ev->tick;
@@ -2033,9 +2067,9 @@ static uint32_t find_next_note_on_tick(engine_t *e, uint8_t note, uint32_t from_
  * fires. Called from the event drain path. The note is held until the next
  * matching drum hit, cut short by `note_gap` before it (or the song end). */
 static void emit_instruments_follow(engine_t *e, uint8_t note, uint32_t tick) {
-    if (!e || e->song.instrument_count == 0) return;
+    if (!e || e->live_slot.song.instrument_count == 0) return;
     uint32_t bar = 0;
-    int sec_idx = tick_to_section_bar(&e->song, tick, e->ticks_per_bar, &bar);
+    int sec_idx = tick_to_section_bar(&e->live_slot.song, tick, e->ticks_per_bar, &bar);
     if (sec_idx < 0) return;
     /* A drum hit anticipating the downbeat (e.g. a pushed kick just before
      * the barline) still falls within the outgoing bar by tick, but
@@ -2049,17 +2083,17 @@ static void emit_instruments_follow(engine_t *e, uint8_t note, uint32_t tick) {
         uint32_t guard_ticks = (uint32_t)(e->swap_guard_fraction * e->ticks_per_beat);
         if (bar_end_tick > tick && (bar_end_tick - tick) <= guard_ticks) {
             uint32_t next_bar = 0;
-            int next_sec = tick_to_section_bar(&e->song, bar_end_tick, e->ticks_per_bar, &next_bar);
+            int next_sec = tick_to_section_bar(&e->live_slot.song, bar_end_tick, e->ticks_per_bar, &next_bar);
             if (next_sec >= 0) {
                 sec_idx = next_sec;
                 bar = next_bar;
             }
         }
     }
-    section_t *sec = &e->song.sections[sec_idx];
+    section_t *sec = &e->live_slot.song.sections[sec_idx];
     const chord_t *ch = chord_at_bar(sec, bar);
-    for (int i = 0; i < e->song.instrument_count && i < MAX_INSTRUMENTS; i++) {
-        instrument_t *inst = &e->song.instruments[i];
+    for (int i = 0; i < e->live_slot.song.instrument_count && i < MAX_INSTRUMENTS; i++) {
+        instrument_t *inst = &e->live_slot.song.instruments[i];
         if (!inst->enabled) continue;
         if (inst->follow_note == 0 || inst->follow_note != note) continue;
         if (bar < MAX_SECTION_BARS && inst->bars[sec_idx][bar] == 0) continue;
@@ -2076,7 +2110,7 @@ static void emit_instruments_follow(engine_t *e, uint8_t note, uint32_t tick) {
             if (next > 0) {
                 off_tick = (next > gap) ? (next - gap) : next;
             } else {
-                off_tick = e->timeline_end_tick;
+                off_tick = e->live_slot.end_tick;
             }
             if (off_tick > tick) {
                 schedule_instrument_note_off(e, i, inst, off_tick);
@@ -2534,104 +2568,6 @@ static void parse_instrument_bars(const char *arr, instrument_t *inst) {
         }
         p++;
     }
-}
-
-/* Load a song JSON into the active engine song and rebuild the active
- * timeline. Used by the Arranger song-JSON load path. */
-static int load_song_from_json(engine_t *e, const char *json) {
-    engine_clear_error(e);
-    /* Keep the parsed clip cache so reloading a song (e.g. a section jump)
-     * does not re-parse MIDI clips from disk, which causes an audible delay. */
-    clear_song_keep_clips(e);
-
-    uint32_t tpb = 240, tpbar = 240;
-    parse_song_json(e, json, &e->song, &e->tempo_bpm, &e->time_sig_num,
-                    &e->time_sig_den, &tpb, &tpbar);
-    e->ticks_per_beat = tpb;
-    e->ticks_per_bar = tpbar;
-
-    /* Track the source of the first clip so the UI can follow DSP swaps. */
-    if (e->song.section_count > 0 && e->song.sections[0].clip_count > 0) {
-        section_clip_t *sc = &e->song.sections[0].clips[0];
-        if (sc->clip_index >= 0 && sc->clip_index < e->clip_count) {
-            copy_trunc(e->active_source, sizeof(e->active_source),
-                       e->clips[sc->clip_index].path);
-        } else {
-            e->active_source[0] = '\0';
-        }
-    } else {
-        e->active_source[0] = '\0';
-    }
-
-    /* Reset host-sync state on every song load. */
-    e->last_playhead_tick = 0;
-
-    return 0;
-}
-
-/* Preload a song JSON into the staging timeline while the current timeline
- * keeps playing. The next musical boundary can then activate it via "swap"
- * with no synchronous rebuild delay. */
-static int preload_song_from_json(engine_t *e, const char *json) {
-    engine_clear_error(e);
-
-    /* Free any timeline retired by a swap on the audio thread. This runs on
-     * the control thread, so free() is safe here. */
-    if (e->retired_timeline) { free(e->retired_timeline); e->retired_timeline = NULL; }
-
-    /* Discard any previous staging buffer. */
-    if (e->staging_timeline) { free(e->staging_timeline); e->staging_timeline = NULL; }
-    e->staging_timeline_count = 0;
-    e->staging_timeline_end_tick = 0;
-    e->staging_ready = 0;
-    e->staging_resume_tick = 0; /* no resume position for the new staged clip by default */
-
-    song_t staging_song;
-    memset(&staging_song, 0, sizeof(staging_song));
-
-    double tempo_bpm = 120.0;
-    int ts_num = 4, ts_den = 4;
-    uint32_t tpb = 240, tpbar = 240;
-    if (parse_song_json(e, json, &staging_song, &tempo_bpm, &ts_num, &ts_den, &tpb, &tpbar) != 0) {
-        return -1;
-    }
-
-    if (build_timeline_targeted(e, &staging_song, tempo_bpm, ts_num, ts_den,
-                               tpb, tpbar, &e->staging_timeline,
-                               &e->staging_timeline_count,
-                               &e->staging_timeline_end_tick) != 0) {
-        memset(&staging_song, 0, sizeof(staging_song));
-        return -1;
-    }
-
-    e->staging_tempo_bpm = tempo_bpm;
-    e->staging_time_sig_num = ts_num;
-    e->staging_time_sig_den = ts_den;
-    e->staging_ticks_per_beat = tpb;
-    e->staging_ticks_per_bar = tpbar;
-    e->staging_ready = 1;
-    e->staging_loop = e->loop; /* inherit current loop unless overridden before swap */
-
-    /* Remember the staged clip's source path for active_source on swap. */
-    if (staging_song.section_count > 0 && staging_song.sections[0].clip_count > 0) {
-        section_clip_t *sc = &staging_song.sections[0].clips[0];
-        if (sc->clip_index >= 0 && sc->clip_index < e->clip_count) {
-            copy_trunc(e->staging_source, sizeof(e->staging_source),
-                       e->clips[sc->clip_index].path);
-        } else {
-            e->staging_source[0] = '\0';
-        }
-    } else {
-        e->staging_source[0] = '\0';
-    }
-
-    dsp_host_log("PRELOAD sections=%d events=%d end_tick=%u tempo=%.1f tpb=%u loop=%d",
-                 staging_song.section_count, e->staging_timeline_count,
-                 e->staging_timeline_end_tick, tempo_bpm, tpb,
-                 e->staging_loop);
-
-    memset(&staging_song, 0, sizeof(staging_song));
-    return 0;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -3203,16 +3139,202 @@ static void scan_library_into(engine_t *e, folder_entry_t *folders, int *out_cou
     *out_count = count;
 }
 
-/* The engine's deferred work, run on the worker thread each wake. Currently
- * handles the folder/song scan double-buffers: if a rescan was requested
- * (folder_dirty/song_dirty), scan into the inactive slot and flip active.
- * Runs on the worker thread, so file I/O and allocation are safe here. */
+/* Read ch->request_json via the seqlock, retrying if the audio thread is
+ * mid-write (odd sequence) or the sequence changed during the copy. The
+ * audio-thread write side (set_param("song_json"/"preload_song_json")) is a
+ * single bounded copy_trunc, so a retry here resolves in at most a couple of
+ * iterations in practice; on the (astronomically unlikely) exhaustion of all
+ * attempts, returns 0 and the caller skips this wake -- the request_gen that
+ * triggered the write already posted worker_wake, so the next wake retries
+ * cleanly rather than spinning. */
+static int read_request_json(timeline_channel_t *ch, char *out, size_t out_len) {
+    for (int attempt = 0; attempt < 8; attempt++) {
+        uint32_t before = atomic_load_explicit(&ch->request_seq, memory_order_acquire);
+        if (before & 1u) continue; /* writer in flight */
+        copy_trunc(out, out_len, ch->request_json);
+        uint32_t after = atomic_load_explicit(&ch->request_seq, memory_order_acquire);
+        if (before == after) return 1;
+    }
+    return 0;
+}
+
+/* Copy a just-built timeline+song into a channel's slot, bounded by
+ * event_count (not sizeof(timeline_slot_t)) so the common case (a few
+ * thousand events) stays cheap even though the type's worst-case footprint
+ * is much larger. Worker-side only (called from process_timeline_channel and
+ * used again, on the audio thread, at swap boundaries via the identical
+ * bounded-copy shape -- see engine_swap_to_staging/advance_playhead). */
+static void copy_timeline_slot(timeline_slot_t *dst, const timeline_slot_t *src) {
+    int n = src->event_count;
+    if (n < 0) n = 0;
+    if (n > TIMELINE_MAX_EVENTS) n = TIMELINE_MAX_EVENTS;
+    memcpy(dst->events, src->events, sizeof(smf_event_t) * (size_t)n);
+    dst->event_count = n;
+    dst->end_tick = src->end_tick;
+    dst->tempo_bpm = src->tempo_bpm;
+    dst->time_sig_num = src->time_sig_num;
+    dst->time_sig_den = src->time_sig_den;
+    dst->ticks_per_beat = src->ticks_per_beat;
+    dst->ticks_per_bar = src->ticks_per_bar;
+    copy_trunc(dst->source, sizeof(dst->source), src->source);
+    dst->song = src->song;
+    dst->truncated = src->truncated;
+    copy_trunc(dst->build_error, sizeof(dst->build_error), src->build_error);
+}
+
+/* Compute clips whose resolved location differs from their stored folder
+ * (the library was reorganized), for get_param("resolved_clips"). Runs on
+ * the worker as part of a successful primary build -- e->clips[]/
+ * library_root are worker-owned once builds move off-thread, so this must
+ * not run on the audio thread the way the old inline get_param handler did.
+ * Bounded to `max` entries. Logic unchanged from the original inline
+ * handler; only the output (plain strings into a cache slot, not
+ * escaped-JSON into a response buffer) differs. */
+static void compute_resolved_clips(engine_t *e, const song_t *song,
+                                    resolved_clip_diff_t *out, int max, int *out_count) {
+    int n = 0;
+    for (int s = 0; s < song->section_count && n < max; s++) {
+        const section_t *sec = &song->sections[s];
+        for (int c = 0; c < sec->clip_count && n < max; c++) {
+            const section_clip_t *sc = &sec->clips[c];
+            if (!sc->source_path[0]) continue;
+            if (sc->clip_index < 0 || sc->clip_index >= e->clip_count) continue;
+            const char *full = e->clips[sc->clip_index].path;
+            const char *eff = sc->source_folder[0] ? sc->source_folder : song->source_folder;
+            char folder[MAX_PATH_LEN] = "";
+            size_t full_len = strlen(full);
+            size_t src_len = strlen(sc->source_path);
+            if (src_len > 0 && full_len > src_len &&
+                strcmp(full + full_len - src_len, sc->source_path) == 0) {
+                size_t flen = full_len - src_len;
+                if (flen > 0 && full[flen - 1] == '/') flen--;
+                size_t root_len = strlen(e->library_root);
+                if (flen > root_len &&
+                    strncmp(full, e->library_root, root_len) == 0 &&
+                    full[root_len] == '/') {
+                    size_t rel_len = flen - root_len - 1;
+                    if (rel_len < sizeof(folder)) {
+                        memcpy(folder, full + root_len + 1, rel_len);
+                        folder[rel_len] = '\0';
+                    }
+                }
+            }
+            if (!folder[0] || strcmp(folder, eff) == 0) continue;
+            copy_trunc(out[n].source, sizeof(out[n].source), sc->source_path);
+            copy_trunc(out[n].folder, sizeof(out[n].folder), folder);
+            n++;
+        }
+    }
+    *out_count = n;
+}
+
+/* Process one channel's outstanding build request, if any -- at most one
+ * build attempt per call. A request superseded mid-build (request_gen
+ * changed since we started) is discarded unpublished; the set_param call
+ * that superseded it already posted worker_wake, so the worker's next loop
+ * iteration retries against the now-current payload (rearch2.md's
+ * "coalesce to latest, never drop" rule -- see file header comment). */
+static void process_timeline_channel(engine_t *e, timeline_channel_t *ch, int is_primary) {
+    uint32_t req = atomic_load_explicit(&ch->request_gen, memory_order_acquire);
+    if (req == atomic_load_explicit(&ch->published_gen, memory_order_acquire)) return;
+
+    char json[MAX_SONG_JSON_LEN];
+    if (!read_request_json(ch, json, sizeof(json))) return; /* retry next wake */
+
+    engine_clear_error(e);
+
+    song_t scratch_song;
+    memset(&scratch_song, 0, sizeof(scratch_song));
+    double tempo_bpm = 120.0;
+    int ts_num = 4, ts_den = 4;
+    uint32_t tpb = 240, tpbar = 240;
+    int parse_rc = parse_song_json(e, json, &scratch_song, &tempo_bpm, &ts_num, &ts_den, &tpb, &tpbar);
+
+    smf_event_t *tmp = NULL;
+    int tmp_count = 0;
+    uint32_t tmp_end = 0;
+    int build_rc = -1;
+    if (parse_rc == 0) {
+        build_rc = build_timeline_targeted(e, &scratch_song, tempo_bpm, ts_num, ts_den,
+                                           tpb, tpbar, &tmp, &tmp_count, &tmp_end);
+    }
+
+    if (atomic_load_explicit(&ch->request_gen, memory_order_acquire) != req) {
+        /* Superseded mid-build: discard unpublished. */
+        if (tmp) free(tmp);
+        return;
+    }
+
+    int active = atomic_load_explicit(&ch->active, memory_order_acquire);
+    timeline_slot_t *target = &ch->slot[1 - active];
+
+    if (build_rc == 0) {
+        int n = tmp_count;
+        target->truncated = (n > TIMELINE_MAX_EVENTS) ? 1 : 0;
+        if (n > TIMELINE_MAX_EVENTS) n = TIMELINE_MAX_EVENTS;
+        memcpy(target->events, tmp, sizeof(smf_event_t) * (size_t)n);
+        target->event_count = n;
+        target->end_tick = tmp_end;
+        target->tempo_bpm = tempo_bpm;
+        target->time_sig_num = ts_num;
+        target->time_sig_den = ts_den;
+        target->ticks_per_beat = tpb;
+        target->ticks_per_bar = tpbar;
+        target->song = scratch_song;
+        if (scratch_song.section_count > 0 && scratch_song.sections[0].clip_count > 0) {
+            section_clip_t *sc0 = &scratch_song.sections[0].clips[0];
+            if (sc0->clip_index >= 0 && sc0->clip_index < e->clip_count) {
+                copy_trunc(target->source, sizeof(target->source), e->clips[sc0->clip_index].path);
+            } else {
+                target->source[0] = '\0';
+            }
+        } else {
+            target->source[0] = '\0';
+        }
+    } else {
+        /* Build failed: publish an empty slot so a stale/wrong timeline is
+         * never left "active" from a failed rebuild -- the audio thread's
+         * existing event_count==0 guards degrade silently, matching today's
+         * behavior on a failed build. */
+        target->event_count = 0;
+        target->end_tick = 0;
+        target->truncated = 0;
+        target->source[0] = '\0';
+    }
+    /* Whatever engine_set_error left in e->error_msg for this attempt --
+     * empty on a clean success, or a message even on rc==0 if some clips
+     * partially failed to resolve (build_timeline_targeted's existing
+     * "continue past a bad clip" behavior, unchanged). */
+    copy_trunc(target->build_error, sizeof(target->build_error), e->error_msg);
+
+    if (tmp) free(tmp);
+
+    if (is_primary && build_rc == 0) {
+        int rc_active = atomic_load_explicit(&e->resolved_clips.active, memory_order_acquire);
+        int rc_target = 1 - rc_active;
+        compute_resolved_clips(e, &scratch_song, e->resolved_clips.slot[rc_target],
+                                RESOLVED_CLIPS_MAX, &e->resolved_clips.count[rc_target]);
+        atomic_store_explicit(&e->resolved_clips.active, rc_target, memory_order_release);
+    }
+
+    atomic_store_explicit(&ch->active, 1 - active, memory_order_release);
+    atomic_store_explicit(&ch->published_gen, req, memory_order_release);
+}
+
+/* The engine's deferred work, run on the worker thread each wake. Handles
+ * the folder/song scan double-buffers (if a rescan was requested, scan into
+ * the inactive slot and flip active) and the primary/staging async timeline
+ * build channels. Runs on the worker thread, so file I/O and allocation are
+ * safe here. */
 static void arranger_worker_iterate(engine_t *e) {
     if (!e) return;
 
     /* Copy the audio-thread-requested library root into the worker's working
      * copy before any scan/build that reads it. */
     copy_trunc(e->library_root, sizeof(e->library_root), e->library_root_requested);
+
+    process_timeline_channel(e, &e->primary_ch, 1);
+    process_timeline_channel(e, &e->staging_ch, 0);
 
     /* Folder scan. */
     if (atomic_load_explicit(&e->folder_dirty, memory_order_acquire)) {
@@ -3279,9 +3401,9 @@ static uint8_t apply_channel_override(uint8_t status, int8_t channel_override) {
 }
 
 static void drain_events_up_to(engine_t *e, uint32_t target) {
-    if (!e->running || e->timeline_count == 0) return;
-    while (e->event_cursor < e->timeline_count) {
-        const smf_event_t *ev = &e->timeline[e->event_cursor];
+    if (!e->running || e->live_slot.event_count == 0) return;
+    while (e->event_cursor < e->live_slot.event_count) {
+        const smf_event_t *ev = &e->live_slot.events[e->event_cursor];
         if (ev->tick >= target) break;
         e->last_event_channel_override = ev->channel_override;
         /* Follow-note instruments: emit the chord when a matching drum
@@ -3305,9 +3427,9 @@ static void drain_events_up_to(engine_t *e, uint32_t target) {
  * seam (which would sound like a flam/glitch). Note-offs pass through so notes
  * don't get stuck. */
 static void drain_events_up_to_guarded(engine_t *e, uint32_t target, uint32_t guard_start) {
-    if (!e->running || e->timeline_count == 0) return;
-    while (e->event_cursor < e->timeline_count) {
-        const smf_event_t *ev = &e->timeline[e->event_cursor];
+    if (!e->running || e->live_slot.event_count == 0) return;
+    while (e->event_cursor < e->live_slot.event_count) {
+        const smf_event_t *ev = &e->live_slot.events[e->event_cursor];
         if (ev->tick >= target) break;
         uint8_t type = ev->status & 0xF0;
         int is_note_on = (type == 0x90 && ev->data2 > 0);
@@ -3330,16 +3452,30 @@ static void drain_events_up_to_guarded(engine_t *e, uint32_t target, uint32_t gu
     }
 }
 
-static void engine_swap_to_staging(engine_t *e); /* defined below */
+static void engine_swap_to_staging(engine_t *e, const timeline_slot_t *src); /* defined below */
 
 static void handle_loop_or_stop(engine_t *e, uint32_t *target) {
-    if (*target >= e->timeline_end_tick + 1 || e->event_cursor >= e->timeline_count) {
+    if (*target >= e->live_slot.end_tick + 1 || e->event_cursor >= e->live_slot.event_count) {
+        /* A published-but-not-yet-consumed staging build, with actual
+         * events, is this block's AUTOSWAP candidate. */
+        uint32_t staging_pub = atomic_load_explicit(&e->staging_ch.published_gen, memory_order_acquire);
+        int staging_have_new = (staging_pub != e->staging_consumed_gen);
+        /* memory_order_acquire (not relaxed) is required here: this load is
+         * what establishes happens-before with the worker's release store to
+         * .active in process_timeline_channel, so that staged->event_count
+         * (dereferenced just below) is guaranteed to observe that build's
+         * fully-written contents rather than a possibly-stale/torn read.
+         * Caught by ThreadSanitizer during Step 3 validation -- exactly the
+         * class of missing-acquire mistake this whole exercise exists to
+         * catch before hardware, not after. */
+        int staging_active = atomic_load_explicit(&e->staging_ch.active, memory_order_acquire);
+        timeline_slot_t *staged = &e->staging_ch.slot[staging_active];
         arr_log("LOOPSTOP target=%u end=%u cursor=%d/%d loop=%d staging=%d",
-                *target, e->timeline_end_tick, e->event_cursor, e->timeline_count,
-                e->loop, e->staging_ready);
+                *target, e->live_slot.end_tick, e->event_cursor, e->live_slot.event_count,
+                e->loop, staging_have_new && staged->event_count > 0);
         if (e->loop) {
-            if (e->timeline_end_tick > 0) {
-                *target = *target % e->timeline_end_tick;
+            if (e->live_slot.end_tick > 0) {
+                *target = *target % e->live_slot.end_tick;
             } else {
                 *target = 0;
             }
@@ -3348,18 +3484,18 @@ static void handle_loop_or_stop(engine_t *e, uint32_t *target) {
             e->event_cursor = 0;
             /* A full loop wrap back to bar 1. */
             e->wrap_counter++;
-            while (e->event_cursor < e->timeline_count &&
-                   e->timeline[e->event_cursor].tick < *target) {
+            while (e->event_cursor < e->live_slot.event_count &&
+                   e->live_slot.events[e->event_cursor].tick < *target) {
                 e->event_cursor++;
             }
-        } else if (e->staging_ready && e->staging_timeline && e->staging_timeline_count > 0) {
+        } else if (staging_have_new && staged->event_count > 0) {
             /* Jam-mode: a non-looping clip (fill) reached its end and the
              * next clip is already staged. Hot-swap to the staged timeline
              * and keep running so the transition is sample-accurate and the
              * UI does not need to restart playback. The new clip starts at
              * its requested resume position (0 = start), then only the
              * overshoot past the fill's end carries it forward. */
-            uint32_t old_end = e->timeline_end_tick;
+            uint32_t old_end = e->live_slot.end_tick;
             uint32_t tpb = (e->ticks_per_bar > 0) ? e->ticks_per_bar : 1;
             /* The fill's full bar boundary: the swap must land on the exact
              * end of the fill's bar(s), not on the last event (which may end
@@ -3371,21 +3507,22 @@ static void handle_loop_or_stop(engine_t *e, uint32_t *target) {
                 uint32_t overshoot = (*target > fill_full) ? (*target - fill_full) : 0;
                 arr_log("AUTOSWAP old_end=%u tpb=%u fill_full=%u target=%u overshoot=%u resume=%u",
                         old_end, tpb, fill_full, *target, overshoot, e->staging_resume_tick);
-                engine_swap_to_staging(e);
+                engine_swap_to_staging(e, staged);
+                e->staging_consumed_gen = staging_pub;
                 uint32_t resume = e->swap_resume_tick;
                 e->playhead_tick = resume;
                 e->event_cursor = 0;
-                while (e->event_cursor < e->timeline_count &&
-                       e->timeline[e->event_cursor].tick < e->playhead_tick) {
+                while (e->event_cursor < e->live_slot.event_count &&
+                       e->live_slot.events[e->event_cursor].tick < e->playhead_tick) {
                     e->event_cursor++;
                 }
                 /* The timeline changed; track the new clip's starting bar. */
-                e->last_bar = e->timeline_end_tick > 0
+                e->last_bar = e->live_slot.end_tick > 0
                     ? (resume / e->ticks_per_bar)
                     : 0;
                 uint32_t advanced = resume + overshoot;
-                if (e->timeline_end_tick > 0) {
-                    *target = advanced % e->timeline_end_tick;
+                if (e->live_slot.end_tick > 0) {
+                    *target = advanced % e->live_slot.end_tick;
                 } else {
                     *target = advanced;
                 }
@@ -3411,7 +3548,7 @@ static void handle_loop_or_stop(engine_t *e, uint32_t *target) {
              * and make the transition into the next clip start ~a bar early.
              * Keep the playhead running through the (silent) tail until it
              * reaches timeline_end_tick, then stop. */
-            if (e->timeline_end_tick > 0 && *target < e->timeline_end_tick) {
+            if (e->live_slot.end_tick > 0 && *target < e->live_slot.end_tick) {
                 e->running = 1;
                 e->stopped_at_end = 0;
             } else {
@@ -3420,7 +3557,7 @@ static void handle_loop_or_stop(engine_t *e, uint32_t *target) {
                 emit_all_notes_off(e);
                 /* Cut off any instrument chord notes still sounding. */
                 emit_instruments_all_off(e);
-                if (e->playhead_tick > e->timeline_end_tick) e->playhead_tick = e->timeline_end_tick;
+                if (e->playhead_tick > e->live_slot.end_tick) e->playhead_tick = e->live_slot.end_tick;
             }
         }
     }
@@ -3428,41 +3565,32 @@ static void handle_loop_or_stop(engine_t *e, uint32_t *target) {
 
 /* Promote the staged timeline to the active timeline. Used both for
  * synchronous swaps and for scheduled swaps inside the audio callback. */
-static void engine_swap_to_staging(engine_t *e) {
-    if (!e->staging_ready || !e->staging_timeline || e->staging_timeline_count == 0) return;
+/* Promote `src` (a channel's published slot) to the active timeline via a
+ * bounded copy into e->live_slot -- never a pointer handoff, so there is
+ * nothing left to free(). Caller (handle_loop_or_stop's AUTOSWAP branch) is
+ * responsible for staging_consumed_gen bookkeeping, since it already holds
+ * the generation this slot was published under. */
+static void engine_swap_to_staging(engine_t *e, const timeline_slot_t *src) {
+    copy_timeline_slot(&e->live_slot, src);
 
-    /* Hand the old timeline off to be freed on the next control-thread preload
-     * call, rather than freeing it here on the audio thread. */
-    if (e->retired_timeline) { free(e->retired_timeline); }
-    e->retired_timeline = e->timeline;
-    e->timeline = e->staging_timeline;
-    e->timeline_count = e->staging_timeline_count;
-    e->timeline_end_tick = e->staging_timeline_end_tick;
-
-    e->tempo_bpm = e->staging_tempo_bpm;
-    e->time_sig_num = e->staging_time_sig_num;
-    e->time_sig_den = e->staging_time_sig_den;
-    e->ticks_per_beat = e->staging_ticks_per_beat;
-    e->ticks_per_bar = e->staging_ticks_per_bar;
+    e->tempo_bpm = e->live_slot.tempo_bpm;
+    e->time_sig_num = e->live_slot.time_sig_num;
+    e->time_sig_den = e->live_slot.time_sig_den;
+    e->ticks_per_beat = e->live_slot.ticks_per_beat;
+    e->ticks_per_bar = e->live_slot.ticks_per_bar;
     e->loop = e->staging_loop;
 
-    /* Capture the staged resume position before clearing staging. */
+    /* Capture the staged resume position before clearing it. */
     e->swap_resume_tick = e->staging_resume_tick;
+    e->staging_resume_tick = 0;
 
     /* A staged clip was activated via swap; expose it to the UI so same-path
      * restarts (which don't change active_source or bar/wrap counters) can be
      * detected. */
     e->swap_counter++;
 
-    e->staging_timeline = NULL;
-    e->staging_timeline_count = 0;
-    e->staging_timeline_end_tick = 0;
-    e->staging_ready = 0;
-    e->staging_resume_tick = 0;
-
     /* Update the active source path so the UI can follow the new clip. */
-    copy_trunc(e->active_source, sizeof(e->active_source), e->staging_source);
-    e->staging_source[0] = '\0';
+    copy_trunc(e->active_source, sizeof(e->active_source), e->live_slot.source);
 
     e->flash_end_tick = initial_flash_end_tick(e);
 }
@@ -3476,7 +3604,7 @@ static void engine_swap_to_staging(engine_t *e) {
  * The UI uses this monotonic counter to detect boundaries authoritatively
  * instead of inferring them from bar/beat deltas in JS. */
 static void update_bar_counter(engine_t *e) {
-    uint32_t bar = e->timeline_end_tick > 0
+    uint32_t bar = e->live_slot.end_tick > 0
         ? (e->playhead_tick / e->ticks_per_bar)
         : 0;
     if (bar != e->last_bar) {
@@ -3488,7 +3616,7 @@ static void update_bar_counter(engine_t *e) {
 }
 
 static void advance_playhead(engine_t *e, int frames, int sample_rate) {
-    if (!e->running || e->timeline_count == 0) return;
+    if (!e->running || e->live_slot.event_count == 0) return;
 
     double seconds = (double)frames / (double)sample_rate;
     double ticks_per_second = e->tempo_bpm / 60.0 * e->ticks_per_beat;
@@ -3525,13 +3653,13 @@ static void advance_playhead(engine_t *e, int frames, int sample_rate) {
         /* Seek to the start of the target bar. */
         e->playhead_tick = seek_bar * e->ticks_per_bar;
         e->event_cursor = 0;
-        while (e->event_cursor < e->timeline_count &&
-               e->timeline[e->event_cursor].tick < e->playhead_tick) {
+        while (e->event_cursor < e->live_slot.event_count &&
+               e->live_slot.events[e->event_cursor].tick < e->playhead_tick) {
             e->event_cursor++;
         }
         uint32_t remaining = (target > seek_tick) ? (target - seek_tick) : 0;
-        if (e->timeline_end_tick > 0) {
-            target = (e->playhead_tick + remaining) % e->timeline_end_tick;
+        if (e->live_slot.end_tick > 0) {
+            target = (e->playhead_tick + remaining) % e->live_slot.end_tick;
         } else {
             target = e->playhead_tick + remaining;
         }
@@ -3557,30 +3685,26 @@ static void advance_playhead(engine_t *e, int frames, int sample_rate) {
              * scheduled. */
             drain_events_up_to_guarded(e, swap_tick, e->pending_swap_guard_start);
         }
-        /* Promote the captured pending-swap timeline (the clip this swap was
-         * scheduled for, e.g. a fill) into the active timeline. The return
-         * groove may have been preloaded into staging after this swap was
-         * scheduled, so we must NOT use engine_swap_to_staging (which would
-         * promote the return groove instead of the fill). */
-        if (e->retired_timeline) { free(e->retired_timeline); }
-        e->retired_timeline = e->timeline;
-        e->timeline = e->pending_swap_timeline;
-        e->timeline_count = e->pending_swap_timeline_count;
-        e->timeline_end_tick = e->pending_swap_timeline_end_tick;
-        e->tempo_bpm = e->pending_swap_tempo_bpm;
-        e->time_sig_num = e->pending_swap_time_sig_num;
-        e->time_sig_den = e->pending_swap_time_sig_den;
-        e->ticks_per_beat = e->pending_swap_ticks_per_beat;
-        e->ticks_per_bar = e->pending_swap_ticks_per_bar;
+        /* Promote the captured pending-swap slot (the clip this swap was
+         * scheduled for, e.g. a fill) into the active timeline via a bounded
+         * copy -- never a pointer handoff, so there is nothing to free().
+         * The return groove may have been preloaded into staging after this
+         * swap was scheduled, so we must NOT promote from staging_ch here
+         * (which would promote the return groove instead of the fill) --
+         * pending_swap_slot is physically separate memory from
+         * staging_ch.slot[], captured at schedule time, so it cannot have
+         * been overwritten by that later preload. */
+        copy_timeline_slot(&e->live_slot, &e->pending_swap_slot);
+        e->tempo_bpm = e->live_slot.tempo_bpm;
+        e->time_sig_num = e->live_slot.time_sig_num;
+        e->time_sig_den = e->live_slot.time_sig_den;
+        e->ticks_per_beat = e->live_slot.ticks_per_beat;
+        e->ticks_per_bar = e->live_slot.ticks_per_bar;
         e->loop = e->pending_swap_loop;
         uint32_t resume = e->pending_swap_resume_tick;
         e->swap_resume_tick = resume;
         e->swap_counter++;
-        copy_trunc(e->active_source, sizeof(e->active_source), e->pending_swap_source);
-        e->pending_swap_timeline = NULL;
-        e->pending_swap_timeline_count = 0;
-        e->pending_swap_timeline_end_tick = 0;
-        e->pending_swap_source[0] = '\0';
+        copy_trunc(e->active_source, sizeof(e->active_source), e->live_slot.source);
         e->pending_swap = 0;
         e->pending_swap_tick = 0;
         e->pending_swap_guard_active = 0;
@@ -3590,16 +3714,16 @@ static void advance_playhead(engine_t *e, int frames, int sample_rate) {
          * then continue for the remainder of this audio block. */
         e->playhead_tick = resume;
         e->event_cursor = 0;
-        while (e->event_cursor < e->timeline_count &&
-               e->timeline[e->event_cursor].tick < e->playhead_tick) {
+        while (e->event_cursor < e->live_slot.event_count &&
+               e->live_slot.events[e->event_cursor].tick < e->playhead_tick) {
             e->event_cursor++;
         }
         /* The timeline changed; track the new clip's starting bar. */
-        e->last_bar = e->timeline_end_tick > 0
+        e->last_bar = e->live_slot.end_tick > 0
             ? (resume / e->ticks_per_bar)
             : 0;
-        if (e->timeline_end_tick > 0) {
-            target = (resume + remaining) % e->timeline_end_tick;
+        if (e->live_slot.end_tick > 0) {
+            target = (resume + remaining) % e->live_slot.end_tick;
         } else {
             target = resume + remaining;
         }
@@ -3690,6 +3814,18 @@ static void* arr_create_instance(const char *module_dir, const char *config_json
     e->schwung_channel = 9;  /* channel 10 for GM drums */
     e->last_event_channel_override = -1; /* no per-event override by default */
     e->loop = 1;          /* default to looping for performance mode */
+    /* Pre-existing latent bug, newly reachable now that JS/the test harness
+     * must poll get_param("state") for primary_published_gen BEFORE any
+     * build has ever completed (to capture a baseline generation) rather
+     * than only after: get_param("state"/"position") divides/mods by
+     * ticks_per_bar/ticks_per_beat unconditionally, and calloc() leaves both
+     * at 0 until the first activation (play/play_from_bar/a swap) sets them
+     * from a real build. That first get_param call, before any song is ever
+     * loaded, was an unconditional divide-by-zero. Default to the same 240
+     * fallback used throughout parsing/building whenever a song doesn't
+     * specify its own division. */
+    e->ticks_per_bar = 240;
+    e->ticks_per_beat = 240;
 
     /* Initialize the worker thread's wake semaphore and running flag, then
      * spawn it. The worker demotes itself off SCHED_FIFO as its first action
@@ -3753,8 +3889,15 @@ static void arr_on_midi(void *instance, const uint8_t *msg, int len, int source)
 static int arr_get_error(void *instance, char *buf, int buf_len) {
     engine_t *e = instance;
     if (!buf || buf_len < 1) return -1;
-    if (e && e->error_msg[0]) {
-        return snprintf(buf, buf_len, "%s", e->error_msg);
+    /* e->error_msg is worker-owned scratch, overwritten on every build
+     * attempt for either channel -- read the primary channel's *published*
+     * slot instead, exactly like get_param("error"), so this reflects a
+     * complete build's result rather than possibly-mid-write worker scratch
+     * or the wrong channel's error. */
+    if (e) {
+        int active = atomic_load_explicit(&e->primary_ch.active, memory_order_acquire);
+        const char *err = e->primary_ch.slot[active].build_error;
+        if (err[0]) return snprintf(buf, buf_len, "%s", err);
     }
     buf[0] = '\0';
     return 0;
@@ -3773,6 +3916,30 @@ static void arr_render_block(void *instance, int16_t *out_interleaved_lr, int fr
     int sample_rate = g_host ? g_host->sample_rate : 44100;
 
     advance_playhead(e, frames, sample_rate);
+}
+
+/* Activate the most recently published primary build, if any: copies
+ * primary_ch.slot[active] into e->live_slot (a bounded copy, never a pointer
+ * handoff -- see copy_timeline_slot) and updates the scalars callers read
+ * from live_slot's new content. Called at the top of
+ * set_param("play"/"play_from_bar"), which JS only issues after confirming
+ * state.primary_published_gen advanced past the generation it requested. A
+ * no-op if there is nothing new to activate (e.g. play_from_bar seeking
+ * within an already-active song). event_cursor/playhead_tick are NOT reset
+ * here -- that stays each caller's own job (matching their existing
+ * behavior), since "play" and "play_from_bar" reset to different positions. */
+static void activate_primary_if_published(engine_t *e) {
+    uint32_t pub = atomic_load_explicit(&e->primary_ch.published_gen, memory_order_acquire);
+    if (pub == e->primary_committed_gen) return;
+    int active = atomic_load_explicit(&e->primary_ch.active, memory_order_acquire);
+    copy_timeline_slot(&e->live_slot, &e->primary_ch.slot[active]);
+    e->primary_committed_gen = pub;
+    e->tempo_bpm = e->live_slot.tempo_bpm;
+    e->time_sig_num = e->live_slot.time_sig_num;
+    e->time_sig_den = e->live_slot.time_sig_den;
+    e->ticks_per_beat = e->live_slot.ticks_per_beat;
+    e->ticks_per_bar = e->live_slot.ticks_per_bar;
+    copy_trunc(e->active_source, sizeof(e->active_source), e->live_slot.source);
 }
 
 static void arr_set_param(void *instance, const char *key, const char *val) {
@@ -3818,22 +3985,55 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
          * This prevents stale loop state from causing preview/song to loop
          * when the timeline is rebuilt. */
         e->loop = 0;
-        load_song_from_json(e, val);
-        build_timeline(e);
+        /* Hand the payload to the worker via the seqlock-protected request
+         * buffer and bump request_gen -- the build itself (parse + clip
+         * resolution/loading + assembly) now runs entirely on the worker
+         * thread, not inline here. This call returns in low microseconds
+         * regardless of song complexity; JS polls state.primary_published_gen
+         * to know when the build actually lands. */
+        uint32_t seq = atomic_load_explicit(&e->primary_ch.request_seq, memory_order_relaxed);
+        atomic_store_explicit(&e->primary_ch.request_seq, seq + 1, memory_order_release);
+        copy_trunc(e->primary_ch.request_json, sizeof(e->primary_ch.request_json), val);
+        atomic_store_explicit(&e->primary_ch.request_seq, seq + 2, memory_order_release);
+        atomic_fetch_add_explicit(&e->primary_ch.request_gen, 1, memory_order_release);
+        sem_post(&e->worker_wake);
         return;
     }
     if (strcmp(key, "preload_song_json") == 0) {
         /* Jam-mode: build the next clip's timeline into staging while the
-         * current clip keeps playing. Activate it later via "swap". */
-        preload_song_from_json(e, val);
+         * current clip keeps playing. Activate it later via "swap". Same
+         * async request shape as song_json, above -- see
+         * state.staging_published_gen. */
+        uint32_t seq = atomic_load_explicit(&e->staging_ch.request_seq, memory_order_relaxed);
+        atomic_store_explicit(&e->staging_ch.request_seq, seq + 1, memory_order_release);
+        copy_trunc(e->staging_ch.request_json, sizeof(e->staging_ch.request_json), val);
+        atomic_store_explicit(&e->staging_ch.request_seq, seq + 2, memory_order_release);
+        atomic_fetch_add_explicit(&e->staging_ch.request_gen, 1, memory_order_release);
+        sem_post(&e->worker_wake);
         return;
     }
     if (strcmp(key, "swap") == 0) {
         /* Jam-mode: schedule activation of the staged timeline at a musical
          * boundary inside the audio callback. The UI should have already set
-         * "loop" as desired. */
-        if (!e->staging_ready || !e->staging_timeline || e->staging_timeline_count == 0) {
+         * "staging_loop"/"swap_resume" as desired and confirmed
+         * state.staging_published_gen advanced past the generation it
+         * requested before calling this -- staging_swap_rejected below is a
+         * regression tripwire for exactly the race that skipping that
+         * confirmation would reintroduce. */
+        uint32_t pub = atomic_load_explicit(&e->staging_ch.published_gen, memory_order_acquire);
+        if (pub == e->staging_consumed_gen) {
+            atomic_fetch_add_explicit(&e->staging_swap_rejected, 1, memory_order_relaxed);
             dsp_host_log("swap: no staging ready");
+            return;
+        }
+        int staging_active = atomic_load_explicit(&e->staging_ch.active, memory_order_acquire);
+        timeline_slot_t *staged = &e->staging_ch.slot[staging_active];
+        if (staged->event_count == 0) {
+            /* The most recent staging build failed/produced nothing. Consume
+             * the generation so we don't spin on it forever, but don't swap. */
+            atomic_fetch_add_explicit(&e->staging_swap_rejected, 1, memory_order_relaxed);
+            e->staging_consumed_gen = pub;
+            dsp_host_log("swap: staging build had no events");
             return;
         }
 
@@ -3860,30 +4060,17 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
          * UI intended (e.g. a fill must be non-looping so it auto-swaps back
          * to the groove). */
         e->pending_swap_loop = e->staging_loop;
-        /* Capture the staged timeline into a dedicated pending-swap buffer so
-         * a subsequent preload (the return groove) does not overwrite the clip
-         * this swap is meant to activate. Without this, the return-groove
-         * preload replaces the fill in staging, and when the fill's swap fires
-         * it promotes the return groove instead — playing a partial bar of the
-         * groove while the UI still shows the fill. */
-        if (e->pending_swap_timeline) { free(e->pending_swap_timeline); }
-        e->pending_swap_timeline = e->staging_timeline;
-        e->pending_swap_timeline_count = e->staging_timeline_count;
-        e->pending_swap_timeline_end_tick = e->staging_timeline_end_tick;
-        e->pending_swap_tempo_bpm = e->staging_tempo_bpm;
-        e->pending_swap_time_sig_num = e->staging_time_sig_num;
-        e->pending_swap_time_sig_den = e->staging_time_sig_den;
-        e->pending_swap_ticks_per_beat = e->staging_ticks_per_beat;
-        e->pending_swap_ticks_per_bar = e->staging_ticks_per_bar;
         e->pending_swap_resume_tick = e->staging_resume_tick;
-        copy_trunc(e->pending_swap_source, sizeof(e->pending_swap_source), e->staging_source);
-        /* Clear staging so the next preload (return groove) can use it. */
-        e->staging_timeline = NULL;
-        e->staging_timeline_count = 0;
-        e->staging_timeline_end_tick = 0;
-        e->staging_ready = 0;
+        /* Capture the staged timeline into a dedicated pending-swap buffer (a
+         * bounded copy, not a pointer hand-off) so a subsequent preload (the
+         * return groove) does not overwrite the clip this swap is meant to
+         * activate. Unlike the old pointer hand-off, pending_swap_slot is
+         * physically separate memory from staging_ch.slot[] -- a later
+         * preload's worker write can never alias it, so there is no hand-off
+         * discipline left to violate. */
+        copy_timeline_slot(&e->pending_swap_slot, staged);
+        e->staging_consumed_gen = pub;
         e->staging_resume_tick = 0;
-        e->staging_source[0] = '\0';
         /* Compute the guard window start: the swap boundary minus the guard
          * window (fraction of a beat). Note-ons at or after this tick are
          * suppressed across every block leading up to the swap. */
@@ -3899,8 +4086,8 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
 
         dsp_host_log("SWAP_SCHEDULED target=%u playhead=%u tpb=%u bars=%u resume=%u",
                      target_tick, e->playhead_tick, e->ticks_per_bar,
-                     e->timeline_end_tick / e->ticks_per_bar,
-                     e->staging_resume_tick);
+                     e->live_slot.end_tick / e->ticks_per_bar,
+                     e->pending_swap_resume_tick);
         return;
     }
     if (strcmp(key, "swap_resume") == 0) {
@@ -3945,13 +4132,21 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
         return;
     }
     if (strcmp(key, "loop") == 0) {
-        /* When a staged timeline is waiting, loop only affects the upcoming
-         * clip so the current clip keeps its own loop mode until swapped. */
-        if (e->staging_timeline || e->staging_ready) {
-            e->staging_loop = (atoi(val) != 0);
-        } else {
-            e->loop = (atoi(val) != 0);
-        }
+        /* Applies to the primary (currently-playing) song. Every call site
+         * targeting the staged clip instead uses "staging_loop" (below) --
+         * routing this on e->staging_ready used to be a same-thread ordering
+         * trick that worked only because preload_song_json was synchronous;
+         * now that it returns before staging is actually ready, that check
+         * would race the just-issued preload, so each destination gets its
+         * own unambiguous key instead of shared inference. */
+        e->loop = (atoi(val) != 0);
+        return;
+    }
+    if (strcmp(key, "staging_loop") == 0) {
+        /* Loop flag to apply to the staged (preloaded) clip on swap. See
+         * "loop", above, for why this is a separate key rather than
+         * inferred from staging state. */
+        e->staging_loop = (atoi(val) != 0);
         return;
     }
     if (strcmp(key, "tempo") == 0) {
@@ -3961,11 +4156,11 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
         double t = atof(val);
         if (t >= 20.0 && t <= 300.0) {
             e->tempo_bpm = t;
-            e->song.tempo_bpm = t;
         }
         return;
     }
     if (strcmp(key, "play") == 0) {
+        activate_primary_if_published(e);
         e->playhead_tick = 0;
         e->event_cursor = 0;
         e->running = 1;
@@ -3985,23 +4180,26 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
         dsp_host_log("PLAY tempo=%.1f tpb=%u ts=%d/%d bars=%u",
                      e->tempo_bpm, e->ticks_per_beat,
                      e->time_sig_num, e->time_sig_den,
-                     e->timeline_end_tick / e->ticks_per_bar);
+                     e->live_slot.end_tick / e->ticks_per_bar);
         return;
     }
     if (strcmp(key, "play_from_bar") == 0) {
-        /* Start playback from a given bar in the already-loaded timeline.
-         * Unlike "play", this does NOT rebuild the timeline, so a section
-         * jump is near-instant (no synchronous build_timeline delay). */
+        /* Start playback from a given bar. Activates a newly published
+         * primary build if one is waiting (a fresh song_json for this song),
+         * otherwise this is a pure seek within the already-active timeline --
+         * either way, near-instant: the actual build already happened on the
+         * worker, not here. */
+        activate_primary_if_published(e);
         int bar = atoi(val);
         if (bar < 0) bar = 0;
-        if (e->timeline_count > 0 && e->timeline_end_tick > 0) {
-            uint32_t max_bar = e->timeline_end_tick / e->ticks_per_bar;
+        if (e->live_slot.event_count > 0 && e->live_slot.end_tick > 0) {
+            uint32_t max_bar = e->live_slot.end_tick / e->ticks_per_bar;
             if ((uint32_t)bar > max_bar) bar = (int)max_bar;
         }
         e->playhead_tick = (uint32_t)bar * e->ticks_per_bar;
         e->event_cursor = 0;
-        while (e->event_cursor < e->timeline_count &&
-               e->timeline[e->event_cursor].tick < e->playhead_tick) {
+        while (e->event_cursor < e->live_slot.event_count &&
+               e->live_slot.events[e->event_cursor].tick < e->playhead_tick) {
             e->event_cursor++;
         }
         e->running = 1;
@@ -4028,6 +4226,14 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
         emit_all_notes_off(e);
         /* Send note-offs for any instrument chords still sounding. */
         emit_instruments_all_off(e);
+        /* Clear active_source so get_param("state") doesn't keep reporting a
+         * clip that stopped as if it were still the current one. Found via a
+         * real Jam-mode bug: ui.js's reactive active_source sync (which
+         * follows DSP-side auto-swaps) has no way to tell a genuinely
+         * current clip from a stale leftover from before a stop, so once
+         * jamPlaying went true again for an unrelated clip, it wrongly
+         * re-synced to this stale value. */
+        e->active_source[0] = '\0';
         dsp_host_log("STOP");
         return;
     }
@@ -4037,8 +4243,8 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
     }
     if (strcmp(key, "seek_bar") == 0) {
         int bar = atoi(val);
-        if (e->timeline_count > 0 && e->timeline_end_tick > 0) {
-            uint32_t max_bar = e->timeline_end_tick / e->ticks_per_bar;
+        if (e->live_slot.event_count > 0 && e->live_slot.end_tick > 0) {
+            uint32_t max_bar = e->live_slot.end_tick / e->ticks_per_bar;
             if (max_bar < 1) max_bar = 1;
             if (bar < 0) bar = 0;
             if ((uint32_t)bar > max_bar) bar = (int)max_bar;
@@ -4047,8 +4253,8 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
         }
         e->playhead_tick = (uint32_t)bar * e->ticks_per_bar;
         e->event_cursor = 0;
-        while (e->event_cursor < e->timeline_count &&
-               e->timeline[e->event_cursor].tick < e->playhead_tick) {
+        while (e->event_cursor < e->live_slot.event_count &&
+               e->live_slot.events[e->event_cursor].tick < e->playhead_tick) {
             e->event_cursor++;
         }
         return;
@@ -4071,8 +4277,8 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
             bar = atof(val);
             target_bar = atoi(colon + 1);
         }
-        if (e->timeline_count > 0 && e->timeline_end_tick > 0) {
-            uint32_t max_bar = e->timeline_end_tick / e->ticks_per_bar;
+        if (e->live_slot.event_count > 0 && e->live_slot.end_tick > 0) {
+            uint32_t max_bar = e->live_slot.end_tick / e->ticks_per_bar;
             if (max_bar < 1) max_bar = 1;
             if (bar < 0.0) bar = 0.0;
             /* Clamp the fractional boundary against the timeline's real end in
@@ -4080,7 +4286,7 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
              * like 4.9 against a true end of 4.5 bars is clamped to the end
              * rather than passing through and scheduling a seek that never
              * fires. */
-            double max_bar_ticks = (double)e->timeline_end_tick;
+            double max_bar_ticks = (double)e->live_slot.end_tick;
             if (bar * (double)e->ticks_per_bar > max_bar_ticks) {
                 bar = max_bar_ticks / (double)e->ticks_per_bar;
             }
@@ -4120,21 +4326,31 @@ static int arr_get_param(void *instance, const char *key, char *buf, int buf_len
     engine_t *e = instance;
     if (!e || !key || !buf || buf_len < 1) return -1;
 
-    /* This runs on the CONTROL thread (the UI polls it every tick), so free
-     * any timelines retired by a swap on the audio thread here, unconditionally.
-     * Relying on the next preload call to drain it is unreliable — in Jam mode
-     * a fill auto-returns to its groove with no new preload in between, which
-     * would otherwise leave the free() to the RT thread. */
-    if (e->retired_timeline) {
-        free(e->retired_timeline);
-        e->retired_timeline = NULL;
-    }
+    /* get_param runs on the SAME realtime SPI audio callback thread as
+     * render_block/set_param (there is no separate control thread in this
+     * host -- confirmed against the host's own plugin_api_v1.h threading
+     * contract). Nothing here may allocate, free, or block. Every buffer
+     * this function reads below (live_slot, primary_ch/staging_ch's
+     * published slots, resolved_clips, folder/song caches) is a fixed array
+     * published by the worker via the same double-buffer pattern, so plain
+     * atomic/scalar reads are all that's needed -- there is nothing left to
+     * free() here. */
 
     if (strcmp(key, "timeline_info") == 0) {
+        /* Reports the latest PUBLISHED primary build (primary_ch.slot[active]),
+         * not the currently-active live_slot -- this is a diagnostic ("did my
+         * last song_json request build something") that ui.js's
+         * playCurrentSong already reads immediately after song_json, before
+         * "play" is ever issued, so it must reflect the build's own result
+         * rather than lag until activation like live_slot does. Uses the
+         * slot's own ticks_per_bar (not e->ticks_per_bar) so total_bars is
+         * correct even before this build has been activated. */
+        int active = atomic_load_explicit(&e->primary_ch.active, memory_order_acquire);
+        const timeline_slot_t *slot = &e->primary_ch.slot[active];
+        uint32_t tpb = slot->ticks_per_bar > 0 ? slot->ticks_per_bar : 1;
         return snprintf(buf, buf_len,
                         "{\"count\":%d,\"end_tick\":%u,\"total_bars\":%u}",
-                        e->timeline_count, e->timeline_end_tick,
-                        e->timeline_end_tick / e->ticks_per_bar);
+                        slot->event_count, slot->end_tick, slot->end_tick / tpb);
     }
     if (strcmp(key, "position") == 0) {
         uint32_t bar = e->playhead_tick / e->ticks_per_bar;
@@ -4157,14 +4373,31 @@ static int arr_get_param(void *instance, const char *key, char *buf, int buf_len
         }
         escaped[j] = '\0';
 
+        /* primary_/staging_*_gen let JS confirm a specific async build/swap
+         * request actually landed (compare against the generation captured
+         * when the request was issued) instead of inferring completion from
+         * a blocking set_param call returning, which stopped being a valid
+         * proxy once song_json/preload_song_json return before the worker
+         * has built anything. staging_swap_rejected is a live regression
+         * tripwire: under correct JS-side gating it should never move. */
         return snprintf(buf, buf_len,
-                        "{\"running\":%d,\"loop\":%d,\"stopped_at_end\":%d,\"position\":\"%u.%u\",\"active_source\":\"%s\"}",
+                        "{\"running\":%d,\"loop\":%d,\"stopped_at_end\":%d,\"position\":\"%u.%u\",\"active_source\":\"%s\","
+                        "\"primary_request_gen\":%u,\"primary_published_gen\":%u,\"primary_committed_gen\":%u,"
+                        "\"staging_request_gen\":%u,\"staging_published_gen\":%u,\"staging_consumed_gen\":%u,"
+                        "\"staging_swap_rejected\":%u}",
                         e->running,
                         e->loop,
                         e->stopped_at_end,
                         e->playhead_tick / e->ticks_per_bar + 1,
                         (e->playhead_tick % e->ticks_per_bar) / e->ticks_per_beat + 1,
-                        escaped);
+                        escaped,
+                        atomic_load_explicit(&e->primary_ch.request_gen, memory_order_relaxed),
+                        atomic_load_explicit(&e->primary_ch.published_gen, memory_order_relaxed),
+                        e->primary_committed_gen,
+                        atomic_load_explicit(&e->staging_ch.request_gen, memory_order_relaxed),
+                        atomic_load_explicit(&e->staging_ch.published_gen, memory_order_relaxed),
+                        e->staging_consumed_gen,
+                        atomic_load_explicit(&e->staging_swap_rejected, memory_order_relaxed));
     }
     if (strcmp(key, "transport") == 0) {
         uint32_t bar = e->playhead_tick / e->ticks_per_bar;
@@ -4346,86 +4579,60 @@ static int arr_get_param(void *instance, const char *key, char *buf, int buf_len
          * folder, so the UI can persist the corrected source_folder and avoid
          * a recursive library search on every play. Each entry is
          * {"source":"<raw source>","folder":"<resolved folder relative to
-         * library_root>"}. Only clips that resolved to a different folder than
-         * their effective (per-clip or song) folder are emitted, keeping the
-         * payload small. */
+         * library_root>"}. The diff itself is computed on the worker
+         * (compute_resolved_clips, run as part of a successful primary
+         * build) and published into e->resolved_clips exactly like the
+         * folder/song scan caches -- this handler only reads the active slot
+         * and JSON-escapes it, rather than walking e->live_slot.song/e->clips[] live
+         * (which are worker-owned once builds move off the audio thread). */
+        int active = atomic_load_explicit(&e->resolved_clips.active, memory_order_acquire);
+        const resolved_clip_diff_t *diffs = e->resolved_clips.slot[active];
+        int count = e->resolved_clips.count[active];
+
         char *p = buf;
         int left = buf_len;
         int w = snprintf(p, left, "[");
         if (w >= 0) { p += w; left -= w; }
-        int first = 1;
-        for (int s = 0; s < e->song.section_count; s++) {
-            section_t *sec = &e->song.sections[s];
-            for (int c = 0; c < sec->clip_count; c++) {
-                section_clip_t *sc = &sec->clips[c];
-                if (!sc->source_path[0]) continue;
-                if (sc->clip_index < 0 || sc->clip_index >= e->clip_count) continue;
-                const char *full = e->clips[sc->clip_index].path;
-                /* Effective folder: per-clip source_folder if set, else song's. */
-                const char *eff = sc->source_folder[0] ? sc->source_folder : e->song.source_folder;
-                /* Derive the resolved SONG folder (the folder that directly
-                 * holds the .mid files) by stripping the source_path from the
-                 * end of the resolved full path, then removing the library_root
-                 * prefix. This yields the same relative form as source_folder. */
-                char folder[MAX_PATH_LEN] = "";
-                size_t full_len = strlen(full);
-                size_t src_len = strlen(sc->source_path);
-                if (src_len > 0 && full_len > src_len &&
-                    strcmp(full + full_len - src_len, sc->source_path) == 0) {
-                    size_t flen = full_len - src_len;
-                    if (flen > 0 && full[flen - 1] == '/') flen--;
-                    size_t root_len = strlen(e->library_root);
-                    if (flen > root_len &&
-                        strncmp(full, e->library_root, root_len) == 0 &&
-                        full[root_len] == '/') {
-                        size_t rel_len = flen - root_len - 1;
-                        if (rel_len < sizeof(folder)) {
-                            memcpy(folder, full + root_len + 1, rel_len);
-                            folder[rel_len] = '\0';
-                        }
-                    }
-                }
-                /* Only emit when the resolved folder differs from the stored
-                 * effective folder (i.e. the clip moved). */
-                if (!folder[0] || strcmp(folder, eff) == 0) continue;
-                /* Build {"source":"...","folder":"..."} */
-                char obj[1024];
-                char *op = obj;
-                int oleft = (int)sizeof(obj);
-                #define OBJ_APPEND_LIT(s) do { \
-                    const char *_s = (s); \
-                    while (*_s && oleft > 1) { *op++ = *_s++; oleft--; } \
-                } while (0)
-                OBJ_APPEND_LIT("{\"source\":\"");
-                for (const char *q = sc->source_path; *q && oleft > 1; q++) {
-                    if (*q == '"' || *q == '\\' || *q < 0x20 || *q > 0x7e) { *op++ = '\\'; oleft--; }
-                    if (oleft <= 1) break;
-                    *op++ = *q; oleft--;
-                }
-                OBJ_APPEND_LIT("\",\"folder\":\"");
-                for (const char *q = folder; *q && oleft > 1; q++) {
-                    if (*q == '"' || *q == '\\' || *q < 0x20 || *q > 0x7e) { *op++ = '\\'; oleft--; }
-                    if (oleft <= 1) break;
-                    *op++ = *q; oleft--;
-                }
-                OBJ_APPEND_LIT("\"}");
-                *op = '\0';
-                #undef OBJ_APPEND_LIT
-                int obj_len = (int)strlen(obj);
-                int need_comma = first ? 0 : 1;
-                if (need_comma + obj_len + 1 > left) break;
-                if (need_comma) { *p++ = ','; left--; }
-                memcpy(p, obj, obj_len);
-                p += obj_len;
-                left -= obj_len;
-                first = 0;
+        for (int i = 0; i < count; i++) {
+            char obj[1024];
+            char *op = obj;
+            int oleft = (int)sizeof(obj);
+            #define OBJ_APPEND_LIT(s) do { \
+                const char *_s = (s); \
+                while (*_s && oleft > 1) { *op++ = *_s++; oleft--; } \
+            } while (0)
+            OBJ_APPEND_LIT("{\"source\":\"");
+            for (const char *q = diffs[i].source; *q && oleft > 1; q++) {
+                if (*q == '"' || *q == '\\' || *q < 0x20 || *q > 0x7e) { *op++ = '\\'; oleft--; }
+                if (oleft <= 1) break;
+                *op++ = *q; oleft--;
             }
+            OBJ_APPEND_LIT("\",\"folder\":\"");
+            for (const char *q = diffs[i].folder; *q && oleft > 1; q++) {
+                if (*q == '"' || *q == '\\' || *q < 0x20 || *q > 0x7e) { *op++ = '\\'; oleft--; }
+                if (oleft <= 1) break;
+                *op++ = *q; oleft--;
+            }
+            OBJ_APPEND_LIT("\"}");
+            *op = '\0';
+            #undef OBJ_APPEND_LIT
+            int obj_len = (int)strlen(obj);
+            int need_comma = (i == 0) ? 0 : 1;
+            if (need_comma + obj_len + 1 > left) break;
+            if (need_comma) { *p++ = ','; left--; }
+            memcpy(p, obj, obj_len);
+            p += obj_len;
+            left -= obj_len;
         }
         if (left > 0) snprintf(p, left, "]");
         return (int)strlen(buf);
     }
     if (strcmp(key, "error") == 0) {
         return arr_get_error(e, buf, buf_len);
+    }
+    if (strcmp(key, "staging_error") == 0) {
+        int active = atomic_load_explicit(&e->staging_ch.active, memory_order_acquire);
+        return snprintf(buf, buf_len, "%s", e->staging_ch.slot[active].build_error);
     }
     return -1;
 }
