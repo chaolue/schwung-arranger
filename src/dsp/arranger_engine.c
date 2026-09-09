@@ -42,11 +42,28 @@
 
 static const host_api_v1_t *g_host;
 
-/* Runtime debug flag. When 0 (default), arr_log skips the file write and the
- * host log call, so the hot audio path does no I/O. Set to 1 only when
- * debugging. */
+/* Runtime debug flag. When 0 (default), arr_log/dsp_host_log skip all work,
+ * so the hot audio path does no I/O. Set to 1 only when debugging. */
 static int g_dsp_debug = 0;
 
+/* arr_log/dsp_host_log do DIRECT fopen/fprintf/fclose and/or g_host->log --
+ * real blocking I/O, safe ONLY on the SCHED_OTHER worker thread. They must
+ * be called exclusively from worker-thread-only code (load_clip,
+ * resolve_clip_index, build_timeline_targeted, parse_song_json,
+ * parse_chords_and_instruments/parse_section_chords -- everything reached
+ * through arranger_worker_iterate). Even gated behind g_dsp_debug (off by
+ * default), a call reachable from the audio thread reintroduces the exact
+ * stall this rearchitecture exists to eliminate the moment debug logging is
+ * turned on -- which is exactly when this module gets debugged on real
+ * hardware. Anything reachable from create_instance/destroy_instance/
+ * set_param/get_param/on_midi/render_block MUST use dsp_log_enqueue_worker
+ * instead (formats into a stack buffer and enqueues into the lock-free SPSC
+ * ring g_log_ring; the worker thread's log_ring_drain does the actual I/O).
+ * The ring is single-producer -- do not call dsp_log_enqueue_worker from the
+ * worker thread itself, since arr_log/dsp_host_log already run I/O directly
+ * there and mixing both into one ring would race two producers against the
+ * lock-free head/tail update. See docs/REALTIME_SAFETY.md in the Schwung
+ * host repo. */
 static void arr_log(const char *fmt, ...) {
     /* Gate before any work so the hot RT path (e.g. LOOPSTOP on every loop
      * wrap) does no formatting or I/O when debug is off. */
@@ -692,7 +709,12 @@ static void *arranger_worker_thread(void *arg) {
      * concept at all. */
     struct sched_param sp = { .sched_priority = 0 };
     if (sched_setscheduler(0, SCHED_OTHER, &sp) != 0) {
-        dsp_log_enqueue_worker("worker: sched_setscheduler failed, errno=%d", errno);
+        /* arr_log, not dsp_log_enqueue_worker: this runs ON the worker
+         * thread, and the ring is single-producer (the audio thread) --
+         * enqueueing from here too would race that producer's lock-free
+         * head/tail update. arr_log's direct fopen/fprintf is exactly what
+         * the worker thread is for. */
+        arr_log("worker: sched_setscheduler failed, errno=%d", errno);
         /* Fall through anyway — staying FIFO would be worse than logging
          * and continuing, and this thread still does no file I/O until
          * this call is confirmed, so the audio thread is not yet at risk. */
@@ -792,13 +814,17 @@ static void emit_direct_event(engine_t *e, uint8_t status, uint8_t d1, uint8_t d
         if (g_host->midi_send_external) sent = g_host->midi_send_external(msg, 4);
     }
     /* Diagnostic: log the first few direct-emit events per target so we can
-     * confirm which host function the DSP actually routes to. Uses arr_log so
-     * it lands in .dsp_log. */
+     * confirm which host function the DSP actually routes to. This runs on
+     * the audio thread (emit_direct_event is reachable from advance_playhead
+     * via drain_events_up_to/_guarded), so it must go through the ring
+     * buffer (dsp_log_enqueue_worker), never arr_log's direct fopen/fprintf --
+     * see the arr_log call-site audit in the comment above arr_log's
+     * definition. */
     {
         static int route_log_count[3] = {0,0,0};
         int ri = e->output_target; /* 0=ext,1=move,2=schwung */
         if (ri >= 0 && ri < 3 && route_log_count[ri] < 5) {
-            arr_log("DSPEMIT route=%s target=%d cable=%d cin=0x%02X status=0x%02X d1=%d d2=%d sent=%d",
+            dsp_log_enqueue_worker("DSPEMIT route=%s target=%d cable=%d cin=0x%02X status=0x%02X d1=%d d2=%d sent=%d",
                     route, e->output_target, cable, cin, msg[1], d1, d2, sent);
             route_log_count[ri]++;
         }
@@ -1960,7 +1986,7 @@ static void emit_instruments_at_tick(engine_t *e, uint32_t tick) {
     /* The chord at the next bar (or NULL past the song end). */
     const chord_t *next_ch = (abs_bar + 1 < total_bars)
         ? chord_at_abs_bar(&e->live_slot.song, abs_bar + 1) : NULL;
-    arr_log("EMIT_INST tick=%u sec=%d bar=%u chord=%s next=%s", tick, sec_idx, bar,
+    dsp_log_enqueue_worker("EMIT_INST tick=%u sec=%d bar=%u chord=%s next=%s", tick, sec_idx, bar,
             (ch && ch->set) ? ch->root : "null",
             (next_ch && next_ch->set) ? next_ch->root : "null");
     for (int i = 0; i < e->live_slot.song.instrument_count && i < MAX_INSTRUMENTS; i++) {
@@ -1984,7 +2010,7 @@ static void emit_instruments_at_tick(engine_t *e, uint32_t tick) {
                 emit_instrument_chord(e, inst, ch, 100);
                 e->last_inst_chord[i] = *ch;
                 e->last_inst_chord_set[i] = 1;
-                arr_log("EMIT_INST[%d] note-on root=%s ch=%d oct=%d voicing=%d",
+                dsp_log_enqueue_worker("EMIT_INST[%d] note-on root=%s ch=%d oct=%d voicing=%d",
                         i, ch->root, inst->channel, inst->octave, inst->voicing);
             }
             /* Schedule the note-off `note_gap` before the next chord change
@@ -2046,7 +2072,7 @@ static void fire_pending_instrument_notes_off(engine_t *e, uint32_t tick) {
             e->last_inst_chord_set[i] = 0;
         }
         e->pending_off_set[i] = 0;
-        arr_log("EMIT_INST[%d] note-off (deferred) tick=%u", i, tick);
+        dsp_log_enqueue_worker("EMIT_INST[%d] note-off (deferred) tick=%u", i, tick);
     }
 }
 
@@ -3436,7 +3462,7 @@ static void drain_events_up_to_guarded(engine_t *e, uint32_t target, uint32_t gu
         if (is_note_on && ev->tick >= guard_start) {
             /* Suppress note-ons in the guard window before the boundary. */
             e->swap_guard_suppressed++;
-            arr_log("GUARD suppress note=%u tick=%u target=%u guardStart=%u dist=%u",
+            dsp_log_enqueue_worker("GUARD suppress note=%u tick=%u target=%u guardStart=%u dist=%u",
                     ev->data1, ev->tick, target, guard_start, target - ev->tick);
             e->event_cursor++;
             continue;
@@ -3470,7 +3496,7 @@ static void handle_loop_or_stop(engine_t *e, uint32_t *target) {
          * catch before hardware, not after. */
         int staging_active = atomic_load_explicit(&e->staging_ch.active, memory_order_acquire);
         timeline_slot_t *staged = &e->staging_ch.slot[staging_active];
-        arr_log("LOOPSTOP target=%u end=%u cursor=%d/%d loop=%d staging=%d",
+        dsp_log_enqueue_worker("LOOPSTOP target=%u end=%u cursor=%d/%d loop=%d staging=%d",
                 *target, e->live_slot.end_tick, e->event_cursor, e->live_slot.event_count,
                 e->loop, staging_have_new && staged->event_count > 0);
         if (e->loop) {
@@ -3505,7 +3531,7 @@ static void handle_loop_or_stop(engine_t *e, uint32_t *target) {
                 /* Overshoot = how far past the fill's full bar this block
                  * reached. */
                 uint32_t overshoot = (*target > fill_full) ? (*target - fill_full) : 0;
-                arr_log("AUTOSWAP old_end=%u tpb=%u fill_full=%u target=%u overshoot=%u resume=%u",
+                dsp_log_enqueue_worker("AUTOSWAP old_end=%u tpb=%u fill_full=%u target=%u overshoot=%u resume=%u",
                         old_end, tpb, fill_full, *target, overshoot, e->staging_resume_tick);
                 engine_swap_to_staging(e, staged);
                 e->staging_consumed_gen = staging_pub;
@@ -3846,9 +3872,31 @@ static void* arr_create_instance(const char *module_dir, const char *config_json
 static void arr_destroy_instance(void *instance) {
     engine_t *e = instance;
     if (!e) return;
-    /* Stop and join the worker thread before any cleanup. Once joined, nothing
-     * is rendering, so the audio-thread-safety rules no longer apply and the
-     * direct free()/clear calls below are safe. */
+    /* Stop and join the worker thread before any cleanup. Once joined,
+     * nothing is rendering, so the audio-thread-safety rules no longer
+     * apply and the direct free()/clear calls below are safe.
+     *
+     * This join is NOT the same shape as the destroy_instance-on-the-SPI-
+     * callback problem the rest of this file's rearchitecture exists to
+     * fix. arranger is component_type "overtake" (src/module.json), and the
+     * Schwung host gives overtake DSP instances a dedicated off-callback
+     * teardown path: schwung_shim.c's overtake_dsp_retire_locked() runs on
+     * the SPI thread but only ever stashes the live pointers and posts
+     * SHIM_EVT_OVERTAKE_DSP_FREE; the actual destroy_instance() + dlclose()
+     * pair runs later in overtake_dsp_free_pending() on the shim's own
+     * SCHED_OTHER worker thread (shim_worker.c), whose own comment states
+     * blocking there is free. So this function already runs off the SPI
+     * callback, and dlclose() follows destroy_instance() immediately and
+     * synchronously on that same worker thread -- which is exactly why this
+     * MUST stay a real join and never become a detach: a detach would let
+     * this function return (and dlclose() unmap the .so) while
+     * arranger_worker_thread might still be executing code inside it, a
+     * jump into unmapped memory. (An earlier version of this fix detached
+     * instead of joining, reasoning only from the generic "destroy_instance
+     * runs on the SPI callback" rule in docs/REALTIME_SAFETY.md/MODULES.md
+     * -- true for the general case, false for this module's actual teardown
+     * path once the overtake carve-out is accounted for. Reverted before
+     * ever reaching hardware.) */
     atomic_store_explicit(&e->worker_running, 0, memory_order_release);
     sem_post(&e->worker_wake); /* wake the worker so it observes the flag and exits */
     pthread_join(e->worker_thread, NULL);
@@ -3952,9 +4000,9 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
     if (strcmp(key, "output_target") == 0 || strcmp(key, "emit_directly") == 0 ||
         strcmp(key, "output_channel") == 0 || strcmp(key, "move_channel") == 0 ||
         strcmp(key, "schwung_channel") == 0) {
-        arr_log("SET_PARAM key=%s val=%s", key, val);
+        dsp_log_enqueue_worker("SET_PARAM key=%s val=%s", key, val);
     } else {
-        arr_log("SET_PARAM key=%s val_len=%d", key, (int)strlen(val));
+        dsp_log_enqueue_worker("SET_PARAM key=%s val_len=%d", key, (int)strlen(val));
     }
 
     if (strcmp(key, "library_root") == 0) {
@@ -4023,7 +4071,7 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
         uint32_t pub = atomic_load_explicit(&e->staging_ch.published_gen, memory_order_acquire);
         if (pub == e->staging_consumed_gen) {
             atomic_fetch_add_explicit(&e->staging_swap_rejected, 1, memory_order_relaxed);
-            dsp_host_log("swap: no staging ready");
+            dsp_log_enqueue_worker("swap: no staging ready");
             return;
         }
         int staging_active = atomic_load_explicit(&e->staging_ch.active, memory_order_acquire);
@@ -4033,7 +4081,7 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
              * the generation so we don't spin on it forever, but don't swap. */
             atomic_fetch_add_explicit(&e->staging_swap_rejected, 1, memory_order_relaxed);
             e->staging_consumed_gen = pub;
-            dsp_host_log("swap: staging build had no events");
+            dsp_log_enqueue_worker("swap: staging build had no events");
             return;
         }
 
@@ -4084,7 +4132,7 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
             e->pending_swap_guard_active = 0;
         }
 
-        dsp_host_log("SWAP_SCHEDULED target=%u playhead=%u tpb=%u bars=%u resume=%u",
+        dsp_log_enqueue_worker("SWAP_SCHEDULED target=%u playhead=%u tpb=%u bars=%u resume=%u",
                      target_tick, e->playhead_tick, e->ticks_per_bar,
                      e->live_slot.end_tick / e->ticks_per_bar,
                      e->pending_swap_resume_tick);
@@ -4177,7 +4225,7 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
         /* Emit the first bar's chord immediately (update_bar_counter only
          * fires on a bar *change*, so bar 0 would otherwise be silent). */
         emit_instruments_at_tick(e, 0);
-        dsp_host_log("PLAY tempo=%.1f tpb=%u ts=%d/%d bars=%u",
+        dsp_log_enqueue_worker("PLAY tempo=%.1f tpb=%u ts=%d/%d bars=%u",
                      e->tempo_bpm, e->ticks_per_beat,
                      e->time_sig_num, e->time_sig_den,
                      e->live_slot.end_tick / e->ticks_per_bar);
@@ -4215,7 +4263,7 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
         queue_clear(e);
         /* Emit the chord for the bar playback starts on. */
         emit_instruments_at_tick(e, e->playhead_tick);
-        dsp_host_log("PLAY_FROM_BAR bar=%d playhead=%u running=1",
+        dsp_log_enqueue_worker("PLAY_FROM_BAR bar=%d playhead=%u running=1",
                      bar, e->playhead_tick);
         return;
     }
@@ -4234,7 +4282,7 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
          * jamPlaying went true again for an unrelated clip, it wrongly
          * re-synced to this stale value. */
         e->active_source[0] = '\0';
-        dsp_host_log("STOP");
+        dsp_log_enqueue_worker("STOP");
         return;
     }
     if (strcmp(key, "events_ack") == 0) {
@@ -4316,7 +4364,7 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
             e->pending_seek_guard_start = (boundary > guard) ? (boundary - guard) : 0;
             e->pending_seek_guard_active = 0;
         }
-        dsp_host_log("SEEK_SCHEDULED boundary=%u bar=%.3f target=%u playhead=%u",
+        dsp_log_enqueue_worker("SEEK_SCHEDULED boundary=%u bar=%.3f target=%u playhead=%u",
                      boundary, bar, (uint32_t)target_bar, e->playhead_tick);
         return;
     }

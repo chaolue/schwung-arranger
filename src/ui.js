@@ -441,6 +441,18 @@ let playbackSectionIndex = 0; /* section currently being played by DSP */
  * playing, show that section in the display and step LEDs instead of the
  * currently playing section. -1 = follow the playhead. */
 let builderDisplaySection = -1;
+/* True while playFromCurrentSection/previewClipAtCursor have currentSong
+ * temporarily pointed at a song sliced to start at currentSectionIndex (so
+ * the sliced song's own section 0 IS the section being played), waiting on
+ * playCurrentSong's async confirmation before restoring the real song. Until
+ * that confirmation lands, playbackState is still not "playing" (it only
+ * flips inside that same confirmation), so builderDisplaySectionIndex() and
+ * drawBuilderStepLEDs's fallback to currentSectionIndex would index the
+ * SLICED song with the ORIGINAL, un-sliced section index -- landing one
+ * section too far in (section 2 of 4 briefly showing section 3). This flag
+ * lets both know to show section 0 of the sliced song instead, for exactly
+ * that window. */
+let builderPlayingFromTemp = false;
 /* Set to the source-folder NAME when the builder needs its clip pads loaded
  * but the DSP folder scan isn't ready yet (e.g. an existing song opened on a
  * fresh boot). The tick re-resolves the folder index (once libraryFolders is
@@ -533,6 +545,7 @@ let jamActiveSource = "";           /* last active clip source reported by DSP s
  * pads stay frozen on the last groove's filter so they don't flicker. */
 let jamVisibleFillList = [];
 let lastJamLedKey = "";             /* last jam LED state key, to log only on change */
+let lastPerfDispKey = "";           /* last PERFDISP state key, to log only on change */
 let lastJamStepKey = "";            /* last jam step LED state key, to log only on change */
 let lastJamPreviewStepKey = "";     /* last jam PREVIEW step LED state key, to log only on change */
 let lastJamPreviewQueueKey = "";    /* last jam PREVIEW queue-diagnostic key, to log only on change */
@@ -552,6 +565,21 @@ let jamPreviewStartTime = 0;        /* when the jam preview playback started */
  * actually played and finished. The "preview finished on its own" check
  * below must only fire on that second case. */
 let jamPreviewObservedRunning = false;
+/* True once the DSP has actually been observed running since the current
+ * Performance-mode song was requested. Same async gap as
+ * jamPreviewObservedRunning above, different symptom: perfTick's song-end
+ * detection reads lastDspState.stopped_at_end, and that object isn't
+ * refreshed until the new song's async build/play confirms (playCurrentSong's
+ * onReady is what nulls it out) -- so right after perfAdvance/perfPlayCurrent
+ * issues a new play request, lastDspState can still be the JUST-ENDED song's
+ * own terminal state, stopped_at_end included. Every perfTick in that window
+ * (which can span several ticks -- observed ~300ms on hardware for a normal-
+ * sized song) re-read that same stale stopped_at_end as "this new song also
+ * already ended" and fired ANOTHER advance, skipping the song that had just
+ * been requested without it ever actually playing. Gating stopped_at_end on
+ * this flag (only trust it once the new song has been observed running at
+ * least once) closes the gap the same way jamPreviewObservedRunning does. */
+let perfObservedRunningSincePlay = true;
 
 /* Jam hold-overlay (pad held while playback is running): shows the name of the
  * held groove/fill in the display overlay without queueing it. A quick press
@@ -2372,6 +2400,15 @@ function updateDspState() {
         jamPreviewObservedRunning = true;
     }
 
+    /* Same idea for Performance mode's song-end detection -- see
+     * perfObservedRunningSincePlay's declaration for the bug this exists to
+     * fix (a stale stopped_at_end from the JUST-ENDED song spuriously
+     * advancing a SECOND time before the newly requested song's async build
+     * has even confirmed, skipping it entirely). */
+    if ((lastDspState && lastDspState.running) || (lastDspTransport && lastDspTransport.running)) {
+        perfObservedRunningSincePlay = true;
+    }
+
     /* If a jam preview one-shot finished on its own (non-looping clip ended),
      * clear the preview state and return to the stopped Jam grid. This must
      * run before the generic DSP-stop branch below so it isn't mistaken for a
@@ -3377,11 +3414,29 @@ function drawBuilderStepLEDs(force) {
          * step LEDs so the user sees where the play head will land. */
         if (!perfPlaying && perfSelectedSection >= 0 && stepSong && perfSelectedSection < stepSong.sections.length) {
             secIndex = perfSelectedSection;
-        } else if (playbackState === "playing") {
+        } else if (perfPlaying) {
+            /* perfPlaying, not playbackState === "playing": perfPlaying is
+             * Performance mode's own flag, set synchronously and early in
+             * perfStart(); playbackState only flips once the DSP confirms
+             * the async build/play (playCurrentSong's onReady, or
+             * perfFinishSectionJumpUiState for a section jump). Between
+             * those two points playbackSectionIndex is already correct (set
+             * synchronously in perfFireSectionJump -- see its comment) but
+             * this branch was still gated on the laggy playbackState, so it
+             * fell to the else below and went blank (secIndex=-1, clearing
+             * the step LEDs) instead of showing the section actually being
+             * jumped to. drawPerformance's section-name display has the
+             * same two-branch shape and never checked playbackState at all,
+             * which is why fixing playbackSectionIndex alone fixed the
+             * display but not this. */
             secIndex = playbackSectionIndex;
         } else {
             secIndex = -1;
         }
+    } else if (builderPlayingFromTemp) {
+        /* currentSong (== stepSong here) is a song sliced to start at
+         * currentSectionIndex -- see builderPlayingFromTemp's declaration. */
+        secIndex = 0;
     } else {
         secIndex = playbackState === "playing"
             ? (builderDisplaySection >= 0 ? builderDisplaySection : playbackSectionIndex)
@@ -3709,10 +3764,33 @@ function drawJamLEDs() {
                  * clip is in its last bar). */
                 desired[p] = (jamQueuedGrooveEscalated || imminent) ? PureRed : PureGreen;
             } else if (isReturn) {
-                /* A fill is playing and this is the return groove: green
-                 * until the fill's last bar (imminent return), then red. If
-                 * the user pressed it to restart from the start, show blue. */
-                desired[p] = jamReturnFromStart ? PureBlue : (imminent ? PureRed : PureGreen);
+                /* A fill is playing and this is the return groove. Red means
+                 * it will resume from the start (tick 0); blue means it will
+                 * resume partway through, shown once the return is imminent
+                 * (the fill's last bar) so it isn't blue the whole time a
+                 * fill plays. Green is the default "will be returned to,
+                 * not yet imminent" state.
+                 *
+                 * The resume position is read from jamStagedResumeTick (the
+                 * actual value most recently sent to the DSP via
+                 * swap_resume for this clip), not from jamReturnFromStart --
+                 * that flag only covers ONE of three ways a return ends up
+                 * at tick 0 (the user pressing the groove's own pad mid-fill,
+                 * jamQueueGroove's "return-from-start" branch). It stayed
+                 * false, so this pad wrongly showed blue, in the other two:
+                 * an intro fill's return groove (jamStartWithIntroFill
+                 * preloads it at resume=0 directly, since it's the very
+                 * first playback -- there is no prior position to resume
+                 * from), and a fill queued late enough in a groove that
+                 * jamReturnGrooveResumeTick() wraps the resume position back
+                 * to 0 on its own (the fill carried past the groove's end).
+                 * jamStagedResumeTick reflects all three correctly, since
+                 * every path that preloads the return groove -- including
+                 * both of those -- funnels through jamPreloadClip, which
+                 * records the resume tick it actually sent. */
+                const returnFromStart = jamStagedClip && jamStagedClip.path === clip.path &&
+                    jamStagedResumeTick === 0;
+                desired[p] = returnFromStart ? PureRed : (imminent ? PureBlue : PureGreen);
             } else {
                 desired[p] = clipColor(clip, false);
             }
@@ -4218,7 +4296,13 @@ function drawBuilder() {
     if (builderTrack === TRACK_CHORD) { drawChordTrack(); return; }
     if (builderTrack === TRACK_INSTRUMENT_1 || builderTrack === TRACK_INSTRUMENT_2) { drawInstrumentTrack(); return; }
     const playingIdx = (playbackState === "playing" && builderDisplaySection >= 0) ? builderDisplaySection : playbackSectionIndex;
-    const displayIdx = playbackState === "playing" ? playingIdx : currentSectionIndex;
+    /* builderPlayingFromTemp: currentSong is a song sliced to start at
+     * currentSectionIndex while playCurrentSong's async build/play is still
+     * unconfirmed (playbackState hasn't flipped to "playing" yet either) --
+     * see the flag's declaration. This duplicates builderDisplaySectionIndex()
+     * rather than calling it because playingIdx (the auto-follow/manual-jump
+     * value once actually playing) is only needed here. */
+    const displayIdx = builderPlayingFromTemp ? 0 : (playbackState === "playing" ? playingIdx : currentSectionIndex);
     const sec = currentSong ? currentSong.sections[displayIdx] : null;
     drawMenuHeader(scrollHeader("Drums: " + (currentSong ? shortSongName(currentSong.name) : ""), songIsLocked() ? 27 : 28), songIsLocked() ? "*" : "");
     if (!sec) {
@@ -4243,7 +4327,23 @@ function drawBuilder() {
             return "(pads add clips)";
         },
         getValue: (item) => {
-            if (item.type === "section") return (displayIdx + 1) + "/" + currentSong.sections.length;
+            if (item.type === "section") {
+                /* While builderPlayingFromTemp, currentSong is sliced to
+                 * start at currentSectionIndex (displayIdx is forced to 0 to
+                 * index into it -- see above), so currentSong.sections.length
+                 * is short by currentSectionIndex and would show "1/13"
+                 * instead of "2/14" for section 2 of 14. currentSectionIndex
+                 * itself is never touched during this window (only
+                 * currentSong/dspLoopEnabled/builderPlayingFromTemp are), so
+                 * it's still the true original index; adding it back to the
+                 * sliced length recovers the true original total without
+                 * needing a separate stored value. */
+                const total = builderPlayingFromTemp
+                    ? currentSong.sections.length + currentSectionIndex
+                    : currentSong.sections.length;
+                const shown = builderPlayingFromTemp ? currentSectionIndex : displayIdx;
+                return (shown + 1) + "/" + total;
+            }
             if (item.type === "clip") {
                 const c = sec.clips[item.index];
                 /* Show the effective (beat-trimmed) bar count as a mixed
@@ -5409,9 +5509,25 @@ function drawPerformance() {
             nextSecName = "→ next song";
         }
     }
-    logDebug("PERFDISP song=" + songName + " sec=" + secName + " nextSec=" + nextSecName +
-        " hasClick=" + hasClick + " clickPlaying=" + perfClickPlaying + " perfPlaying=" + perfPlaying +
-        " perfSelected=" + perfSelectedSection + " playbackSection=" + playbackSectionIndex);
+    /* Log only on change, not every tick (drawPerformance runs every tick
+     * while this view is shown). Unconditional logging here was firing ~25x/
+     * sec at idle -- logDebug's fallback path (host_append_file is not part
+     * of the host's filesystem API, so this is always the active path: see
+     * logDebug's own definition) reads the WHOLE log file, truncates to the
+     * last 20000 characters, and rewrites it on every single call. At that
+     * rate the 20KB window was pure idle PERFDISP spam within a few seconds,
+     * permanently evicting whatever happened moments earlier -- which is
+     * exactly why every attempt to read this log after a reported bug (a
+     * stop-at-end-then-Play sequence, in particular) came back with nothing
+     * but PERFDISP lines showing an unchanged idle state. */
+    const perfDispKey = songName + "|" + secName + "|" + nextSecName + "|" + hasClick +
+        "|" + perfClickPlaying + "|" + perfPlaying + "|" + perfSelectedSection + "|" + playbackSectionIndex;
+    if (perfDispKey !== lastPerfDispKey) {
+        lastPerfDispKey = perfDispKey;
+        logDebug("PERFDISP song=" + songName + " sec=" + secName + " nextSec=" + nextSecName +
+            " hasClick=" + hasClick + " clickPlaying=" + perfClickPlaying + " perfPlaying=" + perfPlaying +
+            " perfSelected=" + perfSelectedSection + " playbackSection=" + playbackSectionIndex);
+    }
 
     /* Scroll each info line independently so long song/section names marquee
      * instead of being hard-truncated. */
@@ -5904,8 +6020,18 @@ function handleBuilderInput(cc, value) {
             saveCurrentSong();
             const savedLoop = dspLoopEnabled;
             dspLoopEnabled = false;
-            playCurrentSong();
-            dspLoopEnabled = savedLoop;
+            /* Restore inside onConfirmed, not synchronously after this call
+             * returns -- playCurrentSong is async (the build/play happen on
+             * the DSP worker thread and land later, once
+             * primary_published_gen confirms); the actual
+             * set("loop", dspLoopEnabled ? "1" : "0") read of this flag
+             * happens inside that deferred callback, not before
+             * playCurrentSong() returns. Restoring synchronously here (the
+             * old code) put the flag back to its previous value (loop
+             * enabled, by default) before that read ever happened, so the
+             * "no looping" request was silently dropped and the song looped
+             * anyway. */
+            playCurrentSong(false, function () { dspLoopEnabled = savedLoop; });
         } else {
             previewClipAtCursor();
         }
@@ -7127,8 +7253,26 @@ function jamQueueGroove(clip) {
             /* Pre-schedule the swap at the end of the current groove (its loop
              * wrap point), so the DSP applies it sample-accurately at the groove
              * end rather than at the next bar boundary. Deferred to
-             * onConfirmed -- see the escalate branch above for why. */
-            const endTick = (dspTimelineInfo && dspTimelineInfo.end_tick) ? dspTimelineInfo.end_tick : 0;
+             * onConfirmed -- see the escalate branch above for why.
+             *
+             * The end tick must be the CURRENTLY PLAYING clip's own length,
+             * not dspTimelineInfo.end_tick: that field is get_param("timeline_
+             * info"), which reports primary_ch (the song_json/Song Builder/
+             * Performance-mode channel) -- Jam mode never touches primary_ch
+             * at all, it plays through live_slot via preload_song_json/swap/
+             * AUTOSWAP, so timeline_info is always stale/unrelated data here.
+             * Confirmed on hardware: every SWAP_SCHEDULED for this branch
+             * logged target=960 (one bar) regardless of whether the actual
+             * groove was 4 or 8 bars, so it fired at the first bar boundary
+             * (or immediately, if the playhead had already passed tick 960)
+             * instead of waiting for the real multi-bar groove to finish --
+             * same failure shape as jamQueueFill's bug above, different wrong
+             * value. jamCurrentClip.bars is the same clip-metadata source
+             * jamReturnGrooveResumeTick() already uses correctly for this
+             * exact purpose. */
+            const curTpb = (lastDspTransport && lastDspTransport.ticks_per_bar) ? lastDspTransport.ticks_per_bar : 240;
+            const curBars = Math.max(1, (jamCurrentClip && jamCurrentClip.bars) || 1);
+            const endTick = curBars * curTpb;
             jamPreloadClip(clip, undefined, function () {
                 if (typeof host_module_set_param_blocking === "function") {
                     host_module_set_param_blocking("swap", String(endTick), 100);
@@ -7181,8 +7325,6 @@ function jamQueueFill(clip) {
         return;
     }
     const curBar = (lastDspTransport && lastDspTransport.bar) ? lastDspTransport.bar : 1;
-    const tpb = (lastDspTransport && lastDspTransport.ticks_per_bar) ? lastDspTransport.ticks_per_bar : 240;
-    const endTick = (dspTimelineInfo && dspTimelineInfo.end_tick) ? dspTimelineInfo.end_tick : 0;
     /* Record the 0-based groove index where this fill batch plays. The fill
      * fires at the start of bar curBar+1 (1-based), which is 0-based index
      * curBar. The groove resumes after the fills at this index plus the fill
@@ -7190,23 +7332,34 @@ function jamQueueFill(clip) {
      * would show the fill's own bar 1). */
     jamFillBaseBar = curBar; /* 0-based groove index the fill starts on */
     jamFillsPlayedBars = 0;
-    /* The fill fires at the next bar boundary. curBar is 1-based; the next
-     * boundary (start of bar curBar+1) is at tick = curBar * tpb. Using
-     * (curBar+1)*tpb would target one bar too far and make the fill play one
-     * bar late. Clamp to the groove's end so a fill queued in the last bar
-     * swaps at the loop wrap instead of a target that never fires. */
-    let tick = curBar * tpb;
-    if (endTick > 0 && tick > endTick) tick = endTick;
-    jamScheduledSwapBar = curBar + 1;
+    jamScheduledSwapBar = curBar + 1; /* display/log only -- see below */
     jamScheduledSwap = clip;
     logJam("PAD fill queue at bar " + jamScheduledSwapBar + " -> " + clip.name + " qLen=" + jamQueue.length);
     /* Deferred to onConfirmed -- issuing "swap" immediately would race the
-     * just-issued (now-async) preload -- see jamQueueGroove above. */
+     * just-issued (now-async) preload -- see jamQueueGroove above.
+     *
+     * Pass "0", not a pre-computed absolute tick. This used to compute
+     * tick = curBar * tpb here (an absolute tick within the CURRENT loop
+     * iteration) and pass that through. But the actual set_param("swap", ...)
+     * call only fires once jamPreloadClip's async build confirms -- an
+     * unpredictable delay later -- during which the groove can keep
+     * looping. By the time the DSP processed it, that tick could already be
+     * far in the past relative to the current playhead (observed on
+     * hardware: target=4242 computed from a stale tick against
+     * playhead=4241, i.e. already passed), which set_param("swap")'s own
+     * staleness guard (arranger_engine.c's "if (target_tick <=
+     * e->playhead_tick) target_tick = e->playhead_tick + 1") then fires
+     * essentially immediately instead of at the intended boundary -- a
+     * queued fill playing right away instead of waiting. "0" tells the DSP
+     * to compute the next bar boundary itself, from whatever the playhead
+     * actually is at the moment it processes the request, which is always
+     * fresh regardless of how long the preload took -- the same pattern
+     * jamQueueGroove's escalate branch already uses above. */
     jamPreloadClip(clip, undefined, function () {
         if (typeof host_module_set_param_blocking === "function") {
-            host_module_set_param_blocking("swap", String(tick), 100);
+            host_module_set_param_blocking("swap", "0", 100);
         } else if (typeof host_module_set_param === "function") {
-            host_module_set_param("swap", String(tick));
+            host_module_set_param("swap", "0");
         }
     });
     needsRedraw = true;
@@ -7834,8 +7987,12 @@ function insertClipAtCursor(clip) {
 
 /* The section index the builder is currently showing. During playback this is
  * the auto-followed section (or the one the user jumped to via
- * builderDisplaySection), not the stale currentSectionIndex. */
+ * builderDisplaySection), not the stale currentSectionIndex. While
+ * builderPlayingFromTemp is set, currentSong is a song sliced to start at
+ * currentSectionIndex, so the section being played is always its own
+ * section 0 -- see builderPlayingFromTemp's declaration. */
 function builderDisplaySectionIndex() {
+    if (builderPlayingFromTemp) return 0;
     return playbackState === "playing"
         ? (builderDisplaySection >= 0 ? builderDisplaySection : playbackSectionIndex)
         : currentSectionIndex;
@@ -8175,9 +8332,21 @@ function playFromCurrentSection() {
     currentSong = temp;
     previewBarOffset = barOffset;
     dspLoopEnabled = false;
-    playCurrentSong();
-    dspLoopEnabled = savedLoop;
-    currentSong = saved;
+    builderPlayingFromTemp = true;
+    /* Restore all three from onConfirmed, not synchronously after this call
+     * returns -- see the comment on the Shift+Play handler in
+     * handleBuilderInput for why (playCurrentSong is async; a synchronous
+     * restore here puts dspLoopEnabled back before its own deferred read of
+     * it, and reverts currentSong before persistResolvedClipFolders -- also
+     * called from that same deferred callback -- has a chance to read/save
+     * the temp song it actually built). builderPlayingFromTemp covers the
+     * same gap for the section-index display fallback -- see its
+     * declaration. */
+    playCurrentSong(false, function () {
+        dspLoopEnabled = savedLoop;
+        currentSong = saved;
+        builderPlayingFromTemp = false;
+    });
 }
 
 function previewClip(clip, barOffset) {
@@ -8213,9 +8382,11 @@ function previewClip(clip, barOffset) {
     const savedLoop = dspLoopEnabled;
     dspLoopEnabled = false;
     previewBarOffset = (typeof barOffset === "number") ? barOffset : 0;
-    playCurrentSong();
-    dspLoopEnabled = savedLoop;
-    currentSong = saved;
+    /* Restore from onConfirmed -- see playFromCurrentSection above. */
+    playCurrentSong(false, function () {
+        dspLoopEnabled = savedLoop;
+        currentSong = saved;
+    });
 }
 
 function previewClipAtCursor() {
@@ -8264,9 +8435,13 @@ function previewClipAtCursor() {
     currentSong = temp;
     previewBarOffset = barOffset;
     dspLoopEnabled = false;
-    playCurrentSong();
-    dspLoopEnabled = savedLoop;
-    currentSong = saved;
+    builderPlayingFromTemp = true;
+    /* Restore from onConfirmed -- see playFromCurrentSection above. */
+    playCurrentSong(false, function () {
+        dspLoopEnabled = savedLoop;
+        currentSong = saved;
+        builderPlayingFromTemp = false;
+    });
 }
 
 /* ── Performance / Setlist playback ─────────────────────────────────── */
@@ -8342,6 +8517,10 @@ function perfLoadSong(index) {
  * click_note is 0). */
 function perfPlayCurrent() {
     if (!currentSong) return;
+    /* A new play request is going out -- don't trust stopped_at_end again
+     * until it's confirmed running. See perfObservedRunningSincePlay's
+     * declaration. */
+    perfObservedRunningSincePlay = false;
     const entry = currentSetlist ? currentSetlist.songs[perfSongIndex] : null;
     const clickBars = entry ? (entry.click_bars || 0) : 0;
     const clickNote = entry ? (entry.click_note || 0) : 0;
@@ -8645,6 +8824,17 @@ function perfFireSectionJump(sectionIndex) {
     if (!range) return;
     const startBar = range.startBar;
     currentSectionIndex = sectionIndex;
+    /* Also set synchronously, not only inside perfFinishSectionJumpUiState
+     * (which only runs once the jump is confirmed -- immediately for the
+     * perfFullSongLoaded seek path, but after an async build in the else
+     * branch below). drawPerformance's section-name display falls back to
+     * fullSong.sections[playbackSectionIndex] as soon as perfPlaying is true
+     * (set synchronously and early, in perfStart, before this function ever
+     * runs) -- so during that gap it was reading the STALE value perfLoadSong
+     * reset to (0), showing the first section's name until the jump actually
+     * confirmed. Setting it here closes the gap the same way
+     * currentSectionIndex already does, one line up. */
+    playbackSectionIndex = sectionIndex;
     dspLoopEnabled = false;
     if (perfFullSongLoaded && typeof host_module_set_param === "function") {
         /* Full song is already in the DSP and confirmed built -- this is a
@@ -8790,6 +8980,7 @@ function perfTick() {
             logDebug("perfTick: pad-flash click ended, starting song");
             perfClickPlaying = false;
             if (perfLoadSong(perfSongIndex)) {
+                perfObservedRunningSincePlay = false; /* see its declaration */
                 playCurrentSong();
             }
             perfAdvancePending = false;
@@ -8836,7 +9027,7 @@ function perfTick() {
      * the click-to-song transition. With the song preloaded into staging the
      * DSP auto-swaps; if staging wasn't ready for some reason, fall back to a
      * blocking rebuild. */
-    if (lastDspState && lastDspState.stopped_at_end) {
+    if (lastDspState && lastDspState.stopped_at_end && perfObservedRunningSincePlay) {
         if (perfClickPlaying && perfClickDsp) {
             logDebug("perfTick: DSP click end fallback");
             perfClickPlaying = false;
@@ -8844,6 +9035,7 @@ function perfTick() {
             if (!perfClickSongStaged) {
                 /* Staging wasn't ready: blocking rebuild (rare fallback). */
                 if (perfLoadSong(perfSongIndex)) {
+                    perfObservedRunningSincePlay = false; /* see its declaration */
                     playCurrentSong();
                     perfFullSongLoaded = true;
                 }
