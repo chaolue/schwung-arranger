@@ -8,7 +8,7 @@
  * confirmed from the logs (see init()/playCurrentSong()) instead of guessing
  * whether a new file actually loaded. Keep the DSP dsp_build_version in
  * arranger_engine.c in sync so both sides are verifiable. */
-const UI_BUILD_VERSION = "arranger-ui-2026-09-09c";
+const UI_BUILD_VERSION = "arranger-ui-2026-09-09g";
 
 import {
     MidiNoteOn, MidiNoteOff, MidiCC,
@@ -1068,6 +1068,7 @@ function instrumentForTrack(track) {
             octave: 3,
             follow_note: 0,
             voicing: "bass",
+            note_gap: 0.25,
             bars: []
         };
     }
@@ -1100,6 +1101,16 @@ function toggleInstrumentBar(inst, sectionIndex, barIndex) {
     const cur = bars[sectionIndex][barIndex] !== false;
     bars[sectionIndex][barIndex] = !cur;
     unsavedChanges = true;
+}
+
+/* Display label for the note-gap value (fraction of a beat). */
+function noteGapLabel(gap) {
+    if (!gap || gap <= 0) return "Off";
+    if (gap >= 1) return "1 beat";
+    if (gap >= 0.5) return "1/2";
+    if (gap >= 0.25) return "1/4";
+    if (gap >= 0.125) return "1/8";
+    return "1/16";
 }
 
 function resolveClipSource(source, folderName) {
@@ -1181,6 +1192,7 @@ function toEngineSongJson(song) {
             octave: (typeof inst.octave === "number") ? inst.octave : 3,
             follow_note: (typeof inst.follow_note === "number") ? inst.follow_note : 0,
             voicing: inst.voicing || "bass",
+            note_gap: (typeof inst.note_gap === "number") ? inst.note_gap : 0.25,
             /* Per-section per-bar on/off map: 1 = send chord, 0 = muted.
              * Bars are "on by default": only an explicit `false` mutes a bar;
              * an unset (undefined) bar sends. Serialize accordingly so the DSP
@@ -1266,6 +1278,7 @@ function toUiSong(engineLike) {
             octave: (typeof inst.octave === "number") ? inst.octave : 3,
             follow_note: (typeof inst.follow_note === "number") ? inst.follow_note : 0,
             voicing: inst.voicing || "bass",
+            note_gap: (typeof inst.note_gap === "number") ? inst.note_gap : 0.25,
             bars: (inst.bars || []).map(sec => (sec || []).map(b => !!b))
         }))
     };
@@ -4221,7 +4234,8 @@ function drawInstrument() {
         { key: "channel", label: "MIDI Channel", value: String(inst ? inst.channel : 1) },
         { key: "octave", label: "Octave", value: String(inst ? inst.octave : 3) },
         { key: "follow", label: "Follow Note", value: inst && inst.follow_note > 0 ? String(inst.follow_note) : "Off" },
-        { key: "voicing", label: "Voicing", value: inst && inst.voicing === "chord" ? "Chord" : "Bass" }
+        { key: "voicing", label: "Voicing", value: inst && inst.voicing === "chord" ? "Chord" : "Bass" },
+        { key: "gap", label: "Note Gap", value: noteGapLabel(inst ? inst.note_gap : 0.25) }
     ];
     drawMenuList({
         items,
@@ -4256,10 +4270,17 @@ function handleInstrumentInput(cc, value) {
                 inst.follow_note = Math.max(0, Math.min(127, inst.follow_note + delta));
             } else if (instrumentFocus === 5) {
                 inst.voicing = (inst.voicing === "chord") ? "bass" : "chord";
+            } else if (instrumentFocus === 6) {
+                /* Note gap: 0 = none, then 1/16, 1/8, 1/4, 1/2, 1 beat. */
+                const steps = [0, 0.0625, 0.125, 0.25, 0.5, 1.0];
+                const cur = (typeof inst.note_gap === "number") ? inst.note_gap : 0.25;
+                const idx = steps.indexOf(cur);
+                const newIdx = Math.max(0, Math.min(steps.length - 1, (idx < 0 ? 3 : idx) + delta));
+                inst.note_gap = steps[newIdx];
             }
             unsavedChanges = true;
         } else {
-            instrumentFocus = Math.max(0, Math.min(5, instrumentFocus + delta));
+            instrumentFocus = Math.max(0, Math.min(6, instrumentFocus + delta));
         }
         needsRedraw = true;
     } else if (cc === MoveMainButton && value > 0) {

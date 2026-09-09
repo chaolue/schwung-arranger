@@ -213,6 +213,7 @@ typedef struct {
     int octave;              /* octave offset applied to the emitted note */
     uint8_t follow_note;     /* drum note to follow (e.g. 36 = kick); 0 = off */
     uint8_t voicing;         /* 0 = bass (root/bass note), 1 = full chord */
+    double note_gap;         /* gap (fraction of a beat) between note-off and the next note-on; 0 = none */
     /* Per-section per-bar on/off map: 1 = send, 0 = muted. */
     uint8_t bars[MAX_SONG_SECTIONS][MAX_SECTION_BARS];
 } instrument_t;
@@ -252,6 +253,10 @@ static void clip_lookup_free(engine_t *e);
 static void parse_chords_and_instruments(const char *json, song_t *song);
 static void parse_section_chords(const char *arr, section_t *sec);
 static void parse_instrument_bars(const char *arr, instrument_t *inst);
+static void schedule_instrument_note_off(engine_t *e, int i, const instrument_t *inst,
+                                         uint32_t tick);
+static void fire_pending_instrument_notes_off(engine_t *e, uint32_t tick);
+static void emit_instruments_all_off(engine_t *e);
 
 /* One lightweight snapshot of a folder under library_root.
  * Clips are stored as a single concatenated buffer to keep the entry small.
@@ -537,6 +542,11 @@ typedef struct engine {
      * (avoiding stuck notes). */
     chord_t last_inst_chord[MAX_INSTRUMENTS];
     uint8_t last_inst_chord_set[MAX_INSTRUMENTS];
+    /* Deferred note-off: when a chord is emitted, its note-off is scheduled
+     * `note_gap` before the next note-on, so the previous note is cut short
+     * rather than the new note being delayed. */
+    uint32_t pending_off_tick[MAX_INSTRUMENTS];
+    uint8_t pending_off_set[MAX_INSTRUMENTS];
 
     /* Folder/song scan caches as fixed double-buffers. The worker scans into
      * slot [1 - active] and flips active when done; the audio thread only
@@ -1863,8 +1873,47 @@ static int tick_to_section_bar(const song_t *song, uint32_t tick,
     return -1;
 }
 
+/* Compare two chords for equality (both null = equal; both set with the same
+ * root/quality/bass = equal). */
+static int chord_equal(const chord_t *a, const chord_t *b) {
+    if (!a && !b) return 1;
+    if (!a || !b) return 0;
+    if (a->set != b->set) return 0;
+    if (!a->set) return 1;
+    return strcmp(a->root, b->root) == 0 &&
+           strcmp(a->quality, b->quality) == 0 &&
+           strcmp(a->bass, b->bass) == 0;
+}
+
+/* Total bars across all sections of the song. */
+static uint32_t song_total_bars(const song_t *song) {
+    uint32_t total = 0;
+    for (int s = 0; s < song->section_count; s++) {
+        uint32_t sec_bars = song->sections[s].bars;
+        if (sec_bars < 1) sec_bars = 1;
+        total += sec_bars;
+    }
+    return total;
+}
+
+/* Get the chord at an absolute bar (0-based across the whole song), or NULL. */
+static const chord_t *chord_at_abs_bar(const song_t *song, uint32_t abs_bar) {
+    uint32_t remaining = abs_bar;
+    for (int s = 0; s < song->section_count; s++) {
+        uint32_t sec_bars = song->sections[s].bars;
+        if (sec_bars < 1) sec_bars = 1;
+        if (remaining < sec_bars) {
+            return chord_at_bar(&song->sections[s], remaining);
+        }
+        remaining -= sec_bars;
+    }
+    return NULL;
+}
+
 /* Emit the chord for every enabled instrument at a given absolute tick. Used
- * at bar boundaries (follow_note == 0). */
+ * at bar boundaries (follow_note == 0). A chord is held across multiple bars:
+ * the note-on fires only when the chord changes, and the note-off is scheduled
+ * `note_gap` before the next chord change (or the song end). */
 static void emit_instruments_at_tick(engine_t *e, uint32_t tick) {
     if (!e || e->song.instrument_count == 0) return;
     uint32_t bar = 0;
@@ -1872,28 +1921,54 @@ static void emit_instruments_at_tick(engine_t *e, uint32_t tick) {
     if (sec_idx < 0) return;
     section_t *sec = &e->song.sections[sec_idx];
     const chord_t *ch = chord_at_bar(sec, bar);
-    arr_log("EMIT_INST tick=%u sec=%d bar=%u chord=%s", tick, sec_idx, bar,
-            (ch && ch->set) ? ch->root : "null");
+    uint32_t abs_bar = tick / e->ticks_per_bar;
+    uint32_t total_bars = song_total_bars(&e->song);
+    /* The chord at the next bar (or NULL past the song end). */
+    const chord_t *next_ch = (abs_bar + 1 < total_bars)
+        ? chord_at_abs_bar(&e->song, abs_bar + 1) : NULL;
+    arr_log("EMIT_INST tick=%u sec=%d bar=%u chord=%s next=%s", tick, sec_idx, bar,
+            (ch && ch->set) ? ch->root : "null",
+            (next_ch && next_ch->set) ? next_ch->root : "null");
     for (int i = 0; i < e->song.instrument_count && i < MAX_INSTRUMENTS; i++) {
         instrument_t *inst = &e->song.instruments[i];
         if (!inst->enabled) continue;
         if (inst->follow_note > 0) continue; /* follow-note instruments emit on the drum note */
         /* Respect the per-bar mute map (1 = send, 0 = muted). */
         if (bar < MAX_SECTION_BARS && inst->bars[sec_idx][bar] == 0) {
-            arr_log("EMIT_INST[%d] muted bar=%u", i, bar);
+            /* Muted: cut off any sounding note. */
+            if (e->last_inst_chord_set[i]) {
+                emit_instrument_chord_off(e, inst, &e->last_inst_chord[i]);
+                e->last_inst_chord_set[i] = 0;
+            }
+            e->pending_off_set[i] = 0;
             continue;
         }
-        /* Send note-offs for the previous chord before the new one. */
-        if (e->last_inst_chord_set[i]) {
-            emit_instrument_chord_off(e, inst, &e->last_inst_chord[i]);
-            e->last_inst_chord_set[i] = 0;
-        }
         if (ch && ch->set) {
-            emit_instrument_chord(e, inst, ch, 100);
-            e->last_inst_chord[i] = *ch;
-            e->last_inst_chord_set[i] = 1;
-            arr_log("EMIT_INST[%d] sent chord root=%s ch=%d oct=%d voicing=%d",
-                    i, ch->root, inst->channel, inst->octave, inst->voicing);
+            /* Emit a note-on only when the chord actually changes (a held
+             * chord stays on across multiple bars). */
+            if (!e->last_inst_chord_set[i] || !chord_equal(&e->last_inst_chord[i], ch)) {
+                emit_instrument_chord(e, inst, ch, 100);
+                e->last_inst_chord[i] = *ch;
+                e->last_inst_chord_set[i] = 1;
+                arr_log("EMIT_INST[%d] note-on root=%s ch=%d oct=%d voicing=%d",
+                        i, ch->root, inst->channel, inst->octave, inst->voicing);
+            }
+            /* Schedule the note-off `note_gap` before the next chord change
+             * (or the song end), so the note is cut short rather than the new
+             * note being delayed. */
+            if (!next_ch || !next_ch->set || !chord_equal(ch, next_ch)) {
+                uint32_t gap = (uint32_t)(inst->note_gap * e->ticks_per_beat);
+                uint32_t off_tick = (abs_bar + 1) * e->ticks_per_bar - gap;
+                if (off_tick <= tick) off_tick = tick + 1;
+                schedule_instrument_note_off(e, i, inst, off_tick);
+            }
+        } else {
+            /* No chord here: cut off any sounding note. */
+            if (e->last_inst_chord_set[i]) {
+                emit_instrument_chord_off(e, inst, &e->last_inst_chord[i]);
+                e->last_inst_chord_set[i] = 0;
+            }
+            e->pending_off_set[i] = 0;
         }
     }
 }
@@ -1909,11 +1984,54 @@ static void emit_instruments_all_off(engine_t *e) {
             emit_instrument_chord_off(e, inst, &e->last_inst_chord[i]);
             e->last_inst_chord_set[i] = 0;
         }
+        /* Drop any deferred note-off that hasn't fired yet. */
+        e->pending_off_set[i] = 0;
     }
 }
 
+/* Schedule the note-off for instrument i's currently-sounding chord to fire at
+ * `tick` (computed as the next note-on time minus note_gap), so the previous
+ * note is cut short rather than the new note being delayed. */
+static void schedule_instrument_note_off(engine_t *e, int i, const instrument_t *inst,
+                                         uint32_t tick) {
+    (void)inst;
+    e->pending_off_tick[i] = tick;
+    e->pending_off_set[i] = 1;
+}
+
+/* Fire any scheduled instrument note-offs whose tick has been reached by the
+ * playhead. Called each render block from advance_playhead. */
+static void fire_pending_instrument_notes_off(engine_t *e, uint32_t tick) {
+    if (!e) return;
+    for (int i = 0; i < e->song.instrument_count && i < MAX_INSTRUMENTS; i++) {
+        if (!e->pending_off_set[i]) continue;
+        if (e->pending_off_tick[i] > tick) continue;
+        instrument_t *inst = &e->song.instruments[i];
+        if (e->last_inst_chord_set[i]) {
+            emit_instrument_chord_off(e, inst, &e->last_inst_chord[i]);
+            e->last_inst_chord_set[i] = 0;
+        }
+        e->pending_off_set[i] = 0;
+        arr_log("EMIT_INST[%d] note-off (deferred) tick=%u", i, tick);
+    }
+}
+
+/* Find the tick of the next note-on with the given note number at or after
+ * `from_tick` in the assembled timeline. Returns 0 if none (past the end). */
+static uint32_t find_next_note_on_tick(engine_t *e, uint8_t note, uint32_t from_tick) {
+    for (int c = e->event_cursor; c < e->timeline_count; c++) {
+        const smf_event_t *ev = &e->timeline[c];
+        if (ev->tick < from_tick) continue;
+        if ((ev->status & 0xF0) == 0x90 && ev->data2 > 0 && ev->data1 == note) {
+            return ev->tick;
+        }
+    }
+    return 0;
+}
+
 /* Emit the chord for follow-note instruments when a matching drum note-on
- * fires. Called from the event drain path. */
+ * fires. Called from the event drain path. The note is held until the next
+ * matching drum hit, cut short by `note_gap` before it (or the song end). */
 static void emit_instruments_follow(engine_t *e, uint8_t note, uint32_t tick) {
     if (!e || e->song.instrument_count == 0) return;
     uint32_t bar = 0;
@@ -1926,7 +2044,25 @@ static void emit_instruments_follow(engine_t *e, uint8_t note, uint32_t tick) {
         if (!inst->enabled) continue;
         if (inst->follow_note == 0 || inst->follow_note != note) continue;
         if (bar < MAX_SECTION_BARS && inst->bars[sec_idx][bar] == 0) continue;
-        if (ch && ch->set) emit_instrument_chord(e, inst, ch, 100);
+        if (ch && ch->set) {
+            /* Fire the new note-on immediately (on the drum hit). */
+            emit_instrument_chord(e, inst, ch, 100);
+            e->last_inst_chord[i] = *ch;
+            e->last_inst_chord_set[i] = 1;
+            /* Hold until the next matching drum hit, cut short by note_gap.
+             * If there is no next hit, hold until the song end. */
+            uint32_t gap = (uint32_t)(inst->note_gap * e->ticks_per_beat);
+            uint32_t next = find_next_note_on_tick(e, note, tick + 1);
+            uint32_t off_tick;
+            if (next > 0) {
+                off_tick = (next > gap) ? (next - gap) : next;
+            } else {
+                off_tick = e->timeline_end_tick;
+            }
+            if (off_tick > tick) {
+                schedule_instrument_note_off(e, i, inst, off_tick);
+            }
+        }
     }
 }
 
@@ -2226,6 +2362,8 @@ static void parse_chords_and_instruments(const char *json, song_t *song) {
                     if (json_get_string_at(p, "voicing", v, sizeof(v))) {
                         inst->voicing = (strcmp(v, "chord") == 0) ? 1 : 0;
                     }
+                } else if (strncmp(p + 1, "note_gap", 8) == 0) {
+                    double v; if (json_get_double_at(p, "note_gap", &v)) inst->note_gap = v;
                 } else if (strncmp(p + 1, "bars", 4) == 0) {
                     /* "bars": [[1,0,...], [1,1,...], ...] — per-section arrays. */
                     const char *bars_arr = strchr(p + 4, '[');
@@ -2247,6 +2385,7 @@ static void parse_chords_and_instruments(const char *json, song_t *song) {
                 inst->channel = 0;
                 inst->octave = 3;
                 inst->voicing = 0;
+                inst->note_gap = 0.25; /* default: 1/4 beat gap between note-off and note-on */
                 /* Bars are "on by default" (send the chord). A bar is only
                  * muted when the JSON explicitly sets it to 0. Initialise the
                  * whole map to 1 so an instrument with no per-bar toggles (or
@@ -3260,6 +3399,8 @@ static void handle_loop_or_stop(engine_t *e, uint32_t *target) {
                 e->running = 0;
                 e->stopped_at_end = 1;
                 emit_all_notes_off(e);
+                /* Cut off any instrument chord notes still sounding. */
+                emit_instruments_all_off(e);
                 if (e->playhead_tick > e->timeline_end_tick) e->playhead_tick = e->timeline_end_tick;
             }
         }
@@ -3480,6 +3621,9 @@ static void advance_playhead(engine_t *e, int frames, int sample_rate) {
     handle_loop_or_stop(e, &target);
 
     e->playhead_tick = target;
+    /* Fire any scheduled instrument note-offs whose tick has been reached
+     * (the note_gap before the next note-on, cutting the previous note short). */
+    fire_pending_instrument_notes_off(e, e->playhead_tick);
     update_bar_counter(e);
 }
 
@@ -3499,7 +3643,7 @@ static void engine_clear_error(engine_t *e) {
 
 /* DSP build version stamp. Keep in sync with UI_BUILD_VERSION in ui.js so the
  * running dsp.so can be confirmed from .dsp_log on module load. */
-static const char *const DSP_BUILD_VERSION = "arranger-dsp-2026-09-09c";
+static const char *const DSP_BUILD_VERSION = "arranger-dsp-2026-09-09g";
 
 static void* arr_create_instance(const char *module_dir, const char *config_json) {
     (void)module_dir;
@@ -3810,7 +3954,10 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
         e->last_playhead_tick = 0;
         e->tick_remainder = 0.0;
         e->last_bar = 0;
-        for (int i = 0; i < MAX_INSTRUMENTS; i++) e->last_inst_chord_set[i] = 0;
+        for (int i = 0; i < MAX_INSTRUMENTS; i++) {
+            e->last_inst_chord_set[i] = 0;
+            e->pending_off_set[i] = 0;
+        }
         e->flash_end_tick = initial_flash_end_tick(e);
         queue_clear(e);
         /* Emit the first bar's chord immediately (update_bar_counter only
@@ -3843,7 +3990,10 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
         e->last_playhead_tick = 0;
         e->tick_remainder = 0.0;
         e->last_bar = (uint32_t)bar;
-        for (int i = 0; i < MAX_INSTRUMENTS; i++) e->last_inst_chord_set[i] = 0;
+        for (int i = 0; i < MAX_INSTRUMENTS; i++) {
+            e->last_inst_chord_set[i] = 0;
+            e->pending_off_set[i] = 0;
+        }
         e->flash_end_tick = initial_flash_end_tick(e);
         queue_clear(e);
         /* Emit the chord for the bar playback starts on. */
