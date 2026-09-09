@@ -19,9 +19,9 @@ import {
     MoveStep1, MoveStep16,
     MovePad1, MovePad32,
     MoveRow1, MoveRow2, MoveRow3, MoveRow4,
-    Black, White, BrightRed,
+    Black, White, BrightRed, DarkGrey,
     WhiteLedOff, WhiteLedDim, WhiteLedBright,
-    AzureBlue, DarkAzure,
+    AzureBlue, BrightYellow, Purple,
     MovePads, MoveSteps
 } from '/data/UserData/schwung/shared/constants.mjs';
 
@@ -129,6 +129,11 @@ const TRACK_CHORD = 1;
 const TRACK_INSTRUMENT_1 = 2;
 const TRACK_INSTRUMENT_2 = 3;
 
+/* Move Row button CC and colour per track, indexed by TRACK_DRUM/CHORD/
+ * INSTRUMENT_1/2, so the Row buttons show which track is selected. */
+const TRACK_ROW_CC = [MoveRow1, MoveRow2, MoveRow3, MoveRow4];
+const TRACK_ROW_COLOUR = [White, AzureBlue, BrightYellow, Purple];
+
 /* The 12 major keys, in chromatic order. Each entry is the tonic note name. */
 const KEYS = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 
@@ -160,10 +165,18 @@ const CHORD_INTERVALS = {
     "sus4": [0, 5, 7]
 };
 
-/* Display label for a chord quality (used in the picker and on the display). */
+/* Display label for a chord quality (used to render a compact chord name,
+ * e.g. "Cm7" or "C" for a plain major — hence "maj" being blank). */
 const CHORD_QUALITY_LABEL = {
     "maj": "", "min": "m", "dim": "dim", "aug": "aug", "7": "7",
     "m7": "m7", "maj7": "maj7", "dim7": "dim7", "sus2": "sus2", "sus4": "sus4"
+};
+
+/* Full-word label for the chord picker's Type row, where a blank ("maj") is
+ * ambiguous rather than a compact chord-name shorthand. */
+const CHORD_TYPE_LABEL = {
+    "maj": "Major", "min": "Minor", "dim": "Dim", "aug": "Aug", "7": "7th",
+    "m7": "Min7", "maj7": "Maj7", "dim7": "Dim7", "sus2": "Sus2", "sus4": "Sus4"
 };
 
 /* The 12 note names, used to render a chord's root/bass. */
@@ -320,7 +333,13 @@ let chordPickBar = -1;
 let chordPickDegree = 0;      /* 0-based scale degree (0..6) */
 let chordPickQuality = 0;     /* index into CHORD_QUALITIES */
 let chordPickBass = -1;       /* index into BASS_NOTES, -1 = no slash bass */
-let chordPickFocus = 0;       /* 0 = degree, 1 = quality, 2 = bass */
+let chordPickFocus = 0;       /* 0 = root, 1 = type, 2 = bass, 3 = add/delete */
+let chordPickEditing = false;
+/* Whether a chord actually exists for the bar being edited (either it was
+ * already set, or the user has started setting one this session). While
+ * false the picker shows no values and Back discards without committing, so
+ * simply opening the picker and backing out never creates a chord. */
+let chordPickHasChord = false;
 /* Instrument track being edited (TRACK_INSTRUMENT_1 or _2), or -1. */
 let instrumentEditTrack = -1;
 let instrumentFocus = 0;
@@ -2516,36 +2535,21 @@ function updateButtonLEDs() {
             case VIEW_BUILDER: {
                 const ledLocked = songIsLocked();
                 /* Use the displayed section (auto-followed/jumped during
-                 * playback) so copy/delete light up for the live section's
-                 * clips, not the stale currentSectionIndex. */
-                const ledSec = currentSong ? currentSong.sections[builderDisplaySectionIndex()] : null;
-                const ledOnClip = ledSec && builderCursor >= 0 && builderCursor < ledSec.clips.length;
-                const ledOnSection = builderCursor === -1;
-                const ledOnInsert = ledSec && ledSec.clips.length === 0 && builderCursor === 0;
-                /* Use the displayed section (auto-followed/jumped during
                  * playback) so the left/right arrow LEDs reflect the section
                  * actually shown, not the stale currentSectionIndex. */
+                const ledSec = currentSong ? currentSong.sections[builderDisplaySectionIndex()] : null;
                 const ledSectionIndex = builderDisplaySectionIndex();
                 const ledHasLeftSection = !!(currentSong && ledSectionIndex > 0);
                 const ledHasRightSection = !!(currentSong && currentSong.sections && ledSectionIndex < currentSong.sections.length - 1);
-                const ledTotalPages = builderPageCount();
-                const ledHasUp = builderPage > 0;
-                const ledHasDown = builderPage < ledTotalPages - 1;
                 active.set(MoveBack, WhiteLedBright);
-                active.set(MoveMainButton, WhiteLedBright);
                 active.set(MoveMenu, WhiteLedBright);
                 if (!ledLocked) active.set(MoveRecord, PureBlue); /* change the source folder */
-                /* Loop, Copy, and Delete do nothing on a locked song, so keep
-                 * them black (not added to the active map). */
-                if (!ledLocked) {
-                    if (ledOnClip) active.set(MoveCopy, WhiteLedBright);
-                    else if (ledOnSection || ledOnInsert) active.set(MoveCopy, WhiteLedDim);
-                    active.set(MoveLoop, WhiteLedDim);
-                    if (ledOnClip) active.set(MoveDelete, WhiteLedBright);
-                    else if (ledOnSection || ledOnInsert) active.set(MoveDelete, WhiteLedDim);
+                /* Row buttons: the selected track's row lights up in its
+                 * colour; the others stay light grey — the same grey used for
+                 * an available-but-unset bar on the chord/instrument steps. */
+                for (let t = 0; t < TRACK_ROW_CC.length; t++) {
+                    active.set(TRACK_ROW_CC[t], t === builderTrack ? TRACK_ROW_COLOUR[t] : DarkGrey);
                 }
-                if (ledHasDown) active.set(MoveUp, WhiteLedBright);
-                if (ledHasUp) active.set(MoveDown, WhiteLedBright);
                 if (ledHasLeftSection) active.set(MoveLeft, WhiteLedBright);
                 if (ledHasRightSection) active.set(MoveRight, WhiteLedBright);
                 /* Play stays red while playing; when stopped it is green only
@@ -2556,31 +2560,55 @@ function updateButtonLEDs() {
                 } else if (ledSec && ledSec.clips.length > 0) {
                     active.set(MovePlay, PureGreen);
                 }
-                if (!ledLocked) {
-                    /* Shift does nothing on a locked song (all its alternate
-                     * actions are blocked), so leave it black. */
-                    active.set(MoveShift, WhiteLedDim);
-                    if (shiftHeld) {
+                /* The clip-editing controls (main button, copy, loop, delete,
+                 * page up/down) only apply to the Drum track; the Chord and
+                 * Instrument tracks don't use them, so leave them unlit and
+                 * skip the locked/shift variants below for those tracks. */
+                if (builderTrack === TRACK_DRUM) {
+                    const ledOnClip = ledSec && builderCursor >= 0 && builderCursor < ledSec.clips.length;
+                    const ledOnSection = builderCursor === -1;
+                    const ledOnInsert = ledSec && ledSec.clips.length === 0 && builderCursor === 0;
+                    const ledTotalPages = builderPageCount();
+                    const ledHasUp = builderPage > 0;
+                    const ledHasDown = builderPage < ledTotalPages - 1;
+                    active.set(MoveMainButton, WhiteLedBright);
+                    /* Loop, Copy, and Delete do nothing on a locked song, so keep
+                     * them black (not added to the active map). */
+                    if (!ledLocked) {
+                        if (ledOnClip) active.set(MoveCopy, WhiteLedBright);
+                        else if (ledOnSection || ledOnInsert) active.set(MoveCopy, WhiteLedDim);
+                        active.set(MoveLoop, WhiteLedDim);
+                        if (ledOnClip) active.set(MoveDelete, WhiteLedBright);
+                        else if (ledOnSection || ledOnInsert) active.set(MoveDelete, WhiteLedDim);
+                    }
+                    if (ledHasDown) active.set(MoveUp, WhiteLedBright);
+                    if (ledHasUp) active.set(MoveDown, WhiteLedBright);
+                    if (!ledLocked) {
+                        /* Shift does nothing on a locked song (all its alternate
+                         * actions are blocked), so leave it black. */
+                        active.set(MoveShift, WhiteLedDim);
+                        if (shiftHeld) {
+                            active.set(MoveShift, WhiteLedBright);
+                            active.set(MoveMainButton, WhiteLedBright);
+                            /* Shift+Copy / Shift+Delete / Shift+Loop / Shift+Left /
+                             * Shift+Right act on the whole section, so they stay
+                             * lit anywhere. */
+                            active.set(MoveCopy, WhiteLedBright);
+                            active.set(MoveLoop, WhiteLedBright);
+                            if (ledHasLeftSection) active.set(MoveLeft, WhiteLedBright);
+                            if (ledHasRightSection) active.set(MoveRight, WhiteLedBright);
+                            active.set(MoveDelete, WhiteLedBright);
+                            active.set(MovePlay, PureGreen);
+                        }
+                    } else if (shiftHeld) {
                         active.set(MoveShift, WhiteLedBright);
                         active.set(MoveMainButton, WhiteLedBright);
-                        /* Shift+Copy / Shift+Delete / Shift+Loop / Shift+Left /
-                         * Shift+Right act on the whole section, so they stay
-                         * lit anywhere. */
-                        active.set(MoveCopy, WhiteLedBright);
-                        active.set(MoveLoop, WhiteLedBright);
-                        if (ledHasLeftSection) active.set(MoveLeft, WhiteLedBright);
-                        if (ledHasRightSection) active.set(MoveRight, WhiteLedBright);
-                        active.set(MoveDelete, WhiteLedBright);
+                        /* Shift+Copy / Shift+Delete / Shift+Loop are inert on a
+                         * locked song, so leave them black. Shift+Left/Right
+                         * (reorder sections) are also blocked but keep their
+                         * dim/bright hints per section availability. */
                         active.set(MovePlay, PureGreen);
                     }
-                } else if (shiftHeld) {
-                    active.set(MoveShift, WhiteLedBright);
-                    active.set(MoveMainButton, WhiteLedBright);
-                    /* Shift+Copy / Shift+Delete / Shift+Loop are inert on a
-                     * locked song, so leave them black. Shift+Left/Right
-                     * (reorder sections) are also blocked but keep their
-                     * dim/bright hints per section availability. */
-                    active.set(MovePlay, PureGreen);
                 }
                 break;
             }
@@ -2727,9 +2755,17 @@ const GROOVE_VARIATION_COLOURS = [11, 12, 13, 14]; /* Neon Green, Teal Green, Mu
  * the 16 step buttons, indicating there are additional bars to scroll to. */
 const MORE_BARS_COLOUR = 45; /* Muted Blue — distinct from clip colours */
 
-/* Chord/instrument track step LED colours. */
-const CHORD_COLOUR = AzureBlue;      /* bar has a chord set */
-const CHORD_DIM_COLOUR = DarkAzure;  /* chord set but muted for this instrument */
+/* The palette's very-dark partner for a base hue colour 1-26 is base*2 + 64
+ * (e.g. 16 Azure Blue -> 96 Very Dark Azure), one tier darker than the mid
+ * "dim" partner (base*2 + 63). Used throughout for a muted/disabled state. */
+function veryDarkPartner(base) {
+    return base * 2 + 64;
+}
+
+/* Chord/instrument track step LED colour: the bar colour matches the
+ * selected track's Row button colour (see TRACK_ROW_COLOUR), and the muted
+ * (chord exists but off for this instrument) colour is its very-dark
+ * partner. */
 
 /* Pure palette colours (indexed 0-127) used for transport/state LEDs. */
 const PureGreen = 126;   /* solid green */
@@ -2742,18 +2778,18 @@ const DarkGrey = 119;    /* inactive-song grey */
  * the steps). Previously the click pad/steps used inconsistent colours
  * (grey/green/light-red) depending on state. */
 const CLICK_COLOUR = 16;       /* Azure Blue */
-const CLICK_DIM_COLOUR = 16 * 2 + 63; /* dim partner (95) */
+const CLICK_DIM_COLOUR = veryDarkPartner(CLICK_COLOUR); /* Very Dark Azure (96) */
 
 /* Instrument variation colour (hat/stick/ride/clap). Returns -1 if the name
  * has no instrument keyword. Used so variation grooves and fills share a
- * colour that stands out from plain section clips. The dim partner for a
- * colour in 1-26 is base*2 + 63 (e.g. colour 2 -> 67, colour 12 -> 87). */
+ * colour that stands out from plain section clips. The very-dark partner for
+ * a colour in 1-26 is base*2 + 64 (e.g. colour 2 -> 68, colour 12 -> 88). */
 function instrumentColor(name, dim) {
     const lower = (name || "").toLowerCase();
-    if (lower.includes("hat")) return dim ? 15 * 2 + 63 : 15;    /* Teal-Cyan (avoid a red close to PureRed) */
-    if (lower.includes("stick")) return dim ? 5 * 2 + 63 : 5;  /* Light Yellow */
-    if (lower.includes("ride")) return dim ? 20 * 2 + 63 : 20;  /* Electric Violet */
-    if (lower.includes("clap")) return dim ? 25 * 2 + 63 : 25;  /* Bright Pink */
+    if (lower.includes("hat")) return dim ? 15 * 2 + 64 : 15;    /* Teal-Cyan (avoid a red close to PureRed) */
+    if (lower.includes("stick")) return dim ? 5 * 2 + 64 : 5;  /* Light Yellow */
+    if (lower.includes("ride")) return dim ? 20 * 2 + 64 : 20;  /* Electric Violet */
+    if (lower.includes("clap")) return dim ? 25 * 2 + 64 : 25;  /* Bright Pink */
     return -1;
 }
 
@@ -2774,11 +2810,11 @@ const SECTION_BASE_COLOUR = {
     groove: 11      /* Neon Green (generic) */
 };
 
-/* Colour for a section type. The dim partner for a base colour in 1-26 is
- * base*2 + 63 (e.g. intro 3 Bright Orange -> 69 Burnt Sienna, not red). */
+/* Colour for a section type. The very-dark partner for a base colour in 1-26
+ * is base*2 + 64 (e.g. intro 3 Bright Orange -> 70 Dark Brown, not red). */
 function sectionColor(type, dim) {
     const base = SECTION_BASE_COLOUR[type] !== undefined ? SECTION_BASE_COLOUR[type] : 11;
-    return dim ? base * 2 + 63 : base;
+    return dim ? base * 2 + 64 : base;
 }
 
 /* A clip that matches no named section (intro/verse/prechorus/chorus/bridge/
@@ -2806,14 +2842,14 @@ function genericColourIndex(name) {
  * section colour, identical for a groove and its fill. A generic clip (no
  * matching section or instrument) picks a colour from GENERIC_COLOURS. */
 function clipColor(clip, dim) {
-    if (!clip) return dim ? GROOVE_DIM_COLOUR : GROOVE_COLOUR_BASE;
+    if (!clip) return dim ? GROOVE_DARK_COLOUR : GROOVE_COLOUR_BASE;
     const inst = instrumentColor(clip.name, dim);
     if (inst >= 0) return inst;
     const name = clip.name || clip.path || "";
     const section = inferSectionFromFilename(name);
     if (section === "") {
         const base = GENERIC_COLOURS[genericColourIndex(name)];
-        return dim ? base * 2 + 63 : base;
+        return dim ? base * 2 + 64 : base;
     }
     /* Use the section type inferred from the name (intro/verse/chorus/...),
      * not clip.type. Fills always have type "fill" even when their name is a
@@ -2859,6 +2895,9 @@ function builderPadColorForIndex(index) {
 
 function drawBuilderLEDs() {
     clearPadLEDs();
+    /* The 32 clip pads are Drum-track only; leave them unlit for Chord and
+     * Instrument tracks. */
+    if (builderTrack !== TRACK_DRUM) return;
     logDebug("drawBuilderLEDs page=" + builderPage + " grooves=" + grooveClips.length + " fills=" + fillClips.length);
     for (let i = 0; i < NUM_PADS; i++) {
         const slot = builderSlotForPad(i);
@@ -3727,14 +3766,16 @@ function updateLEDs() {
     let leavingStepView = false;
     if (currentView !== lastLedView) {
         /* Changing views needs a full pad refresh. Step LEDs only matter in
-         * builder/performance/jam; leaving either should turn them off so they
-         * don't stay stuck showing the last song/section. */
-        if (currentView === VIEW_BUILDER || currentView === VIEW_PERFORMANCE || currentView === VIEW_JAM ||
-            lastLedView === VIEW_BUILDER || lastLedView === VIEW_PERFORMANCE || lastLedView === VIEW_JAM) {
+         * builder/performance/jam (and the chord-pick submenu, which keeps
+         * showing the chord track's bar LEDs underneath it); leaving that
+         * family should turn them off so they don't stay stuck showing the
+         * last song/section. */
+        if (currentView === VIEW_BUILDER || currentView === VIEW_PERFORMANCE || currentView === VIEW_JAM || currentView === VIEW_CHORD_PICK ||
+            lastLedView === VIEW_BUILDER || lastLedView === VIEW_PERFORMANCE || lastLedView === VIEW_JAM || lastLedView === VIEW_CHORD_PICK) {
             stepLedsDirty = true;
         }
-        if ((lastLedView === VIEW_BUILDER || lastLedView === VIEW_PERFORMANCE || lastLedView === VIEW_JAM) &&
-            currentView !== VIEW_BUILDER && currentView !== VIEW_PERFORMANCE && currentView !== VIEW_JAM) {
+        if ((lastLedView === VIEW_BUILDER || lastLedView === VIEW_PERFORMANCE || lastLedView === VIEW_JAM || lastLedView === VIEW_CHORD_PICK) &&
+            currentView !== VIEW_BUILDER && currentView !== VIEW_PERFORMANCE && currentView !== VIEW_JAM && currentView !== VIEW_CHORD_PICK) {
             leavingStepView = true;
             stepLedsDirty = false;
         }
@@ -3795,7 +3836,7 @@ function updateLEDs() {
     } else if (currentView === VIEW_JAM) {
         drawJamStepLEDs(forceSteps);
         stepLedsDirty = false;
-    } else if (currentView === VIEW_BUILDER && builderTrack !== TRACK_DRUM) {
+    } else if ((currentView === VIEW_BUILDER || currentView === VIEW_CHORD_PICK) && builderTrack !== TRACK_DRUM) {
         drawChordStepLEDs(forceSteps);
         stepLedsDirty = false;
     } else if (currentView === VIEW_BUILDER || currentView === VIEW_PERFORMANCE) {
@@ -3805,9 +3846,16 @@ function updateLEDs() {
 }
 
 /* Draw the step LEDs for the chord/instrument track. Each step maps to a bar
- * of the current section (same scroll window as the drum track). A bar with a
- * chord set lights up; the cursor bar flashes. In an instrument track, bars
- * where the chord is muted are dimmed/off. */
+ * of the current section (same scroll window as the drum track).
+ *
+ * Chord track: light grey for a bar available from the drum track with no
+ * chord set, white for the selected (cursor) bar, coloured for a bar with a
+ * chord set.
+ *
+ * Instrument track: grey with no chord on the bar, coloured when the chord
+ * sends on this instrument, dimmed coloured when it's muted for this
+ * instrument. The cursor bar isn't highlighted white here — colour alone
+ * conveys state, since white is reserved for the chord track's selection. */
 function drawChordStepLEDs(force) {
     const secIndex = chordDisplaySectionIndex();
     const sec = currentSong ? currentSong.sections[secIndex] : null;
@@ -3821,6 +3869,8 @@ function drawChordStepLEDs(force) {
     if (stepScrollOffset < 0) stepScrollOffset = 0;
     const inst = (builderTrack === TRACK_INSTRUMENT_1 || builderTrack === TRACK_INSTRUMENT_2)
         ? instrumentForTrack(builderTrack) : null;
+    /* Match the bar colour to the selected track's Row button colour. */
+    const trackColour = TRACK_ROW_COLOUR[builderTrack];
     for (let s = 0; s < NUM_STEPS; s++) {
         const barIndex = stepScrollOffset + s;
         if (barIndex >= totalBars) {
@@ -3828,18 +3878,20 @@ function drawChordStepLEDs(force) {
             continue;
         }
         const chord = chordAtBar(sec, barIndex);
-        let on = !!chord;
-        if (inst && chord) on = instrumentBarOn(inst, secIndex, barIndex);
-        if (barIndex === chordCursorBar) {
-            /* Cursor bar: flash white. */
+        if (inst) {
+            if (!chord) {
+                stepColor(s, DarkGrey, force);
+            } else if (instrumentBarOn(inst, secIndex, barIndex)) {
+                stepColor(s, trackColour, force);
+            } else {
+                stepColor(s, veryDarkPartner(trackColour), force);
+            }
+        } else if (barIndex === chordCursorBar) {
             stepColor(s, White, force);
-        } else if (on) {
-            stepColor(s, CHORD_COLOUR, force);
-        } else if (chord && inst) {
-            /* A chord exists but is muted for this instrument: dim. */
-            stepColor(s, CHORD_DIM_COLOUR, force);
+        } else if (chord) {
+            stepColor(s, trackColour, force);
         } else {
-            stepColor(s, Black, force);
+            stepColor(s, DarkGrey, force);
         }
     }
 }
@@ -4122,7 +4174,7 @@ function drawInstrumentTrack() {
  * that bar. */
 function handleStepPress(stepIndex, velocity) {
     if (velocity === 0) return;
-    if (currentView !== VIEW_BUILDER) return;
+    if (currentView !== VIEW_BUILDER && currentView !== VIEW_CHORD_PICK) return;
     if (builderTrack === TRACK_DRUM) return;
     const secIndex = chordDisplaySectionIndex();
     const sec = currentSong ? currentSong.sections[secIndex] : null;
@@ -4130,6 +4182,11 @@ function handleStepPress(stepIndex, velocity) {
     const totalBars = sectionChordBars(sec);
     const barIndex = stepScrollOffset + stepIndex;
     if (barIndex < 0 || barIndex >= totalBars) return;
+    if (currentView === VIEW_CHORD_PICK) {
+        /* Switching bars from within the picker: commit the bar being left
+         * (if a chord was set for it), then load the newly pressed bar. */
+        commitChordPick();
+    }
     chordCursorBar = barIndex;
     if (builderTrack === TRACK_CHORD) {
         openChordPick(barIndex);
@@ -4146,7 +4203,8 @@ function handleStepPress(stepIndex, velocity) {
 
 /* Open the chord picker for a bar. degree/quality/bass are initialised from
  * the existing chord (if any) or the diatonic default for the bar's scale
- * degree. */
+ * degree. If the picker is already open (switching bars via a step press),
+ * reuse the current view/menu frame instead of pushing a new one. */
 function openChordPick(barIndex) {
     const secIndex = chordDisplaySectionIndex();
     const sec = currentSong ? currentSong.sections[secIndex] : null;
@@ -4172,12 +4230,16 @@ function openChordPick(barIndex) {
     } else {
         /* Default to the diatonic chord for the bar's scale degree. */
         chordPickDegree = barIndex % 7;
-        chordPickQuality = 0;
+        chordPickQuality = CHORD_QUALITIES.indexOf(DIATONIC_QUALITY[chordPickDegree]);
         chordPickBass = -1;
     }
+    chordPickHasChord = !!existing;
     chordPickFocus = 0;
-    currentView = VIEW_CHORD_PICK;
-    menuStack.push({ title: "Chord", selectedIndex: 0 });
+    chordPickEditing = false;
+    if (currentView !== VIEW_CHORD_PICK) {
+        currentView = VIEW_CHORD_PICK;
+        menuStack.push({ title: "Chord", selectedIndex: 0 });
+    }
     needsRedraw = true;
 }
 
@@ -4190,16 +4252,28 @@ function chordPickChord() {
     return chord;
 }
 
+/* Save the picker's chord to the bar it's currently showing, but only if a
+ * chord actually exists for it (see chordPickHasChord) — otherwise merely
+ * having opened/viewed the picker would silently create a chord. */
+function commitChordPick() {
+    const secIndex = chordDisplaySectionIndex();
+    const sec = currentSong ? currentSong.sections[secIndex] : null;
+    if (sec && chordPickHasChord) setChordAtBar(sec, chordPickBar, chordPickChord());
+}
+
 function drawChordPick() {
     const key = currentSong ? (currentSong.key || DEFAULT_KEY) : DEFAULT_KEY;
-    const chord = chordPickChord();
     drawMenuHeader("Chord (bar " + (chordPickBar + 1) + ")", key);
     const degreeNames = ["I", "ii", "iii", "IV", "V", "vi", "vii°"];
-    const items = [
-        { key: "degree", label: "Degree", value: degreeNames[chordPickDegree] + " (" + diatonicChord(key, chordPickDegree).root + ")" },
-        { key: "quality", label: "Quality", value: CHORD_QUALITY_LABEL[CHORD_QUALITIES[chordPickQuality]] || "maj" },
+    /* Root/Type/Bass only make sense once a chord exists for this bar; until
+     * then the only option is to add one. */
+    const items = chordPickHasChord ? [
+        { key: "root", label: "Root", value: degreeNames[chordPickDegree] + " (" + diatonicChord(key, chordPickDegree).root + ")" },
+        { key: "type", label: "Type", value: CHORD_TYPE_LABEL[CHORD_QUALITIES[chordPickQuality]] || "Major" },
         { key: "bass", label: "Bass", value: chordPickBass >= 0 ? BASS_NOTES[chordPickBass] : "—" },
-        { key: "clear", label: "Delete Chord", value: "" }
+        { key: "toggle", label: "Delete Chord", value: "" }
+    ] : [
+        { key: "toggle", label: "Add Chord", value: "" }
     ];
     drawMenuList({
         items,
@@ -4207,50 +4281,74 @@ function drawChordPick() {
         getLabel: (item) => item.label,
         getValue: (item) => item.value,
         valueAlignRight: true,
+        editMode: chordPickEditing,
         labelGap: 2,
+        prioritizeSelectedValue: true,
         listArea: { topY: LIST_TOP_Y, bottomY: LIST_INDICATOR_BOTTOM_Y }
     });
-    /* Show the resulting chord label at the bottom. */
-    print(2, LIST_INDICATOR_BOTTOM_Y + 2, "= " + chordLabel(chord), 1);
+    /* Show the resulting chord label at the bottom, only once a chord exists. */
+    print(2, LIST_INDICATOR_BOTTOM_Y + 2, "= " + (chordPickHasChord ? chordLabel(chordPickChord()) : "—"), 1);
 }
 
 function handleChordPickInput(cc, value) {
+    /* The last item is the Add/Delete Chord action row: index 0 when no
+     * chord exists yet (it's the only row), else index 3. */
+    const actionIndex = chordPickHasChord ? 3 : 0;
     if (cc === MoveMainKnob) {
         const delta = decodeDelta(value);
-        if (chordPickFocus === 0) {
-            chordPickDegree = ((chordPickDegree + delta) % 7 + 7) % 7;
-        } else if (chordPickFocus === 1) {
-            chordPickQuality = Math.max(0, Math.min(CHORD_QUALITIES.length - 1, chordPickQuality + delta));
-        } else if (chordPickFocus === 2) {
-            chordPickBass = Math.max(-1, Math.min(BASS_NOTES.length - 1, chordPickBass + delta));
+        if (chordPickEditing) {
+            if (chordPickFocus === 0) {
+                chordPickDegree = ((chordPickDegree + delta) % 7 + 7) % 7;
+                /* Changing the root re-picks the diatonic default type for its
+                 * place in the key and drops any slash bass, so e.g. moving
+                 * off a customised Dm lands on the new root's plain default
+                 * rather than carrying the old customisation over. */
+                chordPickQuality = CHORD_QUALITIES.indexOf(DIATONIC_QUALITY[chordPickDegree]);
+                chordPickBass = -1;
+            } else if (chordPickFocus === 1) {
+                chordPickQuality = Math.max(0, Math.min(CHORD_QUALITIES.length - 1, chordPickQuality + delta));
+            } else if (chordPickFocus === 2) {
+                chordPickBass = Math.max(-1, Math.min(BASS_NOTES.length - 1, chordPickBass + delta));
+            }
         } else {
-            chordPickFocus = Math.max(0, Math.min(3, chordPickFocus + delta));
+            chordPickFocus = Math.max(0, Math.min(actionIndex, chordPickFocus + delta));
         }
         needsRedraw = true;
     } else if (cc === MoveMainButton && value > 0) {
-        if (chordPickFocus === 3) {
-            /* Delete the chord on this bar. */
-            const secIndex = chordDisplaySectionIndex();
-            const sec = currentSong ? currentSong.sections[secIndex] : null;
-            if (sec) setChordAtBar(sec, chordPickBar, null);
+        if (chordPickFocus === actionIndex) {
+            if (chordPickHasChord) {
+                /* Delete the chord on this bar. */
+                const secIndex = chordDisplaySectionIndex();
+                const sec = currentSong ? currentSong.sections[secIndex] : null;
+                if (sec) setChordAtBar(sec, chordPickBar, null);
+                menuStack.pop();
+                currentView = VIEW_BUILDER;
+                stepLedsDirty = true;
+                needsRedraw = true;
+                return;
+            }
+            /* Materialize the default diatonic chord for this bar so its
+             * Root/Type/Bass can be reviewed or adjusted before committing. */
+            chordPickHasChord = true;
+            chordPickFocus = 0;
+            needsRedraw = true;
+            return;
+        }
+        chordPickEditing = !chordPickEditing;
+        needsRedraw = true;
+    } else if (cc === MoveBack && value > 0) {
+        if (chordPickEditing) {
+            chordPickEditing = false;
+            needsRedraw = true;
+        } else {
+            /* Commit the chord only if one was actually set for this bar, so
+             * simply opening the picker and backing out never adds one. */
+            commitChordPick();
             menuStack.pop();
             currentView = VIEW_BUILDER;
             stepLedsDirty = true;
             needsRedraw = true;
-            return;
         }
-        /* Cycle focus to the next field. */
-        chordPickFocus = (chordPickFocus + 1) % 3;
-        needsRedraw = true;
-    } else if (cc === MoveBack && value > 0) {
-        /* Commit the chord. */
-        const secIndex = chordDisplaySectionIndex();
-        const sec = currentSong ? currentSong.sections[secIndex] : null;
-        if (sec) setChordAtBar(sec, chordPickBar, chordPickChord());
-        menuStack.pop();
-        currentView = VIEW_BUILDER;
-        stepLedsDirty = true;
-        needsRedraw = true;
     }
 }
 
@@ -5504,6 +5602,15 @@ function handleBuilderInput(cc, value) {
         ledDirtyAll = true;
         needsRedraw = true;
         return;
+    }
+    /* The Chord and Instrument tracks don't use the clip-editing controls
+     * (main knob/button, delete, copy, loop, page up/down) — only section
+     * navigation, the settings menu, transport, and changing the source
+     * folder apply there. */
+    if (builderTrack !== TRACK_DRUM) {
+        const allowed = cc === MoveLeft || cc === MoveRight || cc === MoveMenu ||
+            cc === MoveBack || cc === MovePlay || cc === MoveRecord || cc === MoveShift;
+        if (!allowed) return;
     }
     if (cc === MoveMainKnob) {
         const delta = decodeDelta(value);
@@ -7319,7 +7426,8 @@ function handlePadPress(note, velocity) {
         return;
     }
     if (currentView === VIEW_BUILDER) {
-        handleBuilderPad(note, velocity);
+        /* The 32 clip pads only apply to the Drum track. */
+        if (builderTrack === TRACK_DRUM) handleBuilderPad(note, velocity);
         return;
     }
     const padIndex = getPadIndex(note);
@@ -8994,13 +9102,16 @@ globalThis.tick = function() {
     }
 
     /* Refresh builder/performance step LEDs every tick so the current-bar
-     * flash stays in time even when no other redraw is triggered.
-     * In performance view, click bars are only shown when no section is
+     * flash stays in time even when no other redraw is triggered. The
+     * chord-pick submenu keeps showing the chord track's bar LEDs underneath
+     * it. In performance view, click bars are only shown when no section is
      * selected while stopped, or during an active count-in. */
-    if (currentView === VIEW_BUILDER || currentView === VIEW_PERFORMANCE) {
+    if (currentView === VIEW_BUILDER || currentView === VIEW_PERFORMANCE || currentView === VIEW_CHORD_PICK) {
         if (currentView === VIEW_PERFORMANCE && perfClickBars > 0 &&
             (perfClickPlaying || (!perfPlaying && perfSelectedSection < 0))) {
             drawClickStepLEDs();
+        } else if ((currentView === VIEW_BUILDER || currentView === VIEW_CHORD_PICK) && builderTrack !== TRACK_DRUM) {
+            drawChordStepLEDs(false);
         } else {
             drawBuilderStepLEDs(false);
         }
