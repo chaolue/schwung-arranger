@@ -594,6 +594,15 @@ const SCROLLABLE_MENU_VIEWS = new Set([
 ]);
 const MENU_SCROLL_TICK_MS = 30; /* ~25fps redraw for marquee animation (halves the ~2s scroll-start delay) */
 let lastMenuScrollTick = 0;
+let lastLedQueueSampleTick = 0;    /* throttle for the LED-queue backlog diagnostic */
+let lastLedQueueSampleLen = -1;    /* previous sampled ledQueue.length, to log the growth rate */
+/* Per-mechanism push accumulators for the same diagnostic -- reset each time
+ * the periodic sample above logs, so the log shows a breakdown of which of
+ * updateLEDs()/the per-tick step refresh/updateButtonLEDs() actually grew
+ * the queue since the last sample, not just the total. */
+let ledQueuePushByUpdateLEDs = 0;
+let ledQueuePushByStepRefresh = 0;
+let ledQueuePushByButtonLEDs = 0;
 
 /* ── Helpers ─────────────────────────────────────────────────────────── */
 
@@ -3813,7 +3822,18 @@ function drawJamStepLEDs(force) {
             }
             return;
         }
-        for (let s = 0; s < NUM_STEPS; s++) stepColor(s, Black, true);
+        /* Confirmed via the LEDQ diagnostic: this fallback (stopped, no
+         * active preview) runs unconditionally every tick while in Jam view
+         * and not playing. Passing force=true here queued all NUM_STEPS
+         * messages on EVERY tick regardless of whether they were already
+         * black, growing the queue by ~16 messages/tick indefinitely (measured
+         * ~768/sec) any time the user sat in Jam view without a preview
+         * held -- this was the actual source of the multi-thousand-message
+         * backlog, not anything specific to the preview feature itself.
+         * `force` (the function's own parameter, true only for an explicit
+         * full redraw) lets stepColor's dedup do its job the rest of the
+         * time, matching every other branch in this function. */
+        for (let s = 0; s < NUM_STEPS; s++) stepColor(s, Black, force);
         return;
     }
     /* The 0-based groove bar the current fill sits on (when the current clip
@@ -9185,6 +9205,30 @@ globalThis.init = function() {
 };
 
 globalThis.tick = function() {
+    /* Diagnostic for the LED-queue backlog report: sample ledQueue.length
+     * every ~2s (any view, any activity -- the backlog was already large at
+     * the START of a preview session, so it isn't obviously jam-specific)
+     * and log the growth since the last sample, so the actual growth rate
+     * and which view/state it correlates with can be read back from the log
+     * instead of guessed from a static read of the ~48 ledDirtyAll call
+     * sites. */
+    {
+        const nowLQ = Date.now();
+        if (nowLQ - lastLedQueueSampleTick >= 2000) {
+            const growth = lastLedQueueSampleLen < 0 ? 0 : (ledQueue.length - lastLedQueueSampleLen);
+            logDebug("LEDQ len=" + ledQueue.length + " growth=" + growth + " view=" + currentView +
+                " jamPlaying=" + (typeof jamPlaying !== "undefined" ? jamPlaying : "?") +
+                " ledDirtyAll=" + ledDirtyAll + " needsRedraw=" + needsRedraw +
+                " byUpdateLEDs=" + ledQueuePushByUpdateLEDs + " byStepRefresh=" + ledQueuePushByStepRefresh +
+                " byButtonLEDs=" + ledQueuePushByButtonLEDs);
+            lastLedQueueSampleTick = nowLQ;
+            lastLedQueueSampleLen = ledQueue.length;
+            ledQueuePushByUpdateLEDs = 0;
+            ledQueuePushByStepRefresh = 0;
+            ledQueuePushByButtonLEDs = 0;
+        }
+    }
+
     /* Drain any pending MIDI output as early as possible in the callback so
      * events are not delayed by display/LED work. When the DSP is emitting
      * directly this acks the queue; otherwise the JS sends the events here. */
@@ -9375,7 +9419,9 @@ globalThis.tick = function() {
     }
 
     if (needsRedraw) {
+        const lq0 = ledQueue.length;
         updateLEDs();
+        ledQueuePushByUpdateLEDs += Math.max(0, ledQueue.length - lq0);
     }
     /* Clear the pad-preview-stop suppression flag once the section steps have
      * been repainted, so it doesn't leak into later redraws. */
@@ -9422,17 +9468,21 @@ globalThis.tick = function() {
      * chord-pick submenu keeps showing the chord track's bar LEDs underneath
      * it. In performance view, click bars are only shown when no section is
      * selected while stopped, or during an active count-in. */
-    if (currentView === VIEW_BUILDER || currentView === VIEW_PERFORMANCE || currentView === VIEW_CHORD_PICK) {
-        if (currentView === VIEW_PERFORMANCE && perfClickBars > 0 &&
-            (perfClickPlaying || (!perfPlaying && perfSelectedSection < 0))) {
-            drawClickStepLEDs();
-        } else if ((currentView === VIEW_BUILDER || currentView === VIEW_CHORD_PICK) && builderTrack !== TRACK_DRUM) {
-            drawChordStepLEDs(false);
-        } else {
-            drawBuilderStepLEDs(false);
+    {
+        const lq1 = ledQueue.length;
+        if (currentView === VIEW_BUILDER || currentView === VIEW_PERFORMANCE || currentView === VIEW_CHORD_PICK) {
+            if (currentView === VIEW_PERFORMANCE && perfClickBars > 0 &&
+                (perfClickPlaying || (!perfPlaying && perfSelectedSection < 0))) {
+                drawClickStepLEDs();
+            } else if ((currentView === VIEW_BUILDER || currentView === VIEW_CHORD_PICK) && builderTrack !== TRACK_DRUM) {
+                drawChordStepLEDs(false);
+            } else {
+                drawBuilderStepLEDs(false);
+            }
+        } else if (currentView === VIEW_JAM) {
+            drawJamStepLEDs(false);
         }
-    } else if (currentView === VIEW_JAM) {
-        drawJamStepLEDs(false);
+        ledQueuePushByStepRefresh += Math.max(0, ledQueue.length - lq1);
     }
     /* Beat flash is shown on the STEP LEDs only (drawBuilderStepLEDs /
      * drawClickStepLEDs above). The performance pads must NOT flash on the
@@ -9440,7 +9490,11 @@ globalThis.tick = function() {
      * white/green every beat, which overwrote the queued-repeat red on the
      * current section's last bar. Pads are drawn statically by
      * drawPerformanceLEDs (queued = white, last-bar imminent = red). */
-    updateButtonLEDs();
+    {
+        const lq2 = ledQueue.length;
+        updateButtonLEDs();
+        ledQueuePushByButtonLEDs += Math.max(0, ledQueue.length - lq2);
+    }
     flushLedQueue();
 };
 
