@@ -1,0 +1,126 @@
+{
+  "title": "Arranger",
+  "children": [
+    {
+      "title": "Overview",
+      "lines": [
+        "Build songs from a",
+        "MIDI drum library.",
+        "",
+        "3 modes:",
+        " Song Builder",
+        " Setlists/Perform",
+        " Jam",
+        "",
+        "Hold Back anywhere",
+        "to suspend (keeps",
+        "playing).",
+        "",
+        "Tap Back to exit."
+      ]
+    },
+    {
+      "title": "Song Builder",
+      "children": [
+        {
+          "title": "Tracks",
+          "lines": [
+            "Track 1: Drum",
+            "Track 2: Chord",
+            "Track 3: Inst 1",
+            "Track 4: Inst 2",
+            "",
+            "Press to switch.",
+            "Only Drum has full",
+            "clip editing."
+          ]
+        },
+        {
+          "title": "Editing Clips",
+          "lines": [
+            "Jog: move cursor",
+            "Click: open Trim",
+            "Tap pad: insert",
+            "Hold pad: preview",
+            "Delete: remove clip",
+            "Copy: duplicate",
+            "Left/Right: section",
+            "Menu: song settings"
+          ]
+        },
+        {
+          "title": "Chords",
+          "lines": [
+            "Step button opens",
+            "chord picker for",
+            "that bar.",
+            "",
+            "Set root, type, and",
+            "bass note.",
+            "",
+            "Drives Instrument",
+            "tracks set to Chord."
+          ]
+        },
+        {
+          "title": "Instruments",
+          "lines": [
+            "Menu: Instrument",
+            "Settings.",
+            "",
+            "Chord or Bass voice.",
+            "Octave shift.",
+            "",
+            "Follow Note: fires",
+            "on a drum hit.",
+            "",
+            "Note Gap: cuts note",
+            "before the next."
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Setlists/Perform",
+      "lines": [
+        "Build a setlist of",
+        "songs.",
+        "",
+        "Each song can have",
+        "a count-in click.",
+        "",
+        "In Perform, tap a",
+        "pad to queue a song",
+        "or section, then",
+        "press Play."
+      ]
+    },
+    {
+      "title": "Jam Mode",
+      "lines": [
+        "Left pads: grooves.",
+        "Right pads: fills.",
+        "",
+        "Tap a fill to queue",
+        "it for the next",
+        "bar end.",
+        "",
+        "Jog wheel changes",
+        "BPM live."
+      ]
+    },
+    {
+      "title": "Options",
+      "lines": [
+        "Drums, Inst 1, and",
+        "Inst 2 each set",
+        "output + channel",
+        "on their own.",
+        "",
+        "Swap Guard trims",
+        "notes at clip",
+        "boundaries."
+      ]
+    }
+  ]
+}
