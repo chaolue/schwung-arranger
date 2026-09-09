@@ -2037,6 +2037,25 @@ static void emit_instruments_follow(engine_t *e, uint8_t note, uint32_t tick) {
     uint32_t bar = 0;
     int sec_idx = tick_to_section_bar(&e->song, tick, e->ticks_per_bar, &bar);
     if (sec_idx < 0) return;
+    /* A drum hit anticipating the downbeat (e.g. a pushed kick just before
+     * the barline) still falls within the outgoing bar by tick, but
+     * musically belongs to the bar it's leading into. When it lands within
+     * the Swap Guard window of the next bar boundary, pick up that next
+     * bar's chord (and mute state) instead of holding the outgoing one a
+     * beat early. Falls back to the outgoing bar past the end of the song. */
+    if (e->ticks_per_bar > 0) {
+        uint32_t abs_bar = tick / e->ticks_per_bar;
+        uint32_t bar_end_tick = (abs_bar + 1) * e->ticks_per_bar;
+        uint32_t guard_ticks = (uint32_t)(e->swap_guard_fraction * e->ticks_per_beat);
+        if (bar_end_tick > tick && (bar_end_tick - tick) <= guard_ticks) {
+            uint32_t next_bar = 0;
+            int next_sec = tick_to_section_bar(&e->song, bar_end_tick, e->ticks_per_bar, &next_bar);
+            if (next_sec >= 0) {
+                sec_idx = next_sec;
+                bar = next_bar;
+            }
+        }
+    }
     section_t *sec = &e->song.sections[sec_idx];
     const chord_t *ch = chord_at_bar(sec, bar);
     for (int i = 0; i < e->song.instrument_count && i < MAX_INSTRUMENTS; i++) {
