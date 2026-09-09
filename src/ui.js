@@ -100,6 +100,8 @@ const VIEW_TRIM = "trim";
 const VIEW_SONG_BANK = "song_bank";
 const VIEW_PERFORMANCE = "performance_view";
 const VIEW_OPTIONS = "options";
+const VIEW_OPTIONS_DRUMS = "options_drums";
+const VIEW_OPTIONS_INST = "options_inst";
 const VIEW_SONG_SETTINGS = "song_settings";
 const VIEW_SETLIST_BANK = "setlist_bank";
 const VIEW_SETLIST_EDIT = "setlist_edit";
@@ -240,6 +242,12 @@ let outputChannel = 10;   /* external/Move/Schwung channel: 1-16 */
 let moveChannel = 10;       /* 1-16 */
 let schwungChannel = 10;    /* 1-16 */
 let clickChannel = 0;       /* count-in click channel: 0 = follow primary output channel, else 1-16 */
+/* Instrument track output/channel, shared globally across all songs and set
+ * from the Options menu (Instrument 1 / Instrument 2 submenus), not per-song. */
+let inst1Output = "external";
+let inst1Channel = 1;
+let inst2Output = "external";
+let inst2Channel = 1;
 let dspDirectEmit = false;
 let pendingSongJson = null;
 let dspTimelineInfo = null;
@@ -319,8 +327,14 @@ let instrumentFocus = 0;
 let instrumentEditing = false;
 
 let selectedOutputIndex = 0;
-let optionsFocus = 0;      /* 0 = Output, 1 = MIDI channel, 2 = Click channel, 3 = Swap guard, 4 = DSP debug */
+let optionsFocus = 0;      /* 0 = Drums, 1 = Instrument 1, 2 = Instrument 2, 3 = Click channel, 4 = Swap guard, 5 = DSP debug */
 let optionsEditing = false;
+/* Focus/edit state within the Drums or Instrument 1/2 submenu (both are a
+ * 2-item Output/Channel list). optionsInstIndex selects which instrument
+ * submenu is open (1 or 2) when currentView is VIEW_OPTIONS_INST. */
+let optionsSubFocus = 0;   /* 0 = Output, 1 = MIDI channel */
+let optionsSubEditing = false;
+let optionsInstIndex = 1;
 let swapGuardFraction = 0.25;  /* guard window (fraction of a beat) at mid-clip swap boundaries */
 let dspDebugEnabled = false;   /* runtime toggle for the DSP debug log (.dsp_log) */
 
@@ -509,7 +523,8 @@ const PAD_PREVIEW_DELAY_MS = 250; /* delay before pad tap triggers insert previe
  * Setlist / clip names that overflow the row width. */
 const SCROLLABLE_MENU_VIEWS = new Set([
     VIEW_ROOT, VIEW_FOLDER_LIST, VIEW_BUILDER, VIEW_TRIM, VIEW_SONG_SETTINGS,
-    VIEW_SONG_BANK, VIEW_OPTIONS, VIEW_SETLIST_BANK, VIEW_SETLIST_EDIT,
+    VIEW_SONG_BANK, VIEW_OPTIONS, VIEW_OPTIONS_DRUMS, VIEW_OPTIONS_INST,
+    VIEW_SETLIST_BANK, VIEW_SETLIST_EDIT,
     VIEW_SETLIST_PICK, VIEW_SETLIST_CLICK, VIEW_PERF_SETLIST, VIEW_PERFORMANCE,
     VIEW_JAM_FOLDER, VIEW_JAM, VIEW_SECTION_PICK, VIEW_CHORD_PICK, VIEW_INSTRUMENT
 ]);
@@ -1063,8 +1078,6 @@ function instrumentForTrack(track) {
     if (!currentSong.instruments[idx]) {
         currentSong.instruments[idx] = {
             enabled: false,
-            output: "external",
-            channel: 1,
             octave: 3,
             follow_note: 0,
             voicing: "bass",
@@ -1182,13 +1195,23 @@ function toEngineSongJson(song) {
         secOut.push({ name: sec.name || "Section", clips: clipsOut, chords: chordsOut });
     }
     /* Emit the instrument tracks (Step 2). Each is a config object; the DSP
-     * uses the chord track to emit notes on the instrument's channel. */
+     * uses the chord track to emit notes on the instrument's channel. Output
+     * and channel are global (set in Options), not per-song, so pull them
+     * from the global inst1/inst2 state by track index rather than from the
+     * song's own instrument entry. */
     const instrumentsOut = [];
-    for (const inst of (song.instruments || [])) {
+    const instGlobals = [
+        { output: inst1Output, channel: inst1Channel },
+        { output: inst2Output, channel: inst2Channel }
+    ];
+    const instList = song.instruments || [];
+    for (let i = 0; i < instList.length; i++) {
+        const inst = instList[i];
+        const g = instGlobals[i] || instGlobals[0];
         instrumentsOut.push({
             enabled: !!inst.enabled,
-            output: inst.output || "external",
-            channel: (typeof inst.channel === "number" && inst.channel >= 1 && inst.channel <= 16) ? inst.channel : 1,
+            output: g.output || "external",
+            channel: (typeof g.channel === "number" && g.channel >= 1 && g.channel <= 16) ? g.channel : 1,
             octave: (typeof inst.octave === "number") ? inst.octave : 3,
             follow_note: (typeof inst.follow_note === "number") ? inst.follow_note : 0,
             voicing: inst.voicing || "bass",
@@ -1273,8 +1296,6 @@ function toUiSong(engineLike) {
         })),
         instruments: (s.instruments || []).map(inst => ({
             enabled: !!inst.enabled,
-            output: inst.output || "external",
-            channel: (typeof inst.channel === "number" && inst.channel >= 1 && inst.channel <= 16) ? inst.channel : 1,
             octave: (typeof inst.octave === "number") ? inst.octave : 3,
             follow_note: (typeof inst.follow_note === "number") ? inst.follow_note : 0,
             voicing: inst.voicing || "bass",
@@ -1462,6 +1483,14 @@ function loadSettings() {
     if (typeof sg === "number") swapGuardFraction = sg;
     const dd = pick("dsp_debug", "boolean");
     if (typeof dd === "boolean") dspDebugEnabled = dd;
+    const i1o = pick("inst1_output", "string");
+    if (typeof i1o === "string") inst1Output = i1o;
+    const i1c = pick("inst1_channel", "number");
+    if (typeof i1c === "number") inst1Channel = i1c;
+    const i2o = pick("inst2_output", "string");
+    if (typeof i2o === "string") inst2Output = i2o;
+    const i2c = pick("inst2_channel", "number");
+    if (typeof i2c === "number") inst2Channel = i2c;
     if (outputChannel < 1) outputChannel = 1;
     if (outputChannel > 16) outputChannel = 16;
     if (moveChannel < 1) moveChannel = 1;
@@ -1472,6 +1501,12 @@ function loadSettings() {
     if (clickChannel > 16) clickChannel = 16;
     if (swapGuardFraction < 0) swapGuardFraction = 0;
     if (swapGuardFraction > 1) swapGuardFraction = 1;
+    if (inst1Channel < 1) inst1Channel = 1;
+    if (inst1Channel > 16) inst1Channel = 16;
+    if (inst2Channel < 1) inst2Channel = 1;
+    if (inst2Channel > 16) inst2Channel = 16;
+    if (OUTPUT_TARGETS.indexOf(inst1Output) < 0) inst1Output = "external";
+    if (OUTPUT_TARGETS.indexOf(inst2Output) < 0) inst2Output = "external";
     selectedOutputIndex = OUTPUT_TARGETS.indexOf(outputTarget);
     if (selectedOutputIndex < 0) selectedOutputIndex = 0;
 }
@@ -1484,7 +1519,11 @@ function saveOutputSettings() {
         schwung_channel: schwungChannel,
         click_channel: clickChannel,
         swap_guard_fraction: swapGuardFraction,
-        dsp_debug: dspDebugEnabled
+        dsp_debug: dspDebugEnabled,
+        inst1_output: inst1Output,
+        inst1_channel: inst1Channel,
+        inst2_output: inst2Output,
+        inst2_channel: inst2Channel
     };
     /* Keep the legacy file for backwards compatibility. */
     writeJson(SETTINGS_PATH, values);
@@ -3926,7 +3965,7 @@ function drawBuilder() {
     const playingIdx = (playbackState === "playing" && builderDisplaySection >= 0) ? builderDisplaySection : playbackSectionIndex;
     const displayIdx = playbackState === "playing" ? playingIdx : currentSectionIndex;
     const sec = currentSong ? currentSong.sections[displayIdx] : null;
-    drawMenuHeader(scrollHeader("Edit: " + (currentSong ? shortSongName(currentSong.name) : ""), songIsLocked() ? 27 : 28), songIsLocked() ? "*" : "");
+    drawMenuHeader(scrollHeader("Drums: " + (currentSong ? shortSongName(currentSong.name) : ""), songIsLocked() ? 27 : 28), songIsLocked() ? "*" : "");
     if (!sec) {
         print(2, LIST_TOP_Y, "No section.", 1);
         drawOverlay();
@@ -4068,10 +4107,11 @@ function drawInstrumentTrack() {
         if (c) { curChord = c; break; }
     }
     const on = inst ? instrumentBarOn(inst, secIndex, chordCursorBar) : true;
+    const channel = builderTrack === TRACK_INSTRUMENT_1 ? inst1Channel : inst2Channel;
     print(2, LIST_TOP_Y, "Sec: " + (sec.name || "Section"), 1);
     print(2, LIST_TOP_Y + 9, "Now: " + (curChord ? chordLabel(curChord) : "—"), 1);
     print(2, LIST_TOP_Y + 18, "Bar " + (chordCursorBar + 1) + "/" + totalBars + "  " + (on ? "Send" : "Mute"), 1);
-    print(2, LIST_TOP_Y + 27, "Key " + key + "  Ch " + (inst ? inst.channel : 1), 1);
+    print(2, LIST_TOP_Y + 27, "Key " + key + "  Ch " + channel, 1);
     drawOverlay();
 }
 
@@ -4230,8 +4270,6 @@ function drawInstrument() {
     drawMenuHeader(instrumentEditTrack === TRACK_INSTRUMENT_1 ? "Inst 1" : "Inst 2", inst && inst.enabled ? "ON" : "OFF");
     const items = [
         { key: "enabled", label: "Enabled", value: inst && inst.enabled ? "On" : "Off" },
-        { key: "output", label: "Output", value: inst ? (OUTPUT_LABELS[inst.output] || inst.output) : "External" },
-        { key: "channel", label: "MIDI Channel", value: String(inst ? inst.channel : 1) },
         { key: "octave", label: "Octave", value: String(inst ? inst.octave : 3) },
         { key: "follow", label: "Follow Note", value: inst && inst.follow_note > 0 ? String(inst.follow_note) : "Off" },
         { key: "voicing", label: "Voicing", value: inst && inst.voicing === "chord" ? "Chord" : "Bass" },
@@ -4260,17 +4298,12 @@ function handleInstrumentInput(cc, value) {
             if (instrumentFocus === 0) {
                 inst.enabled = !inst.enabled;
             } else if (instrumentFocus === 1) {
-                const idx = Math.max(0, Math.min(OUTPUT_TARGETS.length - 1, OUTPUT_TARGETS.indexOf(inst.output) + delta));
-                inst.output = OUTPUT_TARGETS[idx];
-            } else if (instrumentFocus === 2) {
-                inst.channel = Math.max(1, Math.min(16, inst.channel + delta));
-            } else if (instrumentFocus === 3) {
                 inst.octave = Math.max(-1, Math.min(8, inst.octave + delta));
-            } else if (instrumentFocus === 4) {
+            } else if (instrumentFocus === 2) {
                 inst.follow_note = Math.max(0, Math.min(127, inst.follow_note + delta));
-            } else if (instrumentFocus === 5) {
+            } else if (instrumentFocus === 3) {
                 inst.voicing = (inst.voicing === "chord") ? "bass" : "chord";
-            } else if (instrumentFocus === 6) {
+            } else if (instrumentFocus === 4) {
                 /* Note gap: 0 = none, then 1/16, 1/8, 1/4, 1/2, 1 beat. */
                 const steps = [0, 0.0625, 0.125, 0.25, 0.5, 1.0];
                 const cur = (typeof inst.note_gap === "number") ? inst.note_gap : 0.25;
@@ -4280,7 +4313,7 @@ function handleInstrumentInput(cc, value) {
             }
             unsavedChanges = true;
         } else {
-            instrumentFocus = Math.max(0, Math.min(6, instrumentFocus + delta));
+            instrumentFocus = Math.max(0, Math.min(4, instrumentFocus + delta));
         }
         needsRedraw = true;
     } else if (cc === MoveMainButton && value > 0) {
@@ -4826,8 +4859,9 @@ function drawSongBank() {
 function drawOptions() {
     drawMenuHeader("Options", "");
     const items = [
-        { key: "output", label: "Output", value: currentOutputLabel() },
-        { key: "channel", label: "MIDI Channel", value: String(activeOutputChannel()) },
+        { key: "drums", label: "Drums", value: currentOutputLabel() + " " + activeOutputChannel() },
+        { key: "inst1", label: "Inst 1", value: (OUTPUT_LABELS[inst1Output] || inst1Output) + " " + inst1Channel },
+        { key: "inst2", label: "Inst 2", value: (OUTPUT_LABELS[inst2Output] || inst2Output) + " " + inst2Channel },
         { key: "clickchan", label: "Click Channel", value: clickChannel === 0 ? "Default" : String(clickChannel) },
         { key: "swapguard", label: "Swap Guard", value: Math.round(swapGuardFraction * 100) + "%" },
         { key: "dspdebug", label: "DSP Debug", value: dspDebugEnabled ? "On" : "Off" }
@@ -4844,6 +4878,70 @@ function drawOptions() {
         selectedMinLabelChars: 7,
         listArea: { topY: LIST_TOP_Y, bottomY: LIST_INDICATOR_BOTTOM_Y }
     });
+}
+
+/* Drums and Instrument 1/2 are simple Output + MIDI Channel submenus off the
+ * Options list. Drums edits the existing global output/channel state used
+ * for the drum track; the instrument submenus edit inst1Output/inst1Channel
+ * or inst2Output/inst2Channel depending on optionsInstIndex. */
+function drawOptionsDrums() {
+    drawMenuHeader("Drums", "");
+    const items = [
+        { key: "output", label: "Output", value: currentOutputLabel() },
+        { key: "channel", label: "MIDI Channel", value: String(activeOutputChannel()) }
+    ];
+    drawMenuList({
+        items,
+        selectedIndex: optionsSubFocus,
+        getLabel: (item) => item.label,
+        getValue: (item) => item.value,
+        valueAlignRight: true,
+        editMode: optionsSubEditing,
+        labelGap: 2,
+        prioritizeSelectedValue: true,
+        selectedMinLabelChars: 7,
+        listArea: { topY: LIST_TOP_Y, bottomY: LIST_INDICATOR_BOTTOM_Y }
+    });
+}
+
+function drawOptionsInst() {
+    const isInst1 = optionsInstIndex === 1;
+    const output = isInst1 ? inst1Output : inst2Output;
+    const channel = isInst1 ? inst1Channel : inst2Channel;
+    drawMenuHeader(isInst1 ? "Inst 1" : "Inst 2", "");
+    const items = [
+        { key: "output", label: "Output", value: OUTPUT_LABELS[output] || output },
+        { key: "channel", label: "MIDI Channel", value: String(channel) }
+    ];
+    drawMenuList({
+        items,
+        selectedIndex: optionsSubFocus,
+        getLabel: (item) => item.label,
+        getValue: (item) => item.value,
+        valueAlignRight: true,
+        editMode: optionsSubEditing,
+        labelGap: 2,
+        prioritizeSelectedValue: true,
+        selectedMinLabelChars: 7,
+        listArea: { topY: LIST_TOP_Y, bottomY: LIST_INDICATOR_BOTTOM_Y }
+    });
+}
+
+function openOptionsDrums() {
+    optionsSubFocus = 0;
+    optionsSubEditing = false;
+    currentView = VIEW_OPTIONS_DRUMS;
+    menuStack.push({ title: "Drums", selectedIndex: 0 });
+    needsRedraw = true;
+}
+
+function openOptionsInst(index) {
+    optionsInstIndex = index;
+    optionsSubFocus = 0;
+    optionsSubEditing = false;
+    currentView = VIEW_OPTIONS_INST;
+    menuStack.push({ title: index === 1 ? "Inst 1" : "Inst 2", selectedIndex: 0 });
+    needsRedraw = true;
 }
 
 function drawSetlistBank() {
@@ -5827,17 +5925,80 @@ function reloadSongBankAndPreserveSelection() {
 }
 
 function handleOptionsInput(cc, value) {
+    /* Rows 0-2 (Drums, Instrument 1, Instrument 2) navigate into a submenu;
+     * rows 3-5 (Click Channel, Swap Guard, DSP Debug) edit in place. */
     if (cc === MoveMainKnob) {
         const delta = decodeDelta(value);
         if (optionsEditing) {
-            if (optionsFocus === 0) {
+            if (optionsFocus === 3) {
+                /* Adjust the count-in click channel. 0 = follow the primary
+                 * output channel (Default); 1-16 = explicit channel. */
+                const newCh = Math.max(0, Math.min(16, clickChannel + delta));
+                if (newCh !== clickChannel) {
+                    clickChannel = newCh;
+                    saveOutputSettings();
+                }
+            } else if (optionsFocus === 4) {
+                /* Adjust the mid-clip swap guard (0-100%, in 5% steps). */
+                const newG = Math.max(0, Math.min(1, swapGuardFraction + delta * 0.05));
+                if (newG !== swapGuardFraction) {
+                    swapGuardFraction = newG;
+                    saveOutputSettings();
+                    pushSwapGuardToDsp();
+                }
+            } else if (optionsFocus === 5) {
+                /* Toggle the DSP debug log. */
+                dspDebugEnabled = !dspDebugEnabled;
+                saveOutputSettings();
+                pushDspDebugToDsp();
+                /* When debug logging is turned off, delete the accumulated
+                 * log files so they don't linger on the device. */
+                if (!dspDebugEnabled) {
+                    deleteLogFiles();
+                }
+            }
+        } else {
+            const newIdx = Math.max(0, Math.min(5, optionsFocus + delta));
+            if (newIdx !== optionsFocus) {
+                optionsFocus = newIdx;
+            }
+        }
+        needsRedraw = true;
+    } else if (cc === MoveMainButton && value > 0) {
+        if (optionsFocus === 0) {
+            openOptionsDrums();
+        } else if (optionsFocus === 1) {
+            openOptionsInst(1);
+        } else if (optionsFocus === 2) {
+            openOptionsInst(2);
+        } else {
+            optionsEditing = !optionsEditing;
+            needsRedraw = true;
+        }
+    } else if (cc === MoveBack && value > 0) {
+        if (optionsEditing) {
+            optionsEditing = false;
+            needsRedraw = true;
+        } else {
+            menuStack.pop();
+            currentView = VIEW_ROOT;
+            needsRedraw = true;
+        }
+    }
+}
+
+function handleOptionsDrumsInput(cc, value) {
+    if (cc === MoveMainKnob) {
+        const delta = decodeDelta(value);
+        if (optionsSubEditing) {
+            if (optionsSubFocus === 0) {
                 /* Cycle through output targets. */
                 const newIdx = Math.max(0, Math.min(OUTPUT_TARGETS.length - 1, selectedOutputIndex + delta));
                 if (newIdx !== selectedOutputIndex) {
                     selectedOutputIndex = newIdx;
                     setOutputTarget(OUTPUT_TARGETS[selectedOutputIndex]);
                 }
-            } else if (optionsFocus === 1) {
+            } else {
                 /* Adjust the active MIDI channel. */
                 const newCh = Math.max(1, Math.min(16, activeOutputChannel() + delta));
                 if (newCh !== activeOutputChannel()) {
@@ -5851,50 +6012,60 @@ function handleOptionsInput(cc, value) {
                         host_module_set_param("schwung_channel", String(schwungChannel - 1));
                     }
                 }
-            } else if (optionsFocus === 2) {
-                /* Adjust the count-in click channel. 0 = follow the primary
-                 * output channel (Default); 1-16 = explicit channel. */
-                const newCh = Math.max(0, Math.min(16, clickChannel + delta));
-                if (newCh !== clickChannel) {
-                    clickChannel = newCh;
-                    saveOutputSettings();
-                }
-            } else if (optionsFocus === 3) {
-                /* Adjust the mid-clip swap guard (0-100%, in 5% steps). */
-                const newG = Math.max(0, Math.min(1, swapGuardFraction + delta * 0.05));
-                if (newG !== swapGuardFraction) {
-                    swapGuardFraction = newG;
-                    saveOutputSettings();
-                    pushSwapGuardToDsp();
-                }
-            } else {
-                /* Toggle the DSP debug log. */
-                dspDebugEnabled = !dspDebugEnabled;
-                saveOutputSettings();
-                pushDspDebugToDsp();
-                /* When debug logging is turned off, delete the accumulated
-                 * log files so they don't linger on the device. */
-                if (!dspDebugEnabled) {
-                    deleteLogFiles();
-                }
             }
         } else {
-            const newIdx = Math.max(0, Math.min(4, optionsFocus + delta));
-            if (newIdx !== optionsFocus) {
-                optionsFocus = newIdx;
-            }
+            const newIdx = Math.max(0, Math.min(1, optionsSubFocus + delta));
+            if (newIdx !== optionsSubFocus) optionsSubFocus = newIdx;
         }
         needsRedraw = true;
     } else if (cc === MoveMainButton && value > 0) {
-        optionsEditing = !optionsEditing;
+        optionsSubEditing = !optionsSubEditing;
         needsRedraw = true;
     } else if (cc === MoveBack && value > 0) {
-        if (optionsEditing) {
-            optionsEditing = false;
+        if (optionsSubEditing) {
+            optionsSubEditing = false;
             needsRedraw = true;
         } else {
             menuStack.pop();
-            currentView = VIEW_ROOT;
+            currentView = VIEW_OPTIONS;
+            needsRedraw = true;
+        }
+    }
+}
+
+function handleOptionsInstInput(cc, value) {
+    const isInst1 = optionsInstIndex === 1;
+    if (cc === MoveMainKnob) {
+        const delta = decodeDelta(value);
+        if (optionsSubEditing) {
+            if (optionsSubFocus === 0) {
+                const cur = isInst1 ? inst1Output : inst2Output;
+                const idx = Math.max(0, Math.min(OUTPUT_TARGETS.length - 1, OUTPUT_TARGETS.indexOf(cur) + delta));
+                if (isInst1) inst1Output = OUTPUT_TARGETS[idx];
+                else inst2Output = OUTPUT_TARGETS[idx];
+                saveOutputSettings();
+            } else {
+                const cur = isInst1 ? inst1Channel : inst2Channel;
+                const newCh = Math.max(1, Math.min(16, cur + delta));
+                if (isInst1) inst1Channel = newCh;
+                else inst2Channel = newCh;
+                saveOutputSettings();
+            }
+        } else {
+            const newIdx = Math.max(0, Math.min(1, optionsSubFocus + delta));
+            if (newIdx !== optionsSubFocus) optionsSubFocus = newIdx;
+        }
+        needsRedraw = true;
+    } else if (cc === MoveMainButton && value > 0) {
+        optionsSubEditing = !optionsSubEditing;
+        needsRedraw = true;
+    } else if (cc === MoveBack && value > 0) {
+        if (optionsSubEditing) {
+            optionsSubEditing = false;
+            needsRedraw = true;
+        } else {
+            menuStack.pop();
+            currentView = VIEW_OPTIONS;
             needsRedraw = true;
         }
     }
@@ -8804,6 +8975,8 @@ globalThis.tick = function() {
                 case VIEW_SONG_SETTINGS: drawSongSettings(); break;
                 case VIEW_SONG_BANK: drawSongBank(); break;
                 case VIEW_OPTIONS: drawOptions(); break;
+                case VIEW_OPTIONS_DRUMS: drawOptionsDrums(); break;
+                case VIEW_OPTIONS_INST: drawOptionsInst(); break;
                 case VIEW_SETLIST_BANK: drawSetlistBank(); break;
                 case VIEW_SETLIST_EDIT: drawSetlistEdit(); break;
                 case VIEW_SETLIST_PICK: drawSetlistPick(); break;
@@ -8873,6 +9046,8 @@ globalThis.onMidiMessageInternal = function(data) {
             case VIEW_SONG_SETTINGS: handleSongSettingsInput(cc, value); break;
             case VIEW_SONG_BANK: handleSongBankInput(cc, value); break;
             case VIEW_OPTIONS: handleOptionsInput(cc, value); break;
+            case VIEW_OPTIONS_DRUMS: handleOptionsDrumsInput(cc, value); break;
+            case VIEW_OPTIONS_INST: handleOptionsInstInput(cc, value); break;
             case VIEW_SETLIST_BANK: handleSetlistBankInput(cc, value); break;
             case VIEW_SETLIST_EDIT: handleSetlistEditInput(cc, value); break;
             case VIEW_SETLIST_PICK: handleSetlistPickInput(cc, value); break;

@@ -35,6 +35,38 @@
             "default": 10
         },
         {
+            "key": "inst1_output",
+            "label": "Instrument 1 MIDI Output",
+            "type": "enum",
+            "options": ["External", "Move", "Schwung"],
+            "values": ["external", "move", "schwung"],
+            "default": "external"
+        },
+        {
+            "key": "inst1_channel",
+            "label": "Instrument 1 MIDI Channel",
+            "type": "int",
+            "min": 1,
+            "max": 16,
+            "default": 1
+        },
+        {
+            "key": "inst2_output",
+            "label": "Instrument 2 MIDI Output",
+            "type": "enum",
+            "options": ["External", "Move", "Schwung"],
+            "values": ["external", "move", "schwung"],
+            "default": "external"
+        },
+        {
+            "key": "inst2_channel",
+            "label": "Instrument 2 MIDI Channel",
+            "type": "int",
+            "min": 1,
+            "max": 16,
+            "default": 1
+        },
+        {
             "key": "click_channel",
             "label": "Default Click Output Channel",
             "type": "int",
