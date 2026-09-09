@@ -280,6 +280,13 @@ let ledDirtyAll = true;
 let activeSongFile = null;
 let songFiles = [];
 let selectedSongIndex = 0;
+/* Set after a song file is added/removed on disk (duplicate/delete), so the
+ * Song Bank list stays in sync with the DSP's cached song scan
+ * (host_module_get_param song_count, song_name_N, song_path_N), which only
+ * updates asynchronously on its worker thread after scan_library is
+ * requested. Polled each tick until `path` appears/disappears from the
+ * list; selectOnArrive additionally moves the cursor onto it once found. */
+let pendingSongBankSync = null; /* { path, shouldExist, selectOnArrive } */
 
 let trimEditing = false;
 let trimPendingStart = 0;
@@ -2543,12 +2550,23 @@ function updateButtonLEDs() {
                 const ledHasRightSection = !!(currentSong && currentSong.sections && ledSectionIndex < currentSong.sections.length - 1);
                 active.set(MoveBack, WhiteLedBright);
                 active.set(MoveMenu, WhiteLedBright);
-                if (!ledLocked) active.set(MoveRecord, PureBlue); /* change the source folder */
+                /* Record (change source folder) is a Drum-track concept. */
+                if (!ledLocked && builderTrack === TRACK_DRUM) active.set(MoveRecord, PureBlue);
                 /* Row buttons: the selected track's row lights up in its
-                 * colour; the others stay light grey — the same grey used for
-                 * an available-but-unset bar on the chord/instrument steps. */
+                 * colour; the others stay dark grey — the same grey used for
+                 * an available-but-unset bar on the chord/instrument steps.
+                 * A selected Instrument track that's currently disabled shows
+                 * its very-dark partner instead of the full colour. */
                 for (let t = 0; t < TRACK_ROW_CC.length; t++) {
-                    active.set(TRACK_ROW_CC[t], t === builderTrack ? TRACK_ROW_COLOUR[t] : DarkGrey);
+                    let rowColour = DarkGrey;
+                    if (t === builderTrack) {
+                        rowColour = TRACK_ROW_COLOUR[t];
+                        if (t === TRACK_INSTRUMENT_1 || t === TRACK_INSTRUMENT_2) {
+                            const trackInst = instrumentForTrack(t);
+                            if (trackInst && !trackInst.enabled) rowColour = veryDarkPartner(rowColour);
+                        }
+                    }
+                    active.set(TRACK_ROW_CC[t], rowColour);
                 }
                 if (ledHasLeftSection) active.set(MoveLeft, WhiteLedBright);
                 if (ledHasRightSection) active.set(MoveRight, WhiteLedBright);
@@ -2625,9 +2643,12 @@ function updateButtonLEDs() {
                 active.set(MoveMainButton, WhiteLedBright);
                 if (selectedSongIndex > 0) {
                     /* A locked song cannot be deleted or renamed: leave the
-                     * Delete and Shift buttons black (omit from active map). */
+                     * Delete and Shift buttons black (omit from active map).
+                     * Copy (duplicate) is allowed regardless of lock — it
+                     * always produces a new, unlocked copy. */
                     const entry = songFiles[selectedSongIndex - 1];
                     const locked = entry ? !!(readJson(entry.path)?.locked) : false;
+                    active.set(MoveCopy, WhiteLedBright);
                     if (!locked) active.set(MoveDelete, WhiteLedBright);
                     if (!locked) {
                         /* Shift (rename) only applies to an existing, unlocked
@@ -2771,7 +2792,6 @@ function veryDarkPartner(base) {
 const PureGreen = 126;   /* solid green */
 const PureRed = 127;     /* solid red */
 const PureBlue = 125;    /* solid blue */
-const DarkGrey = 119;    /* inactive-song grey */
 
 /* Single colour for the count-in click section, used consistently for the
  * click pad and the click step LEDs (dim variant for the pad, matching dim for
@@ -3848,7 +3868,7 @@ function updateLEDs() {
 /* Draw the step LEDs for the chord/instrument track. Each step maps to a bar
  * of the current section (same scroll window as the drum track).
  *
- * Chord track: light grey for a bar available from the drum track with no
+ * Chord track: dark grey for a bar available from the drum track with no
  * chord set, white for the selected (cursor) bar, coloured for a bar with a
  * chord set.
  *
@@ -3879,9 +3899,12 @@ function drawChordStepLEDs(force) {
         }
         const chord = chordAtBar(sec, barIndex);
         if (inst) {
+            /* A disabled instrument track shows every bar dimmed — none of
+             * it is actually sounding right now, regardless of per-bar
+             * chord/mute state. */
             if (!chord) {
                 stepColor(s, DarkGrey, force);
-            } else if (instrumentBarOn(inst, secIndex, barIndex)) {
+            } else if (inst.enabled && instrumentBarOn(inst, secIndex, barIndex)) {
                 stepColor(s, trackColour, force);
             } else {
                 stepColor(s, veryDarkPartner(trackColour), force);
@@ -3978,7 +4001,7 @@ function scrollHeader(title, maxChars) {
 }
 
 function drawRoot() {
-    drawMenuHeader("Arranger", "v0.3");
+    drawMenuHeader("Arranger", "v0.4");
     drawMenuList({
         items: [
             { label: "Song Builder" },
@@ -5604,12 +5627,12 @@ function handleBuilderInput(cc, value) {
         return;
     }
     /* The Chord and Instrument tracks don't use the clip-editing controls
-     * (main knob/button, delete, copy, loop, page up/down) — only section
-     * navigation, the settings menu, transport, and changing the source
-     * folder apply there. */
+     * (main knob/button, delete, copy, loop, page up/down) or Record
+     * (changing the source folder is a Drum-track concept) — only section
+     * navigation, the settings menu, and transport apply there. */
     if (builderTrack !== TRACK_DRUM) {
         const allowed = cc === MoveLeft || cc === MoveRight || cc === MoveMenu ||
-            cc === MoveBack || cc === MovePlay || cc === MoveRecord || cc === MoveShift;
+            cc === MoveBack || cc === MovePlay || cc === MoveShift;
         if (!allowed) return;
     }
     if (cc === MoveMainKnob) {
@@ -5914,12 +5937,11 @@ function deleteSelectedSong() {
             }
             if (activeSongFile === entry.path) activeSongFile = null;
             /* Invalidate the DSP's cached song scan so the deleted song is
-             * dropped from the bank list. */
-            if (typeof host_module_set_param === "function") {
-                host_module_set_param("scan_library", "1");
-            }
-            reloadSongBankAndPreserveSelection();
-            needsRedraw = true;
+             * dropped from the bank list. The scan runs on the DSP's worker
+             * thread, so it isn't done by the time this call returns —
+             * requestSongBankSync polls each tick until the deleted path is
+             * actually gone from the list. */
+            requestSongBankSync(entry.path, false, false);
         },
         onCancel: () => { needsRedraw = true; }
     });
@@ -6006,6 +6028,8 @@ function handleSongBankInput(cc, value) {
         }
     } else if (cc === MoveDelete && value > 0 && selectedSongIndex > 0) {
         deleteSelectedSong();
+    } else if (cc === MoveCopy && value > 0 && selectedSongIndex > 0) {
+        duplicateSelectedSong();
     } else if (cc === MoveBack && value > 0) {
         menuStack.pop();
         currentView = VIEW_ROOT;
@@ -6029,6 +6053,39 @@ function reloadSongBankAndPreserveSelection() {
     } else {
         selectedSongIndex = 0;
     }
+}
+
+/* Request a rescan after adding/removing a song file on disk, and start
+ * polling (see the pendingSongBankSync tick handler) until `path`
+ * appears/disappears from the DSP's cached song list. */
+function requestSongBankSync(path, shouldExist, selectOnArrive) {
+    if (typeof host_module_set_param === "function") {
+        host_module_set_param("scan_library", "1");
+    }
+    pendingSongBankSync = { path, shouldExist, selectOnArrive: !!selectOnArrive };
+    reloadSongBankAndPreserveSelection();
+    needsRedraw = true;
+}
+
+/* Duplicate the selected song under a new name ("<name> copy", "<name> copy
+ * 2", ...), unlocked regardless of whether the original is locked. */
+function duplicateSelectedSong() {
+    const entry = songFiles[selectedSongIndex - 1];
+    if (!entry) return;
+    const obj = readJson(entry.path);
+    if (!obj) return;
+    const baseName = (obj.name || entry.name || "Song").replace(/ copy( \d+)?$/, "");
+    let newName = baseName + " copy";
+    let n = 2;
+    while (songFiles.some(f => f.name === newName)) {
+        newName = baseName + " copy " + n;
+        n++;
+    }
+    const newPath = songPath(newName);
+    if (host_file_exists(newPath)) return; /* name collision despite the loop above */
+    const copy = Object.assign({}, obj, { name: newName, locked: false });
+    writeJson(newPath, copy);
+    requestSongBankSync(newPath, true, true);
 }
 
 function handleOptionsInput(cc, value) {
@@ -9015,6 +9072,23 @@ globalThis.tick = function() {
         if (libraryFolders.length > 0) {
             pendingLibraryFoldersReload = false;
             ledDirtyAll = true;
+            needsRedraw = true;
+        }
+    }
+
+    /* Retry loading the Song Bank list after a duplicate/delete until the
+     * DSP's worker thread finishes rescanning (see requestSongBankSync). */
+    if (pendingSongBankSync) {
+        const idx = songFiles.findIndex(f => f.path === pendingSongBankSync.path);
+        const found = idx >= 0;
+        if (pendingSongBankSync.shouldExist ? found : !found) {
+            if (found && pendingSongBankSync.selectOnArrive) {
+                selectedSongIndex = idx + 1;
+            }
+            pendingSongBankSync = null;
+            needsRedraw = true;
+        } else {
+            reloadSongBankAndPreserveSelection();
             needsRedraw = true;
         }
     }
