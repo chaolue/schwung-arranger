@@ -10,6 +10,11 @@ and perform live — all from Move's pads, step buttons and jog wheel.
 - **Song Builder** — assemble a song from a MIDI drum-clip library into
   sections, then trim each clip (start/end, guard, velocity, snare filter,
   kick thinning). The trim view shows each clip's source folder.
+- **Chord & Instrument tracks** — set a chord per bar (in the song's key,
+  with automatic transposition if the key changes) and drive up to two
+  instrument tracks from it — chord or bass voicing, octave shift, a
+  follow-note mode that fires alongside a drum hit (e.g. bass following the
+  kick), and independent output routing per track.
 - **Setlists & Performance** — build a setlist of songs, set a count-in click
   and stop-after-finish per song, then play through it live with queued
   section/song jumps.
@@ -20,9 +25,13 @@ and perform live — all from Move's pads, step buttons and jog wheel.
   Jam folder pickers. Song folders laid out with part subfolders (`Grooves/`,
   `Fills/`, `Clap/`, `Snare/`, `Stick/`) are recognised automatically.
 - **Output routing** — send MIDI to External, Move tracks, or the Schwung
-  synth chain, on a configurable channel.
+  synth chain, independently for drums and each instrument track, each on a
+  configurable channel.
+- **Automatic backups** — the last few saved versions of each song are kept
+  automatically, so a change can be undone by hand if needed.
 - **Overtake module** — runs on Move's hardware surface (pads, steps, jog
-  wheel, buttons).
+  wheel, buttons), and can be suspended in the background (hold Back) so
+  playback keeps running while you use the rest of Move.
 
 ## Prerequisites
 
