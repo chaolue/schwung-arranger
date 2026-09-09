@@ -315,14 +315,24 @@ typedef struct {
     _Atomic(uint32_t) request_gen;    /* bumped by set_param (audio thread) on every accepted request */
     _Atomic(uint32_t) published_gen;  /* = the request_gen the worker actually built and published */
 
-    /* Request payload. Protected by request_seq (a seqlock): the audio thread
-     * bumps it to odd before writing request_json, then to even after, so the
-     * worker's read-with-retry can never observe a torn multi-byte string --
-     * unlike library_root_requested's plain copy_trunc (safe there only
-     * because a torn library path just causes a stale rescan; a torn
-     * song_json could silently build the wrong timeline). */
-    _Atomic(uint32_t) request_seq;
-    char              request_json[MAX_SONG_JSON_LEN];
+    /* Request payload: same fixed double-buffer + atomic-index pattern as
+     * slot[]/active above (and folder_cache_t/song_cache_t further down),
+     * not a seqlock. request_json used to be a single buffer guarded by a
+     * request_seq seqlock (audio thread bumps it odd-then-even around the
+     * write; the worker retries its read on a seq mismatch) -- correct by
+     * construction (a mismatched seq is caught and retried) but still a raw
+     * concurrent byte-level read/write on the buffer itself, which
+     * ThreadSanitizer correctly flags as a data race per the C11 memory
+     * model regardless of the surrounding algorithm's self-correction.
+     * request_json[2] + request_active sidesteps that the same way the rest
+     * of this file already does: the audio thread (the only writer) always
+     * writes the buffer request_active does NOT currently point to, then
+     * flips it with a release store; the worker (the only reader) acquire-
+     * loads request_active and reads only that buffer, which the writer
+     * cannot touch again until it becomes inactive after a later write. No
+     * retry loop, and no byte-level access is ever concurrent. */
+    char              request_json[2][MAX_SONG_JSON_LEN];
+    _Atomic(int)      request_active;
 } timeline_channel_t;
 
 /* Diff of clips whose resolved location differs from their stored folder,
@@ -533,7 +543,7 @@ typedef struct engine {
 
     /* Async primary (song_json) and staging (preload_song_json) build
      * channels -- see timeline_channel_t above. Both drained by the one
-     * worker thread; set_param only ever writes request_json/request_seq/
+     * worker thread; set_param only ever writes request_json/request_active/
      * request_gen and posts worker_wake. */
     timeline_channel_t primary_ch;
     timeline_channel_t staging_ch;
@@ -3165,23 +3175,18 @@ static void scan_library_into(engine_t *e, folder_entry_t *folders, int *out_cou
     *out_count = count;
 }
 
-/* Read ch->request_json via the seqlock, retrying if the audio thread is
- * mid-write (odd sequence) or the sequence changed during the copy. The
- * audio-thread write side (set_param("song_json"/"preload_song_json")) is a
- * single bounded copy_trunc, so a retry here resolves in at most a couple of
- * iterations in practice; on the (astronomically unlikely) exhaustion of all
- * attempts, returns 0 and the caller skips this wake -- the request_gen that
- * triggered the write already posted worker_wake, so the next wake retries
- * cleanly rather than spinning. */
+/* Read ch->request_json: acquire-load the double-buffer index the audio
+ * thread most recently published (release-stored in set_param("song_json"/
+ * "preload_song_json")) and copy that buffer. The acquire/release pair makes
+ * this a genuine happens-before edge, so the buffer's content is guaranteed
+ * fully written and never concurrently touched -- unlike the seqlock this
+ * replaced, there is nothing to retry; the read always succeeds in one
+ * attempt. Kept as an int-returning function (rather than void) so the one
+ * caller's existing "skip this wake" shape needs no change. */
 static int read_request_json(timeline_channel_t *ch, char *out, size_t out_len) {
-    for (int attempt = 0; attempt < 8; attempt++) {
-        uint32_t before = atomic_load_explicit(&ch->request_seq, memory_order_acquire);
-        if (before & 1u) continue; /* writer in flight */
-        copy_trunc(out, out_len, ch->request_json);
-        uint32_t after = atomic_load_explicit(&ch->request_seq, memory_order_acquire);
-        if (before == after) return 1;
-    }
-    return 0;
+    int active = atomic_load_explicit(&ch->request_active, memory_order_acquire);
+    copy_trunc(out, out_len, ch->request_json[active]);
+    return 1;
 }
 
 /* Copy a just-built timeline+song into a channel's slot, bounded by
@@ -3447,6 +3452,22 @@ static void drain_events_up_to(engine_t *e, uint32_t target) {
     }
 }
 
+/* Emit a single timeline event via the channel-override + emit_directly/
+ * queue_push path shared by drain_events_up_to_guarded and
+ * rescue_guard_window_events below. Deliberately does not trigger follow-note
+ * instruments -- that is drain_events_up_to's own, separate behavior for
+ * ordinary in-block playback, not shared with either of the swap-boundary
+ * paths this helper serves. */
+static void emit_timeline_event(engine_t *e, const smf_event_t *ev) {
+    e->last_event_channel_override = ev->channel_override;
+    if (e->emit_directly) {
+        emit_direct_event(e, ev->status, ev->data1, ev->data2, ev->len);
+    } else {
+        uint8_t status = apply_channel_override(ev->status, ev->channel_override);
+        queue_push(e, status, ev->data1, ev->data2, ev->len);
+    }
+}
+
 /* Drain events up to `target`, suppressing note-ons at or after `guard_start`
  * (an absolute tick). This is used at a swap boundary so a groove that is cut
  * short by a transition doesn't fire a note-on in the guard window before the
@@ -3467,14 +3488,40 @@ static void drain_events_up_to_guarded(engine_t *e, uint32_t target, uint32_t gu
             e->event_cursor++;
             continue;
         }
-        e->last_event_channel_override = ev->channel_override;
-        if (e->emit_directly) {
-            emit_direct_event(e, ev->status, ev->data1, ev->data2, ev->len);
-        } else {
-            uint8_t status = apply_channel_override(ev->status, ev->channel_override);
-            queue_push(e, status, ev->data1, ev->data2, ev->len);
-        }
+        emit_timeline_event(e, ev);
         e->event_cursor++;
+    }
+}
+
+/* When a swap resumes into a NEW timeline mid-clip, the forward walk that
+ * positions event_cursor at the first event with tick >= resume_tick (done by
+ * each caller, just before this) skips every earlier event outright --
+ * including ones in the guard window just before resume_tick, which would
+ * otherwise have played a beat or so ahead of the boundary (e.g. a kick
+ * struck slightly ahead of the downbeat, a common pickup-note pattern in a
+ * drum clip). Observed on hardware: a fill auto-swapping back into a
+ * partially-played groove could silently drop such a note, since the
+ * groove's own timeline resumes past it.
+ *
+ * Rather than filtering by message type (a short hit's note-on and note-off
+ * can both land in the window; rescuing only the note-on would strand the
+ * note-off and hang the note), this replays the WHOLE guard-window slice in
+ * original order, right at the resume point -- the same events, compressed
+ * to fire immediately instead of at their original, now-skipped ticks.
+ *
+ * Uses the same guard window (swap_guard_fraction) the outgoing side of a
+ * swap already guards with, so a single "Swap Guard" setting governs both
+ * ends of the seam. Call this AFTER the forward walk that sets event_cursor
+ * for the newly-activated live_slot. */
+static void rescue_guard_window_events(engine_t *e, uint32_t resume_tick, uint32_t guard_ticks) {
+    if (e->event_cursor <= 0) return;
+    uint32_t guard_start = (resume_tick > guard_ticks) ? (resume_tick - guard_ticks) : 0;
+    int first = e->event_cursor;
+    while (first > 0 && e->live_slot.events[first - 1].tick >= guard_start) {
+        first--;
+    }
+    for (int i = first; i < e->event_cursor; i++) {
+        emit_timeline_event(e, &e->live_slot.events[i]);
     }
 }
 
@@ -3541,6 +3588,18 @@ static void handle_loop_or_stop(engine_t *e, uint32_t *target) {
                 while (e->event_cursor < e->live_slot.event_count &&
                        e->live_slot.events[e->event_cursor].tick < e->playhead_tick) {
                     e->event_cursor++;
+                }
+                /* Rescue any events in the guard window just before the
+                 * resume point (e.g. a kick struck just ahead of the
+                 * downbeat) that the forward walk above just skipped past --
+                 * see rescue_guard_window_events. */
+                {
+                    double gf = e->swap_guard_fraction;
+                    if (gf < 0.0) gf = 0.0;
+                    if (gf > 1.0) gf = 1.0;
+                    uint32_t guard = (uint32_t)(gf * e->ticks_per_beat);
+                    if (guard == 0) guard = 1;
+                    rescue_guard_window_events(e, resume, guard);
                 }
                 /* The timeline changed; track the new clip's starting bar. */
                 e->last_bar = e->live_slot.end_tick > 0
@@ -3743,6 +3802,17 @@ static void advance_playhead(engine_t *e, int frames, int sample_rate) {
         while (e->event_cursor < e->live_slot.event_count &&
                e->live_slot.events[e->event_cursor].tick < e->playhead_tick) {
             e->event_cursor++;
+        }
+        /* Rescue any events in the guard window just before the resume
+         * point that the forward walk above just skipped past -- see
+         * rescue_guard_window_events. */
+        {
+            double gf = e->swap_guard_fraction;
+            if (gf < 0.0) gf = 0.0;
+            if (gf > 1.0) gf = 1.0;
+            uint32_t guard = (uint32_t)(gf * e->ticks_per_beat);
+            if (guard == 0) guard = 1;
+            rescue_guard_window_events(e, resume, guard);
         }
         /* The timeline changed; track the new clip's starting bar. */
         e->last_bar = e->live_slot.end_tick > 0
@@ -4033,16 +4103,20 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
          * This prevents stale loop state from causing preview/song to loop
          * when the timeline is rebuilt. */
         e->loop = 0;
-        /* Hand the payload to the worker via the seqlock-protected request
-         * buffer and bump request_gen -- the build itself (parse + clip
+        /* Hand the payload to the worker via the double-buffered request slot
+         * and bump request_gen -- the build itself (parse + clip
          * resolution/loading + assembly) now runs entirely on the worker
          * thread, not inline here. This call returns in low microseconds
          * regardless of song complexity; JS polls state.primary_published_gen
-         * to know when the build actually lands. */
-        uint32_t seq = atomic_load_explicit(&e->primary_ch.request_seq, memory_order_relaxed);
-        atomic_store_explicit(&e->primary_ch.request_seq, seq + 1, memory_order_release);
-        copy_trunc(e->primary_ch.request_json, sizeof(e->primary_ch.request_json), val);
-        atomic_store_explicit(&e->primary_ch.request_seq, seq + 2, memory_order_release);
+         * to know when the build actually lands. Write the buffer
+         * request_active does NOT currently point to, then flip it with a
+         * release store -- see request_active's declaration. */
+        {
+            int cur = atomic_load_explicit(&e->primary_ch.request_active, memory_order_relaxed);
+            int next = 1 - cur;
+            copy_trunc(e->primary_ch.request_json[next], sizeof(e->primary_ch.request_json[next]), val);
+            atomic_store_explicit(&e->primary_ch.request_active, next, memory_order_release);
+        }
         atomic_fetch_add_explicit(&e->primary_ch.request_gen, 1, memory_order_release);
         sem_post(&e->worker_wake);
         return;
@@ -4052,10 +4126,12 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
          * current clip keeps playing. Activate it later via "swap". Same
          * async request shape as song_json, above -- see
          * state.staging_published_gen. */
-        uint32_t seq = atomic_load_explicit(&e->staging_ch.request_seq, memory_order_relaxed);
-        atomic_store_explicit(&e->staging_ch.request_seq, seq + 1, memory_order_release);
-        copy_trunc(e->staging_ch.request_json, sizeof(e->staging_ch.request_json), val);
-        atomic_store_explicit(&e->staging_ch.request_seq, seq + 2, memory_order_release);
+        {
+            int cur = atomic_load_explicit(&e->staging_ch.request_active, memory_order_relaxed);
+            int next = 1 - cur;
+            copy_trunc(e->staging_ch.request_json[next], sizeof(e->staging_ch.request_json[next]), val);
+            atomic_store_explicit(&e->staging_ch.request_active, next, memory_order_release);
+        }
         atomic_fetch_add_explicit(&e->staging_ch.request_gen, 1, memory_order_release);
         sem_post(&e->worker_wake);
         return;

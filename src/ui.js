@@ -296,6 +296,30 @@ function requestStagingBuild(setFn, onReady) {
 }
 
 let shiftHeld = false;
+/* Long-press-Back-to-suspend state. Shift+Back can't be used for this: the
+ * host intercepts it unconditionally, before onMidiMessageInternal ever
+ * runs, as its own universal full-exit gesture for suspend_keeps_js modules
+ * (shadow_ui.js) -- the module has no way to see it, let alone repurpose it.
+ * Plain Back is the only gesture suspend_self_managed hands to the module at
+ * all, and every view's existing Back handling fires immediately on PRESS
+ * (stop playback + navigate in Jam/Perform, exit at root) -- so a hold
+ * cannot be layered on top of that: by the time a hold is detected the
+ * view's own action has already run, which is exactly what made suspending
+ * pointless before this (Jam/Perform's playback was already stopped by the
+ * Back press that navigated to where suspend is reachable). Back is
+ * intercepted here instead, before any view sees it: press starts the hold
+ * timer without dispatching anything yet; tick() promotes it to a suspend at
+ * BACK_SUSPEND_HOLD_MS if still held; release dispatches the normal
+ * per-view Back action only if the hold never fired -- a quick tap reaches
+ * exactly the same handling as before, just on release rather than on
+ * press, which is imperceptible for an actual tap and is what makes a hold
+ * distinguishable from one in the first place. */
+let backHoldActive = false;
+let backHoldStartTime = 0;
+let backHoldSuspendFired = false;
+let backHoldPressValue = 0;
+let backHoldStatusByte = 0xB0;
+const BACK_SUSPEND_HOLD_MS = 500;
 let needsRedraw = true;
 let ledQueue = [];
 const LEDS_PER_TICK = 8;
@@ -1783,6 +1807,78 @@ function addSongToSetlist(setlist, songFile) {
     saveSetlist(setlist);
 }
 
+/* Call `mutate(obj, path)` for every saved setlist's parsed object. If it
+ * returns true (meaning obj.songs was changed), the file is rewritten and
+ * currentSetlist is kept in sync if it's the one just edited on disk, so a
+ * view still holding it (Setlist Editor, Performance) doesn't show a
+ * dangling/stale entry until its own next reload. Shared by
+ * removeSongFromAllSetlists and renameSongInAllSetlists below -- both need
+ * the same "find every setlist, maybe touch its songs[], save if touched"
+ * shape, just a different mutation. */
+function forEachSetlistFile(mutate) {
+    if (typeof os.readdir !== "function") return;
+    let names = [];
+    try {
+        const raw = os.readdir(SETLISTS_DIR);
+        if (Array.isArray(raw)) names = Array.isArray(raw[0]) ? raw[0] : raw;
+    } catch (e) { return; }
+    for (const n of names) {
+        if (typeof n !== "string" || !n.endsWith(".json")) continue;
+        const path = SETLISTS_DIR + "/" + n;
+        const obj = readJson(path);
+        if (!obj || !Array.isArray(obj.songs)) continue;
+        if (!mutate(obj, path)) continue;
+        obj.modified = new Date().toISOString();
+        writeJson(path, obj);
+        if (currentSetlist && currentSetlist.path === path) {
+            currentSetlist.songs = obj.songs;
+        }
+    }
+    setlistFiles = listSetlistFiles();
+}
+
+/* Remove every reference to `songPath` from every saved setlist. Called after
+ * a song is deleted so a setlist doesn't keep pointing at a file that no
+ * longer exists -- left alone, that entry would linger forever in the
+ * Setlist Editor and the Performance pad grid, and perfLoadSong/readJson
+ * would just silently fail on it each time it came up. */
+function removeSongFromAllSetlists(songPath) {
+    if (!songPath) return;
+    forEachSetlistFile((obj, path) => {
+        const before = obj.songs.length;
+        obj.songs = obj.songs.filter((s) => s && s.path !== songPath);
+        const changed = obj.songs.length !== before;
+        if (changed) {
+            logDebug("removeSongFromAllSetlists: removed " + (before - obj.songs.length) +
+                " entry from " + path + " for deleted song " + songPath);
+        }
+        return changed;
+    });
+}
+
+/* Update every reference to `oldPath` in every saved setlist to point at
+ * `newPath` instead (and refresh the entry's own cached display name to
+ * `newName`, if given). Called after a song is renamed -- unlike a delete,
+ * the song still exists, just under a new path/name, so setlist entries are
+ * repointed rather than dropped. */
+function renameSongInAllSetlists(oldPath, newPath, newName) {
+    if (!oldPath || !newPath) return;
+    forEachSetlistFile((obj, path) => {
+        let changed = false;
+        for (const s of obj.songs) {
+            if (s && s.path === oldPath) {
+                s.path = newPath;
+                if (newName) s.name = newName;
+                changed = true;
+            }
+        }
+        if (changed) {
+            logDebug("renameSongInAllSetlists: repointed entry in " + path + " -> " + newPath);
+        }
+        return changed;
+    });
+}
+
 function setSetlistClickBars(setlist, idx, bars) {
     if (!setlist || idx < 0 || idx >= setlist.songs.length) return;
     setlist.songs[idx].click_bars = Math.max(0, Math.min(4, bars));
@@ -2697,9 +2793,26 @@ function updateButtonLEDs() {
                  * playback) so the left/right arrow LEDs reflect the section
                  * actually shown, not the stale currentSectionIndex. */
                 const ledSec = currentSong ? currentSong.sections[builderDisplaySectionIndex()] : null;
-                const ledSectionIndex = builderDisplaySectionIndex();
+                /* Left/right availability needs the TRUE original index/total,
+                 * not builderDisplaySectionIndex()'s sliced-array-relative one.
+                 * While builderPlayingFromTemp, currentSong is sliced to start
+                 * at currentSectionIndex, so builderDisplaySectionIndex()
+                 * returns 0 -- correct for indexing into that sliced array
+                 * (ledSec above), but wrong for "is there a previous section":
+                 * 0 > 0 is false, so the Left arrow LED went dark for the
+                 * whole async gap before flipping back on once the jump
+                 * confirmed and currentSong reverted. currentSectionIndex
+                 * itself is never touched during that gap (only currentSong/
+                 * dspLoopEnabled/builderPlayingFromTemp are -- see
+                 * builderPlayingFromTemp's declaration), so it's still the
+                 * true original index throughout; same recovery the section
+                 * counter in drawBuilder uses. */
+                const ledSectionIndex = builderPlayingFromTemp ? currentSectionIndex : builderDisplaySectionIndex();
+                const ledTotalSections = (currentSong && currentSong.sections)
+                    ? (builderPlayingFromTemp ? currentSong.sections.length + currentSectionIndex : currentSong.sections.length)
+                    : 0;
                 const ledHasLeftSection = !!(currentSong && ledSectionIndex > 0);
-                const ledHasRightSection = !!(currentSong && currentSong.sections && ledSectionIndex < currentSong.sections.length - 1);
+                const ledHasRightSection = !!(currentSong && currentSong.sections && ledSectionIndex < ledTotalSections - 1);
                 active.set(MoveBack, WhiteLedBright);
                 active.set(MoveMenu, WhiteLedBright);
                 /* Record (change source folder) is a Drum-track concept. */
@@ -4261,6 +4374,7 @@ function scrollHeader(title, maxChars) {
 function drawRoot() {
     drawMenuHeader("Arranger", "v0.4");
     drawMenuList({
+        labelX: 3,
         items: [
             { label: "Song Builder" },
             { label: "Setlists" },
@@ -4286,7 +4400,7 @@ function drawFolderList() {
         getLabel: (item) => item.label,
         getValue: () => "",
         maxVisible: 5,
-        labelX: 0,
+        labelX: 3,
         labelGap: 0
     });
 }
@@ -4319,6 +4433,7 @@ function drawBuilder() {
         items.push({ type: "insert" });
     }
     drawMenuList({
+        labelX: 3,
         items,
         selectedIndex: builderCursor + 1,
         getLabel: (item) => {
@@ -4579,6 +4694,7 @@ function drawChordPick() {
         { key: "toggle", label: "Add Chord", value: "" }
     ];
     drawMenuList({
+        labelX: 3,
         items,
         selectedIndex: chordPickFocus,
         getLabel: (item) => item.label,
@@ -4677,6 +4793,7 @@ function drawInstrument() {
         { key: "gap", label: "Note Gap", value: noteGapLabel(inst ? inst.note_gap : 0.25) }
     ];
     drawMenuList({
+        labelX: 3,
         items,
         selectedIndex: instrumentFocus,
         getLabel: (item) => item.label,
@@ -4892,6 +5009,7 @@ function drawTrim() {
     items.push({ key: "kick_target", label: "Limit Notes/Bar", value: trimPendingKickTarget === 0 ? "Off" : String(trimPendingKickTarget) });
     items.push({ key: "channel", label: "MIDI Channel", value: trimPendingChannel === 0 ? "Default" : String(trimPendingChannel) });
     drawMenuList({
+        labelX: 3,
         items,
         selectedIndex,
         getLabel: (item) => item.label,
@@ -5117,6 +5235,7 @@ function drawSongSettings() {
         { key: "lock", label: "Lock Song", value: songIsLocked() ? "On" : "Off" }
     ];
     drawMenuList({
+        labelX: 3,
         items,
         selectedIndex: songSettingsFocus,
         getLabel: (item) => item.label,
@@ -5247,6 +5366,7 @@ function drawSongBank() {
         if (obj && obj.locked) lockMap.set(f.name, true);
     }
     drawMenuList({
+        labelX: 3,
         items,
         selectedIndex: selectedSongIndex,
         getLabel: (item) => item.label,
@@ -5268,6 +5388,7 @@ function drawOptions() {
         { key: "dspdebug", label: "DSP Debug", value: dspDebugEnabled ? "On" : "Off" }
     ];
     drawMenuList({
+        labelX: 3,
         items,
         selectedIndex: optionsFocus,
         getLabel: (item) => item.label,
@@ -5292,6 +5413,7 @@ function drawOptionsDrums() {
         { key: "channel", label: "MIDI Channel", value: String(activeOutputChannel()) }
     ];
     drawMenuList({
+        labelX: 3,
         items,
         selectedIndex: optionsSubFocus,
         getLabel: (item) => item.label,
@@ -5315,6 +5437,7 @@ function drawOptionsInst() {
         { key: "channel", label: "MIDI Channel", value: String(channel) }
     ];
     drawMenuList({
+        labelX: 3,
         items,
         selectedIndex: optionsSubFocus,
         getLabel: (item) => item.label,
@@ -5349,6 +5472,7 @@ function drawSetlistBank() {
     drawMenuHeader("Setlists", "");
     const items = [{ label: "+ New Setlist" }].concat(setlistFiles.map(f => ({ label: f.name || f })));
     drawMenuList({
+        labelX: 3,
         items,
         selectedIndex: selectedSetlistIndex,
         getLabel: (item) => item.label,
@@ -5363,6 +5487,7 @@ function drawSetlistEdit() {
     const items = songs.map((s, i) => ({ type: "song", index: i, name: shortSongName(s.name) || "" }));
     items.push({ type: "add" });
     drawMenuList({
+        labelX: 3,
         items,
         selectedIndex: setlistSongIndex,
         getLabel: (item) => {
@@ -5383,6 +5508,7 @@ function drawSetlistPick() {
     drawMenuHeader(scrollHeader("Add Song: " + (currentSetlist ? shortSongName(currentSetlist.name) : ""), 24), "");
     const items = songFiles.map(f => ({ label: shortSongName(f.name || f) }));
     drawMenuList({
+        labelX: 3,
         items,
         selectedIndex: setlistPickIndex,
         getLabel: (item) => item.label,
@@ -5395,6 +5521,7 @@ function drawSectionPick() {
     drawMenuHeader("New Section Name", "");
     const items = SECTION_NAMES.map(n => ({ label: n }));
     drawMenuList({
+        labelX: 3,
         items,
         selectedIndex: sectionPickIndex,
         getLabel: (item) => item.label,
@@ -5415,6 +5542,7 @@ function drawSetlistClick() {
         { key: "stop", label: "Stop At End", value: stop ? "Yes" : "No" }
     ];
     drawMenuList({
+        labelX: 3,
         items,
         selectedIndex: clickSettingsFocus,
         getLabel: (item) => item.label,
@@ -5579,6 +5707,7 @@ function drawPerfSetlist() {
     drawMenuHeader("Select Setlist", "");
     const items = setlistFiles.map(f => ({ label: f.name || f }));
     drawMenuList({
+        labelX: 3,
         items,
         selectedIndex: perfSetlistIndex,
         getLabel: (item) => item.label,
@@ -5670,7 +5799,7 @@ function drawJamFolder() {
         selectedIndex: jamFolderPickerSelectedIndex,
         getLabel: (item) => item.label,
         getValue: () => "",
-        labelX: 0,
+        labelX: 3,
         labelGap: 0,
         maxVisible: 5
     });
@@ -5740,17 +5869,23 @@ function handleRootInput(cc, value) {
             needsRedraw = true;
         }
     } else if (cc === MoveBack && value > 0) {
-        if (shiftHeld) {
-            /* Shift + Back suspends the module (keeps running in background). */
-            if (typeof host_suspend_overtake === "function") {
-                host_suspend_overtake();
-            }
-        } else {
-            if (typeof host_exit_module === "function") {
-                host_exit_module();
-            } else if (typeof host_return_to_menu === "function") {
-                host_return_to_menu();
-            }
+        /* A tap closes the module from the root menu -- this is as far back
+         * as our own navigation goes, so there's nowhere left for Back to
+         * navigate to. Suspending (parking in the background, keeping
+         * playback running) now lives on a long-press of Back instead, from
+         * any view -- see backHoldActive's declaration in onMidiMessageInternal
+         * for why it could not stay on this tap: every view's Back already
+         * stops playback before the user could ever navigate here, which
+         * made a plain-tap suspend here pointless (there was never anything
+         * left running to keep alive by the time it fired). Shift+Back
+         * reaches the same exitOvertakeMode() the host itself calls
+         * unconditionally for Shift+Back anyway -- this tap path is what a
+         * host without that interception, or one that hasn't yet seen
+         * Shift+Back, falls back to. */
+        if (typeof host_exit_module === "function") {
+            host_exit_module();
+        } else if (typeof host_return_to_menu === "function") {
+            host_return_to_menu();
         }
     } else if (cc === MoveMainButton && value > 0) {
         const idx = menuStack.getSelectedIndex();
@@ -6159,11 +6294,21 @@ function startRenameSelectedSong() {
                 } catch (e) {
                     logDebug("startRenameSelectedSong: failed to remove old file " + entry.path + " " + e);
                 }
+                /* Repoint any setlist entries at the new path/name -- the
+                 * song still exists, just moved, so unlike a delete these
+                 * are updated in place rather than dropped. */
+                renameSongInAllSetlists(entry.path, newPath, trimmed);
             }
             writeJson(newPath, obj);
             if (activeSongFile === entry.path) activeSongFile = newPath;
-            reloadSongBankAndPreserveSelection();
-            needsRedraw = true;
+            /* Request a DSP rescan and poll until the renamed path actually
+             * shows up in its cached song list -- reloadSongBankAndPreserve
+             * Selection alone (the old code here) only re-reads that cache
+             * as it already stood, without ever asking the DSP to refresh
+             * it, so the bank kept showing the pre-rename name until some
+             * unrelated later action happened to trigger a rescan. Matches
+             * duplicateSelectedSong's/deleteSelectedSong's own pattern. */
+            requestSongBankSync(newPath, true, true);
         },
         onCancel: () => { needsRedraw = true; }
     });
@@ -6242,6 +6387,9 @@ function deleteSelectedSong() {
                 }
             }
             if (activeSongFile === entry.path) activeSongFile = null;
+            /* Drop any setlist entries pointing at the now-deleted file --
+             * otherwise they'd linger as dangling references forever. */
+            removeSongFromAllSetlists(entry.path);
             /* Invalidate the DSP's cached song scan so the deleted song is
              * dropped from the bank list. The scan runs on the DSP's worker
              * thread, so it isn't done by the time this call returns —
@@ -9397,6 +9545,17 @@ globalThis.init = function() {
 };
 
 globalThis.tick = function() {
+    /* Promote a held Back to a suspend once it's been down BACK_SUSPEND_HOLD_MS
+     * -- see backHoldActive's declaration. Checked unconditionally, ahead of
+     * every view-specific tick work below, so it fires regardless of what the
+     * module is currently doing. */
+    if (backHoldActive && !backHoldSuspendFired && Date.now() - backHoldStartTime >= BACK_SUSPEND_HOLD_MS) {
+        backHoldSuspendFired = true;
+        if (typeof host_suspend_overtake === "function") {
+            host_suspend_overtake();
+        }
+    }
+
     /* Diagnostic for the LED-queue backlog report: sample ledQueue.length
      * every ~2s (any view, any activity -- the backlog was already large at
      * the START of a preview session, so it isn't obviously jam-specific)
@@ -9690,6 +9849,47 @@ globalThis.tick = function() {
     flushLedQueue();
 };
 
+/* The CC routing every non-Back CC has always gone through immediately, on
+ * press. Extracted so the Back long-press-to-suspend interception below can
+ * call it too -- for a plain tap, on release, instead of on press -- without
+ * duplicating it. `rawData` is only needed to reconstruct the array
+ * handleTextEntryMidi expects. */
+function routeCcInput(rawData, cc, value) {
+    if (isTextEntryActive()) {
+        /* While editing a name, all input goes to the keyboard. The
+         * previous screen's buttons (loop/delete/etc.) are ignored. */
+        handleTextEntryMidi(rawData);
+        needsRedraw = true;
+        return;
+    }
+    if (confirmState) {
+        handleConfirmInput(cc, value);
+        return;
+    }
+    switch (currentView) {
+        case VIEW_ROOT: handleRootInput(cc, value); break;
+        case VIEW_FOLDER_LIST: handleFolderListInput(cc, value); break;
+        case VIEW_BUILDER: handleBuilderInput(cc, value); break;
+        case VIEW_TRIM: handleTrimInput(cc, value); break;
+        case VIEW_SONG_SETTINGS: handleSongSettingsInput(cc, value); break;
+        case VIEW_SONG_BANK: handleSongBankInput(cc, value); break;
+        case VIEW_OPTIONS: handleOptionsInput(cc, value); break;
+        case VIEW_OPTIONS_DRUMS: handleOptionsDrumsInput(cc, value); break;
+        case VIEW_OPTIONS_INST: handleOptionsInstInput(cc, value); break;
+        case VIEW_SETLIST_BANK: handleSetlistBankInput(cc, value); break;
+        case VIEW_SETLIST_EDIT: handleSetlistEditInput(cc, value); break;
+        case VIEW_SETLIST_PICK: handleSetlistPickInput(cc, value); break;
+        case VIEW_SETLIST_CLICK: handleSetlistClickInput(cc, value); break;
+        case VIEW_SECTION_PICK: handleSectionPickInput(cc, value); break;
+        case VIEW_PERF_SETLIST: handlePerfSetlistInput(cc, value); break;
+        case VIEW_PERFORMANCE: handlePerformanceInput(cc, value); break;
+        case VIEW_JAM_FOLDER: handleJamFolderInput(cc, value); break;
+        case VIEW_JAM: handleJamInput(cc, value); break;
+        case VIEW_CHORD_PICK: handleChordPickInput(cc, value); break;
+        case VIEW_INSTRUMENT: handleInstrumentInput(cc, value); break;
+    }
+}
+
 globalThis.onMidiMessageInternal = function(data) {
     const status = data[0] & 0xF0;
     const cc = data[1];
@@ -9700,39 +9900,23 @@ globalThis.onMidiMessageInternal = function(data) {
             shiftHeld = value > 0;
             return;
         }
-        if (isTextEntryActive()) {
-            /* While editing a name, all input goes to the keyboard. The
-             * previous screen's buttons (loop/delete/etc.) are ignored. */
-            handleTextEntryMidi(data);
-            needsRedraw = true;
+        if (cc === MoveBack) {
+            /* See backHoldActive's declaration. */
+            if (value > 0) {
+                backHoldActive = true;
+                backHoldStartTime = Date.now();
+                backHoldSuspendFired = false;
+                backHoldPressValue = value;
+                backHoldStatusByte = data[0];
+            } else {
+                backHoldActive = false;
+                if (!backHoldSuspendFired) {
+                    routeCcInput([backHoldStatusByte, cc, backHoldPressValue], cc, backHoldPressValue);
+                }
+            }
             return;
         }
-        if (confirmState) {
-            handleConfirmInput(cc, value);
-            return;
-        }
-        switch (currentView) {
-            case VIEW_ROOT: handleRootInput(cc, value); break;
-            case VIEW_FOLDER_LIST: handleFolderListInput(cc, value); break;
-            case VIEW_BUILDER: handleBuilderInput(cc, value); break;
-            case VIEW_TRIM: handleTrimInput(cc, value); break;
-            case VIEW_SONG_SETTINGS: handleSongSettingsInput(cc, value); break;
-            case VIEW_SONG_BANK: handleSongBankInput(cc, value); break;
-            case VIEW_OPTIONS: handleOptionsInput(cc, value); break;
-            case VIEW_OPTIONS_DRUMS: handleOptionsDrumsInput(cc, value); break;
-            case VIEW_OPTIONS_INST: handleOptionsInstInput(cc, value); break;
-            case VIEW_SETLIST_BANK: handleSetlistBankInput(cc, value); break;
-            case VIEW_SETLIST_EDIT: handleSetlistEditInput(cc, value); break;
-            case VIEW_SETLIST_PICK: handleSetlistPickInput(cc, value); break;
-            case VIEW_SETLIST_CLICK: handleSetlistClickInput(cc, value); break;
-            case VIEW_SECTION_PICK: handleSectionPickInput(cc, value); break;
-            case VIEW_PERF_SETLIST: handlePerfSetlistInput(cc, value); break;
-            case VIEW_PERFORMANCE: handlePerformanceInput(cc, value); break;
-            case VIEW_JAM_FOLDER: handleJamFolderInput(cc, value); break;
-            case VIEW_JAM: handleJamInput(cc, value); break;
-            case VIEW_CHORD_PICK: handleChordPickInput(cc, value); break;
-            case VIEW_INSTRUMENT: handleInstrumentInput(cc, value); break;
-        }
+        routeCcInput(data, cc, value);
     } else if (status === MidiNoteOn || status === MidiNoteOff) {
         if (isTextEntryActive()) {
             /* While editing a name, pads go to the keyboard (typing/select),
