@@ -58,7 +58,24 @@ import {
 
 import * as os from 'os';
 
-const { print, clear_screen, setTimeout } = globalThis;
+const { setTimeout } = globalThis;
+/* NOT destructured like setTimeout above: the host neutralizes print/
+ * clear_screen (along with draw_rect/fill_rect/draw_line/draw_image) into
+ * no-ops on globalThis for the duration of a parked module's tick() -- see
+ * shadow_ui.js's background-tick loop -- specifically so a suspend_keeps_js
+ * module (like this one; see module.json) can keep running in the
+ * background without stomping on whatever Schwung screen the user has
+ * since navigated to. A `const { print } = globalThis` destructure captures
+ * today's REAL function once at load time into a permanent local binding,
+ * so every later call still reaches the live screen no matter what the host
+ * swaps globalThis.print to -- exactly the bug reported as the display
+ * flickering between the Arranger and a Schwung menu while parked in the
+ * background. These thin wrappers re-resolve through globalThis on every
+ * call instead, so the host's swap actually takes effect. fill_rect/
+ * draw_rect/draw_line/draw_image are already called as bare globals
+ * elsewhere in this file (never destructured), so they were never affected. */
+function print(...args) { return globalThis.print(...args); }
+function clear_screen(...args) { return globalThis.clear_screen(...args); }
 
 /* ── Constants ─────────────────────────────────────────────────────── */
 
