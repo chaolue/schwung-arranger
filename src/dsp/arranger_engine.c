@@ -2281,6 +2281,32 @@ static void emit_instruments_follow(engine_t *e, uint8_t note, uint32_t tick) {
 /* Song loading from JSON                                                     */
 /* -------------------------------------------------------------------------- */
 
+/* Skip over a JSON array's content, starting at `p` positioned at its
+ * opening '[', returning a pointer just past the matching ']'. Handles
+ * nested objects/arrays and string escaping. Used by parse_song_json to
+ * keep its clip scanner from walking into a section's "chords" array --
+ * see the comment at its call site for the bug this fixes. */
+static const char *skip_json_array(const char *p) {
+    if (!p || *p != '[') return p;
+    int depth = 0, in_string = 0, escape = 0;
+    while (*p) {
+        char c = *p;
+        if (escape) { escape = 0; p++; continue; }
+        if (c == '\\') { escape = 1; p++; continue; }
+        if (c == '"') { in_string = !in_string; p++; continue; }
+        if (in_string) { p++; continue; }
+        if (c == '[' || c == '{') { depth++; p++; continue; }
+        if (c == ']' || c == '}') {
+            depth--;
+            p++;
+            if (depth == 0) return p;
+            continue;
+        }
+        p++;
+    }
+    return p;
+}
+
 /* Parse a song JSON into the supplied `song` structure and return its tempo /
  * time-signature / tick grid. This helper is shared by the active song load
  * and the Jam-mode preload path. It resolves clip indices into the engine's
@@ -2342,6 +2368,30 @@ static int parse_song_json(engine_t *e, const char *json, song_t *song,
         if (c == '\\') { escape = 1; p++; continue; }
         if (c == '"') {
             in_string = !in_string;
+            /* This scanner's clip_idx/clip_count bookkeeping (below, at
+             * depth == 2) previously counted ANY nested object at section
+             * depth as a clip, with no awareness of which array it actually
+             * came from -- so a section's "chords" array (a sibling of
+             * "clips", parsed separately by parse_section_chords/
+             * parse_chords_and_instruments) was ALSO silently counted
+             * against MAX_SECTION_CLIPS. A section combining clips+chords
+             * past that cap made the entire parse_song_json call return -1
+             * (aborting the whole song build, not just that section) --
+             * and even below the cap, every miscounted "chords" entry ate a
+             * real clip_idx slot with clip_index left at -1, producing a
+             * spurious "clip not resolved" error and corrupting later
+             * clips' positions once one appeared before them in the JSON.
+             * Skip the entire "chords" array here instead of walking into
+             * it, so only genuine "clips" entries are ever counted. */
+            if (in_string && depth == 1 && section_idx >= 0 &&
+                strncmp(p + 1, "chords\"", 7) == 0) {
+                const char *ch_arr = strchr(p + 1, '[');
+                if (ch_arr) {
+                    p = skip_json_array(ch_arr);
+                    in_string = 0; /* the skip consumed the closing '"' pairing too */
+                    continue;
+                }
+            }
             /* When entering a string at clip depth, parse the key. */
             if (in_string && depth == 2 && section_idx >= 0 && clip_idx >= 0) {
                 section_t *sec = &song->sections[section_idx];
@@ -2700,7 +2750,15 @@ static void parse_section_chords(const char *arr, section_t *sec) {
 /* Parse an instrument's "bars" array: [[1,0,...], [1,1,...], ...]. Each inner
  * array is one section; each 0/1 value is one bar (on/off). The bar index
  * advances per VALUE (comma-separated), not per '[' — an inner array has a
- * single '[' but many values. */
+ * single '[' but many values. A new section starts at DEPTH 2 (each inner
+ * array's own '['), not depth 1 (the single outer wrapping '[') -- depth 1
+ * only fires once for the whole array, so keying the section boundary off it
+ * left every section but the first writing into bars[0] at whatever bar
+ * index the accumulating (never-reset) `bar` counter had reached, silently
+ * corrupting section 0 with later sections' mute data on any song with more
+ * than one section. Also stops at this array's own closing ']' (depth back
+ * to 0) rather than continuing to scan -- and potentially match stray digits
+ * against -- the rest of the JSON. */
 static void parse_instrument_bars(const char *arr, instrument_t *inst) {
     if (!arr || !inst) return;
     int depth = 0, in_string = 0, escape = 0;
@@ -2714,11 +2772,16 @@ static void parse_instrument_bars(const char *arr, instrument_t *inst) {
         if (in_string) { p++; continue; }
         if (c == '[') {
             depth++;
-            if (depth == 1) { section++; bar = -1; }
+            if (depth == 2) { section++; bar = -1; }
             p++;
             continue;
         }
-        if (c == ']') { depth--; p++; continue; }
+        if (c == ']') {
+            depth--;
+            if (depth == 0) break;
+            p++;
+            continue;
+        }
         if (c == '0' || c == '1') {
             if (depth == 2) {
                 bar++;
