@@ -130,6 +130,7 @@ const VIEW_JAM = "jam";
 const VIEW_SECTION_PICK = "section_pick";
 const VIEW_CHORD_PICK = "chord_pick";
 const VIEW_INSTRUMENT = "instrument";
+const VIEW_INSTRUMENT_BAR = "instrument_bar";
 
 /* Section names offered when adding a new section via Shift + Loop. */
 const SECTION_NAMES = [
@@ -421,6 +422,13 @@ let chordPickHasChord = false;
 let instrumentEditTrack = -1;
 let instrumentFocus = 0;
 let instrumentEditing = false;
+/* Per-bar instrument override menu state (Octave/Follow Note/Voicing/Mute
+ * for a single bar, opened by a plain step press on an instrument track). */
+let instrumentBarEditTrack = -1;
+let instrumentBarEditSection = 0;
+let instrumentBarEditBar = 0;
+let instrumentBarFocus = 0;
+let instrumentBarEditing = false;
 
 let selectedOutputIndex = 0;
 let optionsFocus = 0;      /* 0 = Drums, 1 = Instrument 1, 2 = Instrument 2, 3 = Click channel, 4 = Swap guard, 5 = DSP debug */
@@ -1230,10 +1238,14 @@ function instrumentForTrack(track) {
             octave: 3,
             follow_note: 0,
             voicing: "bass",
+            inversion: 0,
             note_gap: 0.25,
-            bars: []
+            bars: [],
+            overrides: []
         };
     }
+    if (!currentSong.instruments[idx].overrides) currentSong.instruments[idx].overrides = [];
+    if (typeof currentSong.instruments[idx].inversion !== "number") currentSong.instruments[idx].inversion = 0;
     return currentSong.instruments[idx];
 }
 
@@ -1273,7 +1285,7 @@ function instrumentBars(inst) {
 }
 
 /* Whether the instrument sends a chord on a given section/bar (default on). */
-function instrumentBarOn(inst, sectionIndex, barIndex) {
+export function instrumentBarOn(inst, sectionIndex, barIndex) {
     const bars = instrumentBars(inst);
     const sec = bars[sectionIndex];
     if (!sec) return true;
@@ -1281,7 +1293,7 @@ function instrumentBarOn(inst, sectionIndex, barIndex) {
 }
 
 /* Toggle the instrument's chord on/off for a section/bar. */
-function toggleInstrumentBar(inst, sectionIndex, barIndex) {
+export function toggleInstrumentBar(inst, sectionIndex, barIndex) {
     const bars = instrumentBars(inst);
     if (!bars[sectionIndex]) bars[sectionIndex] = [];
     const cur = bars[sectionIndex][barIndex] !== false;
@@ -1289,8 +1301,67 @@ function toggleInstrumentBar(inst, sectionIndex, barIndex) {
     unsavedChanges = true;
 }
 
+/* Find the per-bar override entry for a section/bar, or null if that bar has
+ * no override (uses track defaults for octave/follow_note/voicing). */
+export function instrumentBarOverride(inst, sectionIndex, barIndex) {
+    if (!inst || !inst.overrides) return null;
+    for (const ov of inst.overrides) {
+        if (ov.section === sectionIndex && ov.bar === barIndex) return ov;
+    }
+    return null;
+}
+
+/* The effective octave/follow_note/voicing for a bar: the override's value
+ * where set, else the track default. */
+export function resolvedInstrumentForBar(inst, sectionIndex, barIndex) {
+    const ov = instrumentBarOverride(inst, sectionIndex, barIndex);
+    return {
+        octave: (ov && ov.octave !== null && ov.octave !== undefined) ? ov.octave : inst.octave,
+        follow_note: (ov && ov.follow_note !== null && ov.follow_note !== undefined) ? ov.follow_note : inst.follow_note,
+        voicing: (ov && ov.voicing !== null && ov.voicing !== undefined) ? ov.voicing : inst.voicing,
+        inversion: (ov && ov.inversion !== null && ov.inversion !== undefined) ? ov.inversion : (inst.inversion || 0)
+    };
+}
+
+/* Set (or clear) one field of a bar's override. Materializes an override
+ * entry on first real edit (mirrors the Chord Picker's "don't create data
+ * just by viewing" convention, commitChordPick above); if clearing a field
+ * back to "Default" leaves the entry with nothing set, the entry itself is
+ * removed so the array stays sparse. `value` of null/undefined means
+ * "Default" (use the track setting) for that field. */
+export function setInstrumentBarOverrideField(inst, sectionIndex, barIndex, field, value) {
+    if (!inst) return;
+    if (!inst.overrides) inst.overrides = [];
+    let ov = instrumentBarOverride(inst, sectionIndex, barIndex);
+    if (value === null || value === undefined) {
+        if (ov) {
+            delete ov[field];
+            const hasAny = ["octave", "follow_note", "voicing", "inversion"].some(f => ov[f] !== null && ov[f] !== undefined);
+            if (!hasAny) {
+                const idx = inst.overrides.indexOf(ov);
+                if (idx >= 0) inst.overrides.splice(idx, 1);
+            }
+        }
+    } else {
+        if (!ov) {
+            ov = { section: sectionIndex, bar: barIndex };
+            inst.overrides.push(ov);
+        }
+        ov[field] = value;
+    }
+    unsavedChanges = true;
+}
+
+/* Display label for a full-chord inversion (0-3: root/1st/2nd/3rd). Only
+ * audible with "chord" voicing -- a triad clamps 3rd inversion down to 2nd
+ * on the DSP side, so labelling all four here is harmless either way. */
+export function inversionLabel(inv) {
+    const labels = ["Root", "1st Inv", "2nd Inv", "3rd Inv"];
+    return labels[Math.max(0, Math.min(3, inv || 0))];
+}
+
 /* Display label for the note-gap value (fraction of a beat). */
-function noteGapLabel(gap) {
+export function noteGapLabel(gap) {
     if (!gap || gap <= 0) return "Off";
     if (gap >= 1) return "1 beat";
     if (gap >= 0.5) return "1/2";
@@ -1310,7 +1381,7 @@ function resolveClipSource(source, folderName) {
     return s + ".mid";
 }
 
-function toEngineSongJson(song) {
+export function toEngineSongJson(song) {
     const secOut = [];
     for (const sec of song.sections) {
         const clipsOut = [];
@@ -1388,12 +1459,35 @@ function toEngineSongJson(song) {
             octave: (typeof inst.octave === "number") ? inst.octave : 3,
             follow_note: (typeof inst.follow_note === "number") ? inst.follow_note : 0,
             voicing: inst.voicing || "bass",
+            /* Full-chord inversion (voicing "chord" only): 0 = root position,
+             * 1/2/3 = first/second/third inversion. Meaningless for "bass"
+             * voicing, but still carried so switching a bar back to "chord"
+             * remembers it. */
+            inversion: (typeof inst.inversion === "number") ? inst.inversion : 0,
             note_gap: (typeof inst.note_gap === "number") ? inst.note_gap : 0.25,
             /* Per-section per-bar on/off map: 1 = send chord, 0 = muted.
              * Bars are "on by default": only an explicit `false` mutes a bar;
              * an unset (undefined) bar sends. Serialize accordingly so the DSP
              * (which also defaults bars to "send") matches the UI. */
-            bars: (inst.bars || []).map(sec => (sec || []).map(b => (b === false ? 0 : 1)))
+            bars: (inst.bars || []).map(sec => (sec || []).map(b => (b === false ? 0 : 1))),
+            /* Sparse per-bar overrides for octave/follow_note/voicing/
+             * inversion: only bars with an explicit override appear here at
+             * all, and a field left "Default" on a bar that DOES have an
+             * override is simply omitted (see parse_instrument_overrides on
+             * the DSP side). */
+            overrides: (inst.overrides || []).filter(ov => ov && (
+                (ov.octave !== null && ov.octave !== undefined) ||
+                (ov.follow_note !== null && ov.follow_note !== undefined) ||
+                (ov.voicing !== null && ov.voicing !== undefined) ||
+                (ov.inversion !== null && ov.inversion !== undefined)
+            )).map(ov => {
+                const out = { section: ov.section, bar: ov.bar };
+                if (ov.octave !== null && ov.octave !== undefined) out.octave = ov.octave;
+                if (ov.follow_note !== null && ov.follow_note !== undefined) out.follow_note = ov.follow_note;
+                if (ov.voicing !== null && ov.voicing !== undefined) out.voicing = ov.voicing;
+                if (ov.inversion !== null && ov.inversion !== undefined) out.inversion = ov.inversion;
+                return out;
+            })
         });
     }
     return JSON.stringify({
@@ -1410,7 +1504,7 @@ function toEngineSongJson(song) {
     });
 }
 
-function toUiSong(engineLike) {
+export function toUiSong(engineLike) {
     const s = engineLike || {};
     const songFolder = s.source_folder || "";
     return {
@@ -1472,8 +1566,17 @@ function toUiSong(engineLike) {
             octave: (typeof inst.octave === "number") ? inst.octave : 3,
             follow_note: (typeof inst.follow_note === "number") ? inst.follow_note : 0,
             voicing: inst.voicing || "bass",
+            inversion: (typeof inst.inversion === "number") ? inst.inversion : 0,
             note_gap: (typeof inst.note_gap === "number") ? inst.note_gap : 0.25,
-            bars: (inst.bars || []).map(sec => (sec || []).map(b => !!b))
+            bars: (inst.bars || []).map(sec => (sec || []).map(b => !!b)),
+            overrides: (inst.overrides || []).map(ov => {
+                const out = { section: ov.section, bar: ov.bar };
+                if (typeof ov.octave === "number") out.octave = ov.octave;
+                if (typeof ov.follow_note === "number") out.follow_note = ov.follow_note;
+                if (ov.voicing === "bass" || ov.voicing === "chord") out.voicing = ov.voicing;
+                if (typeof ov.inversion === "number") out.inversion = ov.inversion;
+                return out;
+            })
         }))
     };
 }
@@ -4220,16 +4323,16 @@ function updateLEDs() {
     let leavingStepView = false;
     if (currentView !== lastLedView) {
         /* Changing views needs a full pad refresh. Step LEDs only matter in
-         * builder/performance/jam (and the chord-pick submenu, which keeps
-         * showing the chord track's bar LEDs underneath it); leaving that
-         * family should turn them off so they don't stay stuck showing the
-         * last song/section. */
-        if (currentView === VIEW_BUILDER || currentView === VIEW_PERFORMANCE || currentView === VIEW_JAM || currentView === VIEW_CHORD_PICK ||
-            lastLedView === VIEW_BUILDER || lastLedView === VIEW_PERFORMANCE || lastLedView === VIEW_JAM || lastLedView === VIEW_CHORD_PICK) {
+         * builder/performance/jam (and the chord-pick and instrument-bar
+         * submenus, which keep showing the chord/instrument track's bar LEDs
+         * underneath them); leaving that family should turn them off so they
+         * don't stay stuck showing the last song/section. */
+        if (currentView === VIEW_BUILDER || currentView === VIEW_PERFORMANCE || currentView === VIEW_JAM || currentView === VIEW_CHORD_PICK || currentView === VIEW_INSTRUMENT_BAR ||
+            lastLedView === VIEW_BUILDER || lastLedView === VIEW_PERFORMANCE || lastLedView === VIEW_JAM || lastLedView === VIEW_CHORD_PICK || lastLedView === VIEW_INSTRUMENT_BAR) {
             stepLedsDirty = true;
         }
-        if ((lastLedView === VIEW_BUILDER || lastLedView === VIEW_PERFORMANCE || lastLedView === VIEW_JAM || lastLedView === VIEW_CHORD_PICK) &&
-            currentView !== VIEW_BUILDER && currentView !== VIEW_PERFORMANCE && currentView !== VIEW_JAM && currentView !== VIEW_CHORD_PICK) {
+        if ((lastLedView === VIEW_BUILDER || lastLedView === VIEW_PERFORMANCE || lastLedView === VIEW_JAM || lastLedView === VIEW_CHORD_PICK || lastLedView === VIEW_INSTRUMENT_BAR) &&
+            currentView !== VIEW_BUILDER && currentView !== VIEW_PERFORMANCE && currentView !== VIEW_JAM && currentView !== VIEW_CHORD_PICK && currentView !== VIEW_INSTRUMENT_BAR) {
             leavingStepView = true;
             stepLedsDirty = false;
         }
@@ -4311,7 +4414,7 @@ function updateLEDs() {
     } else if (currentView === VIEW_JAM) {
         drawJamStepLEDs(forceSteps);
         stepLedsDirty = false;
-    } else if ((currentView === VIEW_BUILDER || currentView === VIEW_CHORD_PICK) && builderTrack !== TRACK_DRUM) {
+    } else if ((currentView === VIEW_BUILDER || currentView === VIEW_CHORD_PICK || currentView === VIEW_INSTRUMENT_BAR) && builderTrack !== TRACK_DRUM) {
         drawChordStepLEDs(forceSteps);
         stepLedsDirty = false;
     } else if (currentView === VIEW_BUILDER || currentView === VIEW_PERFORMANCE) {
@@ -4733,7 +4836,7 @@ function drawInstrumentTrack() {
  * that bar. */
 function handleStepPress(stepIndex, velocity) {
     if (velocity === 0) return;
-    if (currentView !== VIEW_BUILDER && currentView !== VIEW_CHORD_PICK) return;
+    if (currentView !== VIEW_BUILDER && currentView !== VIEW_CHORD_PICK && currentView !== VIEW_INSTRUMENT_BAR) return;
     if (builderTrack === TRACK_DRUM) return;
     const secIndex = chordDisplaySectionIndex();
     const sec = currentSong ? currentSong.sections[secIndex] : null;
@@ -4749,12 +4852,20 @@ function handleStepPress(stepIndex, velocity) {
     chordCursorBar = barIndex;
     if (builderTrack === TRACK_CHORD) {
         openChordPick(barIndex);
-    } else {
-        /* Instrument track: toggle the chord on/off for this bar. */
+    } else if (currentView === VIEW_INSTRUMENT_BAR) {
+        /* Switching bars from within the per-bar menu: jump straight to the
+         * newly pressed bar's own menu. */
+        openInstrumentBarMenu(builderTrack, secIndex, barIndex);
+    } else if (shiftHeld) {
+        /* Instrument track, Shift+step: toggle the chord on/off for this bar. */
         const inst = instrumentForTrack(builderTrack);
         if (inst) toggleInstrumentBar(inst, secIndex, barIndex);
         stepLedsDirty = true;
         needsRedraw = true;
+    } else {
+        /* Instrument track, plain step: open the per-bar settings menu
+         * (Octave/Follow Note/Voicing/Mute for just this bar). */
+        openInstrumentBarMenu(builderTrack, secIndex, barIndex);
     }
 }
 
@@ -4934,6 +5045,7 @@ function drawInstrument() {
         { key: "octave", label: "Octave", value: String(inst ? inst.octave : 3) },
         { key: "follow", label: "Follow Note", value: inst && inst.follow_note > 0 ? String(inst.follow_note) : "Off" },
         { key: "voicing", label: "Voicing", value: inst && inst.voicing === "chord" ? "Chord" : "Bass" },
+        { key: "inversion", label: "Inversion", value: inversionLabel(inst ? inst.inversion : 0) },
         { key: "gap", label: "Note Gap", value: noteGapLabel(inst ? inst.note_gap : 0.25) }
     ];
     drawMenuList({
@@ -4966,6 +5078,11 @@ function handleInstrumentInput(cc, value) {
             } else if (instrumentFocus === 3) {
                 inst.voicing = (inst.voicing === "chord") ? "bass" : "chord";
             } else if (instrumentFocus === 4) {
+                /* Inversion: root/1st/2nd/3rd. Clamped per-chord (a triad has
+                 * no 3rd inversion) on the DSP side; the menu just offers all
+                 * four so a 7th/maj7/m7/dim7 chord can use the 3rd. */
+                inst.inversion = Math.max(0, Math.min(3, (inst.inversion || 0) + delta));
+            } else if (instrumentFocus === 5) {
                 /* Note gap: 0 = none, then 1/16, 1/8, 1/4, 1/2, 1 beat. */
                 const steps = [0, 0.0625, 0.125, 0.25, 0.5, 1.0];
                 const cur = (typeof inst.note_gap === "number") ? inst.note_gap : 0.25;
@@ -4975,7 +5092,7 @@ function handleInstrumentInput(cc, value) {
             }
             unsavedChanges = true;
         } else {
-            instrumentFocus = Math.max(0, Math.min(4, instrumentFocus + delta));
+            instrumentFocus = Math.max(0, Math.min(5, instrumentFocus + delta));
         }
         needsRedraw = true;
     } else if (cc === MoveMainButton && value > 0) {
@@ -4989,6 +5106,118 @@ function handleInstrumentInput(cc, value) {
     } else if (cc === MoveBack && value > 0) {
         if (instrumentEditing) {
             instrumentEditing = false;
+            needsRedraw = true;
+        } else {
+            menuStack.pop();
+            currentView = VIEW_BUILDER;
+            needsRedraw = true;
+        }
+    }
+}
+
+/* ── Instrument per-bar override menu ───────────────────────────────── */
+
+/* Cycle an "optional integer" field (Octave, Follow Note) between an
+ * explicit value in [min, max] and null ("Default"), which sits one step
+ * below `min`. */
+export function cycleOptionalInt(cur, delta, min, max) {
+    let v = (cur === null || cur === undefined) ? (min - 1) : cur;
+    v = Math.max(min - 1, Math.min(max, v + delta));
+    return v < min ? null : v;
+}
+
+function openInstrumentBarMenu(track, sectionIndex, barIndex) {
+    instrumentBarEditTrack = track;
+    instrumentBarEditSection = sectionIndex;
+    instrumentBarEditBar = barIndex;
+    instrumentBarFocus = 0;
+    instrumentBarEditing = false;
+    /* If the menu is already open (switching bars via a step press from
+     * inside it), reuse the current view/menu frame instead of pushing a
+     * new one -- same convention as openChordPick. */
+    if (currentView !== VIEW_INSTRUMENT_BAR) {
+        currentView = VIEW_INSTRUMENT_BAR;
+        menuStack.push({ title: (track === TRACK_INSTRUMENT_1 ? "Inst 1" : "Inst 2") + " Bar " + (barIndex + 1), selectedIndex: 0 });
+    }
+    needsRedraw = true;
+}
+
+function drawInstrumentBarMenu() {
+    const inst = instrumentForTrack(instrumentBarEditTrack);
+    const label = (instrumentBarEditTrack === TRACK_INSTRUMENT_1 ? "Inst 1" : "Inst 2") + " · Bar " + (instrumentBarEditBar + 1);
+    const on = inst ? instrumentBarOn(inst, instrumentBarEditSection, instrumentBarEditBar) : true;
+    drawMenuHeader(label, on ? "Send" : "Mute");
+    const ov = inst ? instrumentBarOverride(inst, instrumentBarEditSection, instrumentBarEditBar) : null;
+    const octVal = ov && ov.octave !== null && ov.octave !== undefined ? ov.octave : null;
+    const followVal = ov && ov.follow_note !== null && ov.follow_note !== undefined ? ov.follow_note : null;
+    const voicingVal = ov && ov.voicing !== null && ov.voicing !== undefined ? ov.voicing : null;
+    const inversionVal = ov && ov.inversion !== null && ov.inversion !== undefined ? ov.inversion : null;
+    const items = [
+        { key: "mute", label: "Mute", value: on ? "Off" : "On" },
+        { key: "octave", label: "Octave", value: octVal !== null ? String(octVal) : "Default (" + (inst ? inst.octave : 3) + ")" },
+        { key: "follow", label: "Follow Note", value: followVal !== null ? (followVal > 0 ? String(followVal) : "Off") : "Default (" + (inst && inst.follow_note > 0 ? inst.follow_note : "Off") + ")" },
+        { key: "voicing", label: "Voicing", value: voicingVal ? (voicingVal === "chord" ? "Chord" : "Bass") : "Default (" + (inst && inst.voicing === "chord" ? "Chord" : "Bass") + ")" },
+        { key: "inversion", label: "Inversion", value: inversionVal !== null ? inversionLabel(inversionVal) : "Default (" + inversionLabel(inst ? inst.inversion : 0) + ")" }
+    ];
+    drawMenuList({
+        labelX: 3,
+        items,
+        selectedIndex: instrumentBarFocus,
+        getLabel: (item) => item.label,
+        getValue: (item) => item.value,
+        valueAlignRight: true,
+        editMode: instrumentBarEditing,
+        labelGap: 2,
+        prioritizeSelectedValue: true,
+        selectedMinLabelChars: 6,
+        listArea: { topY: LIST_TOP_Y, bottomY: LIST_INDICATOR_BOTTOM_Y }
+    });
+}
+
+function handleInstrumentBarMenuInput(cc, value) {
+    const inst = instrumentForTrack(instrumentBarEditTrack);
+    if (!inst) return;
+    const sec = instrumentBarEditSection, bar = instrumentBarEditBar;
+    if (cc === MoveMainKnob) {
+        const delta = decodeDelta(value);
+        if (instrumentBarEditing) {
+            if (instrumentBarFocus === 0) {
+                toggleInstrumentBar(inst, sec, bar);
+                stepLedsDirty = true;
+            } else if (instrumentBarFocus === 1) {
+                const ov = instrumentBarOverride(inst, sec, bar);
+                const cur = ov && ov.octave !== null && ov.octave !== undefined ? ov.octave : null;
+                setInstrumentBarOverrideField(inst, sec, bar, "octave", cycleOptionalInt(cur, delta, -1, 8));
+            } else if (instrumentBarFocus === 2) {
+                const ov = instrumentBarOverride(inst, sec, bar);
+                const cur = ov && ov.follow_note !== null && ov.follow_note !== undefined ? ov.follow_note : null;
+                setInstrumentBarOverrideField(inst, sec, bar, "follow_note", cycleOptionalInt(cur, delta, 0, 127));
+            } else if (instrumentBarFocus === 3) {
+                const ov = instrumentBarOverride(inst, sec, bar);
+                const cur = ov && ov.voicing !== null && ov.voicing !== undefined ? ov.voicing : null;
+                const states = [null, "bass", "chord"];
+                const idx = ((states.indexOf(cur) + delta) % states.length + states.length) % states.length;
+                setInstrumentBarOverrideField(inst, sec, bar, "voicing", states[idx]);
+            } else if (instrumentBarFocus === 4) {
+                const ov = instrumentBarOverride(inst, sec, bar);
+                const cur = ov && ov.inversion !== null && ov.inversion !== undefined ? ov.inversion : null;
+                setInstrumentBarOverrideField(inst, sec, bar, "inversion", cycleOptionalInt(cur, delta, 0, 3));
+            }
+        } else {
+            instrumentBarFocus = Math.max(0, Math.min(4, instrumentBarFocus + delta));
+        }
+        needsRedraw = true;
+    } else if (cc === MoveMainButton && value > 0) {
+        if (instrumentBarFocus === 0) {
+            toggleInstrumentBar(inst, sec, bar);
+            stepLedsDirty = true;
+        } else {
+            instrumentBarEditing = !instrumentBarEditing;
+        }
+        needsRedraw = true;
+    } else if (cc === MoveBack && value > 0) {
+        if (instrumentBarEditing) {
+            instrumentBarEditing = false;
             needsRedraw = true;
         } else {
             menuStack.pop();
@@ -9962,6 +10191,7 @@ globalThis.tick = function() {
                 case VIEW_JAM: drawJam(); break;
                 case VIEW_CHORD_PICK: drawChordPick(); break;
                 case VIEW_INSTRUMENT: drawInstrument(); break;
+                case VIEW_INSTRUMENT_BAR: drawInstrumentBarMenu(); break;
             }
         }
         needsRedraw = false;
@@ -10040,6 +10270,7 @@ function routeCcInput(rawData, cc, value) {
         case VIEW_JAM: handleJamInput(cc, value); break;
         case VIEW_CHORD_PICK: handleChordPickInput(cc, value); break;
         case VIEW_INSTRUMENT: handleInstrumentInput(cc, value); break;
+        case VIEW_INSTRUMENT_BAR: handleInstrumentBarMenuInput(cc, value); break;
     }
 }
 
