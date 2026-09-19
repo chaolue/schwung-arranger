@@ -1230,6 +1230,30 @@ function instrumentForTrack(track) {
     return currentSong.instruments[idx];
 }
 
+/* "Play from section N"/"play from cursor" build a temporary song whose
+ * `sections` array is sliced to start at `startSectionIndex` (so section N
+ * becomes index 0 in what's sent to the DSP), but leave each instrument's
+ * per-section `bars` array and `overrides[].section` values as absolute
+ * indices into the ORIGINAL, unsliced section list -- a bar-boundary mute
+ * toggle happens to look harmless when it's misaligned (most bars default
+ * to "on" either way), but a per-bar Follow Note/Octave/Voicing override
+ * lands on the wrong bar entirely (or past the sliced array's end, i.e.
+ * nowhere), which is why only overrides appeared "ignored" when playing
+ * from a non-first section. Mutates `song.instruments` in place to match
+ * the same slice -- callers pass a song that's already a deep clone (e.g.
+ * `JSON.parse(JSON.stringify(currentSong))`), never `currentSong` itself. */
+export function reindexInstrumentsForSectionSlice(song, startSectionIndex) {
+    if (!song || !song.instruments || startSectionIndex <= 0) return;
+    for (const inst of song.instruments) {
+        if (inst.bars) inst.bars = inst.bars.slice(startSectionIndex);
+        if (inst.overrides) {
+            inst.overrides = inst.overrides
+                .filter(ov => ov && ov.section >= startSectionIndex)
+                .map(ov => Object.assign({}, ov, { section: ov.section - startSectionIndex }));
+        }
+    }
+}
+
 /* The instrument's per-section per-bar on/off map, sized to the song. */
 function instrumentBars(inst) {
     if (!inst) return [];
@@ -2149,7 +2173,12 @@ function playCurrentSong(preloadStaged, onConfirmed) {
             lastDspTransport = null;
             playbackState = "playing";
             playbackStartTime = Date.now();
-            playbackSectionIndex = currentSectionIndex;
+            /* While builderPlayingFromTemp, currentSong is sliced to start at
+             * the played section -- that section is index 0 there, not the
+             * original absolute currentSectionIndex (which the "follow the
+             * DSP playhead" block below would otherwise briefly show before
+             * self-correcting on the next tick). */
+            playbackSectionIndex = builderPlayingFromTemp ? 0 : currentSectionIndex;
             lastStepBeatKey = "";
             lastStepBarIndex = -1;
             lastTransportBar = 0;
@@ -2624,7 +2653,17 @@ function updateDspState() {
          * ends mid-bar (Advanced Trim / speed) switches sections at the exact
          * musical boundary instead of the next integer bar. */
         const dspBarFrac = (typeof lastDspTransport.bar_frac === "number") ? lastDspTransport.bar_frac : ((lastDspTransport.bar || 1) - 1);
-        const fullSongBarFrac = dspBarFrac + previewBarOffset;
+        /* builderPlayingFromTemp: currentSong is already sliced to start at
+         * the played section (that section is index 0 there), so it must be
+         * walked with the DSP's own local bar position, not previewBarOffset
+         * added back in -- that offset restates positions in the ORIGINAL
+         * song's terms, which only matches sectionSource when sectionSource
+         * is itself the full, unsliced song (Performance mode's perfFullSong,
+         * or the Builder playing the real currentSong with no slice). Adding
+         * it here too walked the sliced array with an offset sized for the
+         * full one, landing on the wrong (often last) section before this
+         * self-corrected once the offset error grew past a section boundary. */
+        const fullSongBarFrac = builderPlayingFromTemp ? dspBarFrac : (dspBarFrac + previewBarOffset);
         const sectionSource = (currentView === VIEW_PERFORMANCE && perfFullSong) ? perfFullSong : currentSong;
         if (sectionSource) {
             let playedBars = 0;
@@ -3703,7 +3742,14 @@ function drawBuilderStepLEDs(force) {
         /* Use the fractional bar position so a clip ending mid-bar (Advanced
          * Trim / speed) places the white step at the exact boundary. */
         const dspBarFrac = (typeof lastDspTransport.bar_frac === "number") ? lastDspTransport.bar_frac : (currentBar - 1);
-        const fullSongBarFrac = dspBarFrac + previewBarOffset;
+        /* builderPlayingFromTemp: stepSong (== currentSong here) is already
+         * sliced to start at the played section, so walk it with the DSP's
+         * own local bar position -- adding previewBarOffset back in (sized
+         * for the ORIGINAL, unsliced song) would walk the sliced array with
+         * an offset too large for it, so playingSection would never match
+         * displaySection (0) and the current-bar flash would just never
+         * appear during temp-song playback. */
+        const fullSongBarFrac = builderPlayingFromTemp ? dspBarFrac : (dspBarFrac + previewBarOffset);
         let barsBefore = 0;
         let playingSection = -1;
         if (stepSong) {
@@ -4534,7 +4580,16 @@ function drawBuilderPreviewOverlay() {
 
 /* The section index the chord track is currently showing (mirrors the drum
  * track's section navigation). */
+/* Mirrors builderDisplaySectionIndex's builderPlayingFromTemp guard (see its
+ * declaration) -- without it, the chord/instrument tracks' step LEDs and
+ * screens fell back to playbackSectionIndex/builderDisplaySection treated as
+ * absolute indices into the FULL song while builderPlayingFromTemp has
+ * currentSong sliced to start at the played section (that section is index
+ * 0 there), showing whatever section happened to sit at that same absolute
+ * offset in the full song -- typically the next one or two sections ahead,
+ * briefly, until playback caught up and this self-corrected. */
 function chordDisplaySectionIndex() {
+    if (builderPlayingFromTemp) return 0;
     return playbackState === "playing"
         ? (builderDisplaySection >= 0 ? builderDisplaySection : playbackSectionIndex)
         : currentSectionIndex;
@@ -8491,6 +8546,7 @@ function playFromCurrentSection() {
     /* Play from the current section through the end of the song. */
     const temp = JSON.parse(JSON.stringify(currentSong));
     temp.sections = JSON.parse(JSON.stringify(currentSong.sections.slice(currentSectionIndex)));
+    reindexInstrumentsForSectionSlice(temp, currentSectionIndex);
     let barOffset = 0;
     for (let i = 0; i < currentSectionIndex; i++) {
         barOffset += sectionBars(currentSong.sections[i]);
@@ -8586,6 +8642,7 @@ function previewClipAtCursor() {
     }));
     const temp = JSON.parse(JSON.stringify(currentSong));
     temp.sections = JSON.parse(JSON.stringify(currentSong.sections.slice(currentSectionIndex)));
+    reindexInstrumentsForSectionSlice(temp, currentSectionIndex);
     temp.sections[0].id = "play-from-cursor-" + Date.now();
     temp.sections[0].clips = fromCursorClips;
     /* Step-LED flash should still appear on the clip's actual step in the
