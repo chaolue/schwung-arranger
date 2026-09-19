@@ -4663,8 +4663,9 @@ function openChordPick(barIndex) {
         chordPickQuality = qIdx >= 0 ? qIdx : 0;
         chordPickBass = existing.bass ? BASS_NOTES.indexOf(existing.bass) : -1;
     } else {
-        /* Default to the diatonic chord for the bar's scale degree. */
-        chordPickDegree = barIndex % 7;
+        /* Default to the key's base note (the "I" chord/tonic), not a
+         * degree that climbs with the bar index. */
+        chordPickDegree = 0;
         chordPickQuality = CHORD_QUALITIES.indexOf(DIATONIC_QUALITY[chordPickDegree]);
         chordPickBass = -1;
     }
@@ -4763,10 +4764,12 @@ function handleChordPickInput(cc, value) {
                 needsRedraw = true;
                 return;
             }
-            /* Materialize the default diatonic chord for this bar so its
-             * Root/Type/Bass can be reviewed or adjusted before committing. */
+            /* Materialize the default (tonic) chord for this bar and drop
+             * straight into editing its Root, so the jog wheel immediately
+             * changes the note without a second press to enter edit mode. */
             chordPickHasChord = true;
             chordPickFocus = 0;
+            chordPickEditing = true;
             needsRedraw = true;
             return;
         }
