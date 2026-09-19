@@ -4325,10 +4325,58 @@ function drawChordStepLEDs(force) {
         ? instrumentForTrack(builderTrack) : null;
     /* Match the bar colour to the selected track's Row button colour. */
     const trackColour = TRACK_ROW_COLOUR[builderTrack];
+
+    /* Playback flash: the same bar/beat-accurate white flash on the
+     * currently playing bar as the drum track (drawBuilderStepLEDs) -- see
+     * that function's matching block for the full derivation, ported here
+     * so the chord/instrument tracks show the same playhead cue instead of
+     * only ever showing static bar colours. currentBar ends up a 0-based,
+     * possibly-fractional bar position within the DISPLAYED section
+     * (secIndex); -1 if playback isn't currently inside it (e.g. mid-
+     * transition to the next section), in which case nothing flashes here. */
+    let currentBar = -1;
+    if (playbackState === "playing" && lastDspTransport && lastDspTransport.running) {
+        const dspBar = lastDspTransport.bar || 1;
+        const dspBarFrac = (typeof lastDspTransport.bar_frac === "number") ? lastDspTransport.bar_frac : (dspBar - 1);
+        /* builderPlayingFromTemp: currentSong is already sliced to start at
+         * the played section, so walk it with the DSP's own local bar
+         * position instead of adding previewBarOffset back in -- see the
+         * matching comment in drawBuilderStepLEDs. */
+        const fullSongBarFrac = builderPlayingFromTemp ? dspBarFrac : (dspBarFrac + previewBarOffset);
+        let barsBefore = 0;
+        let playingSection = -1;
+        for (let i = 0; i < currentSong.sections.length; i++) {
+            const sb = sectionBars(currentSong.sections[i]);
+            if (fullSongBarFrac < barsBefore + sb) {
+                playingSection = i;
+                break;
+            }
+            barsBefore += sb;
+        }
+        if (playingSection === secIndex) {
+            currentBar = fullSongBarFrac - barsBefore;
+        }
+    }
+    let flashOn = false;
+    if (lastDspTransport && lastDspTransport.running) {
+        const flashBar = lastDspTransport.bar || 1;
+        const flashBeat = lastDspTransport.beat || 1;
+        const bpm = currentSong ? currentSong.tempo_bpm : (lastDspTransport.bpm || 120);
+        const flashBeatsPerBar = lastDspTransport.time_sig_num || (currentSong ? currentSong.time_sig_num : 4);
+        flashOn = updateStepFlash(flashBar, flashBeat, bpm, flashBeatsPerBar);
+    }
+
     for (let s = 0; s < NUM_STEPS; s++) {
         const barIndex = stepScrollOffset + s;
         if (barIndex >= totalBars) {
             stepColor(s, Black, force);
+            continue;
+        }
+        if (currentBar >= 0 && s === Math.floor(currentBar) - stepScrollOffset) {
+            /* Currently playing bar: flash white to black in time with the
+             * beat, same as the drum track, taking priority over the
+             * chord/instrument/cursor colouring below. */
+            stepColor(s, flashOn ? White : Black, force);
             continue;
         }
         const chord = chordAtBar(sec, barIndex);
