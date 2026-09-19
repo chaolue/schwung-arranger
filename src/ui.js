@@ -427,12 +427,19 @@ let optionsFocus = 0;      /* 0 = Drums, 1 = Instrument 1, 2 = Instrument 2, 3 =
 let optionsEditing = false;
 /* Focus/edit state within the Drums or Instrument 1/2 submenu (both are a
  * 2-item Output/Channel list). optionsInstIndex selects which instrument
- * submenu is open (1 or 2) when currentView is VIEW_OPTIONS_INST. */
-let optionsSubFocus = 0;   /* 0 = Output, 1 = MIDI channel */
+ * submenu is open (1 or 2) when currentView is VIEW_OPTIONS_INST. Drums has
+ * a 3rd row (Drop Note-Offs); Instrument 1/2 stay at 2 rows -- see
+ * handleOptionsDrumsInput/handleOptionsInstInput's own row-count clamps. */
+let optionsSubFocus = 0;   /* 0 = Output, 1 = MIDI channel, (Drums only) 2 = Drop Note-Offs */
 let optionsSubEditing = false;
 let optionsInstIndex = 1;
 let swapGuardFraction = 0.25;  /* guard window (fraction of a beat) at mid-clip swap boundaries */
 let dspDebugEnabled = false;   /* runtime toggle for the DSP debug log (.dsp_log) */
+/* Drums Options: some drum playback modules/samplers don't ring out their
+ * own tail, so the source clip's own recorded note-off cuts the sound short
+ * instead of letting it ring. Off by default -- see arranger_engine.c's
+ * drop_note_offs field for the DSP-side behavior. */
+let dropNoteOffs = false;
 
 let setlistFiles = [];
 let selectedSetlistIndex = 0;
@@ -1649,6 +1656,8 @@ function loadSettings() {
     if (typeof sg === "number") swapGuardFraction = sg;
     const dd = pick("dsp_debug", "boolean");
     if (typeof dd === "boolean") dspDebugEnabled = dd;
+    const dno = pick("drop_note_offs", "boolean");
+    if (typeof dno === "boolean") dropNoteOffs = dno;
     const i1o = pick("inst1_output", "string");
     if (typeof i1o === "string") inst1Output = i1o;
     const i1c = pick("inst1_channel", "number");
@@ -1686,6 +1695,7 @@ function saveOutputSettings() {
         click_channel: clickChannel,
         swap_guard_fraction: swapGuardFraction,
         dsp_debug: dspDebugEnabled,
+        drop_note_offs: dropNoteOffs,
         inst1_output: inst1Output,
         inst1_channel: inst1Channel,
         inst2_output: inst2Output,
@@ -1774,6 +1784,7 @@ function applyOutputSettingsToDsp() {
     pushOutputRoutingToDsp();
     pushSwapGuardToDsp();
     pushDspDebugToDsp();
+    pushDropNoteOffsToDsp();
 }
 
 /* Push the mid-clip swap guard fraction to the DSP. */
@@ -1794,6 +1805,16 @@ function pushDspDebugToDsp() {
     const set = block ? host_module_set_param_blocking : host_module_set_param;
     const t = block ? 100 : undefined;
     set("debug", dspDebugEnabled ? "1" : "0", t);
+}
+
+/* Push the Drums "Drop Note-Offs" toggle to the DSP. */
+function pushDropNoteOffsToDsp() {
+    if (typeof host_module_set_param !== "function" &&
+        typeof host_module_set_param_blocking !== "function") return;
+    const block = typeof host_module_set_param_blocking === "function";
+    const set = block ? host_module_set_param_blocking : host_module_set_param;
+    const t = block ? 100 : undefined;
+    set("drop_note_offs", dropNoteOffs ? "1" : "0", t);
 }
 
 /* Delete the module's log files. Called when debug logging is turned off so
@@ -5525,15 +5546,17 @@ function drawOptions() {
     });
 }
 
-/* Drums and Instrument 1/2 are simple Output + MIDI Channel submenus off the
- * Options list. Drums edits the existing global output/channel state used
+/* Drums and Instrument 1/2 are Output + MIDI Channel submenus off the
+ * Options list; Drums has a 3rd row, Drop Note-Offs (see dropNoteOffs's
+ * declaration). Drums edits the existing global output/channel state used
  * for the drum track; the instrument submenus edit inst1Output/inst1Channel
  * or inst2Output/inst2Channel depending on optionsInstIndex. */
 function drawOptionsDrums() {
     drawMenuHeader("Drums", "");
     const items = [
         { key: "output", label: "Output", value: currentOutputLabel() },
-        { key: "channel", label: "MIDI Channel", value: String(activeOutputChannel()) }
+        { key: "channel", label: "MIDI Channel", value: String(activeOutputChannel()) },
+        { key: "dropnoteoffs", label: "Drop Note-Offs", value: dropNoteOffs ? "On" : "Off" }
     ];
     drawMenuList({
         labelX: 3,
@@ -6739,7 +6762,7 @@ function handleOptionsDrumsInput(cc, value) {
                     selectedOutputIndex = newIdx;
                     setOutputTarget(OUTPUT_TARGETS[selectedOutputIndex]);
                 }
-            } else {
+            } else if (optionsSubFocus === 1) {
                 /* Adjust the active MIDI channel. */
                 const newCh = Math.max(1, Math.min(16, activeOutputChannel() + delta));
                 if (newCh !== activeOutputChannel()) {
@@ -6753,9 +6776,14 @@ function handleOptionsDrumsInput(cc, value) {
                         host_module_set_param("schwung_channel", String(schwungChannel - 1));
                     }
                 }
+            } else {
+                /* Toggle Drop Note-Offs. */
+                dropNoteOffs = !dropNoteOffs;
+                saveOutputSettings();
+                pushDropNoteOffsToDsp();
             }
         } else {
-            const newIdx = Math.max(0, Math.min(1, optionsSubFocus + delta));
+            const newIdx = Math.max(0, Math.min(2, optionsSubFocus + delta));
             if (newIdx !== optionsSubFocus) optionsSubFocus = newIdx;
         }
         needsRedraw = true;
