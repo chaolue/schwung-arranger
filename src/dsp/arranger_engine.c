@@ -2113,9 +2113,28 @@ static void emit_instruments_at_tick(engine_t *e, uint32_t tick) {
             continue;
         }
         if (ch && ch->set) {
-            /* Emit a note-on only when the chord actually changes (a held
-             * chord stays on across multiple bars). */
-            if (!e->last_inst_chord_set[i] || !chord_equal(&e->last_inst_chord[i], ch)) {
+            /* This bar has its OWN explicit chord entry, as opposed to
+             * merely inheriting/holding a chord set on an earlier bar
+             * (chord_at_bar carries the last explicit chord forward across
+             * unset bars). An explicit chord repeated on consecutive bars is
+             * a fresh attack, not a continued hold, even when it's the same
+             * chord as the bar before it. */
+            int chord_explicit_here = (bar < (uint32_t)sec->chord_count) && sec->chords[bar].set;
+            int chord_unchanged = e->last_inst_chord_set[i] && chord_equal(&e->last_inst_chord[i], ch);
+            /* Emit a note-on when the chord changes, or when this bar is a
+             * fresh explicit attack (chord_explicit_here) even if unchanged;
+             * a bar that's merely holding a carried-forward chord does not
+             * retrigger. */
+            if (!chord_unchanged || chord_explicit_here) {
+                if (chord_unchanged) {
+                    /* Same chord, but a fresh explicit attack: cut the
+                     * still-sounding note off first so this is a clean
+                     * retrigger rather than an unmatched overlapping
+                     * note-on (no off would otherwise be scheduled here --
+                     * the note-off scheduling below only fires ahead of an
+                     * upcoming chord CHANGE, not an explicit repeat). */
+                    emit_instrument_chord_off(e, &e->last_inst_resolved[i], &e->last_inst_chord[i]);
+                }
                 emit_instrument_chord(e, &resolved, ch, 100);
                 e->last_inst_chord[i] = *ch;
                 e->last_inst_chord_set[i] = 1;
