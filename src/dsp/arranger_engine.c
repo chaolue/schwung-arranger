@@ -692,6 +692,15 @@ typedef struct engine {
      * retriggering a near-zero-length note. Only meaningful while
      * last_inst_chord_set[i] is also true -- see emit_instruments_follow. */
     uint32_t last_inst_follow_tick[MAX_INSTRUMENTS];
+    /* Which path fired the currently-sounding chord: 1 if the follow-note
+     * (drum-hit) path fired it, 0 if the bar-boundary (chord-track) path
+     * fired it. Lets emit_instruments_at_tick tell apart a note it needs to
+     * clean up (a chord-path note left sounding from a bar that has since
+     * switched into follow mode) from one the follow path just started --
+     * including one anticipated early via the Swap Guard window, which
+     * lands before this very bar boundary and must be left alone to run
+     * until the follow path's own scheduled note-off. See emit_instruments_at_tick. */
+    uint8_t last_inst_via_follow[MAX_INSTRUMENTS];
     /* Deferred note-off: when a chord is emitted, its note-off is scheduled
      * `note_gap` before the next note-on, so the previous note is cut short
      * rather than the new note being delayed. */
@@ -2103,8 +2112,17 @@ static void emit_instruments_at_tick(engine_t *e, uint32_t tick) {
              * is constant, so this transition never occurred before
              * per-bar overrides existed) -- cut it off explicitly so the
              * follow path's next note-on isn't a double-attack over a note
-             * that was never turned off. */
-            if (e->last_inst_chord_set[i]) {
+             * that was never turned off.
+             *
+             * Only do this when the sounding note came from the CHORD path,
+             * though: the follow path may have already fired ITS OWN note
+             * for this exact bar a few ticks early, anticipating the
+             * downbeat via the Swap Guard window (a drum hit pushed just
+             * before the barline). That note is still current -- cutting it
+             * off here the instant the bar boundary is crossed produced a
+             * near-zero-length note right at the seam. Trust the follow
+             * path's own note-off scheduling instead. */
+            if (e->last_inst_chord_set[i] && !e->last_inst_via_follow[i]) {
                 emit_instrument_chord_off(e, &e->last_inst_resolved[i], &e->last_inst_chord[i]);
                 e->last_inst_chord_set[i] = 0;
                 e->pending_off_set[i] = 0;
@@ -2149,6 +2167,7 @@ static void emit_instruments_at_tick(engine_t *e, uint32_t tick) {
                 e->last_inst_chord[i] = *ch;
                 e->last_inst_chord_set[i] = 1;
                 e->last_inst_resolved[i] = resolved;
+                e->last_inst_via_follow[i] = 0;
                 dsp_log_enqueue_worker("EMIT_INST[%d] note-on root=%s ch=%d oct=%d voicing=%d",
                         i, ch->root, resolved.channel, resolved.octave, resolved.voicing);
             }
@@ -2289,6 +2308,7 @@ static void emit_instruments_follow(engine_t *e, uint8_t note, uint32_t tick) {
                 e->last_inst_chord_set[i] = 1;
                 e->last_inst_resolved[i] = resolved;
                 e->last_inst_follow_tick[i] = tick;
+                e->last_inst_via_follow[i] = 1;
             }
             /* Hold until the next matching drum hit, cut short by note_gap.
              * If there is no next hit, hold until the song end. */
