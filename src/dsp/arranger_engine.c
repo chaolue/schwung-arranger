@@ -650,6 +650,19 @@ typedef struct engine {
      * audible timing. */
     int emit_directly;
 
+    /* Drums Options: "Drop Note-Offs". Some drum playback modules/samplers
+     * don't ring out their own tail -- they just play the sample through to
+     * its natural end -- so the drum timeline's own recorded note-off (copied
+     * straight from the source clip, see build_timeline_targeted) cuts the
+     * sound short instead of letting it ring. When enabled, note-off events
+     * in the DRUM timeline are dropped at the point they'd otherwise be sent
+     * (drain_events_up_to / emit_timeline_event) -- note-ons are unaffected,
+     * and this does not touch the chord/instrument tracks' own note-offs
+     * (those are scheduled deliberately for musical note length, not copied
+     * from a source clip) or emit_all_notes_off's CC123 panic (still needed
+     * to clear stuck notes on stop/song change). Off by default. */
+    int drop_note_offs;
+
     /* Channel override of the most recently drained event, used by
      * emit_direct_event when a per-clip channel (e.g. a dedicated click
      * channel) should take precedence over the output-target channel. */
@@ -3740,6 +3753,39 @@ static uint8_t apply_channel_override(uint8_t status, int8_t channel_override) {
     return status;
 }
 
+/* True for a note-off (explicit 0x80, or the common "running status"
+ * encoding of one as 0x90 with velocity 0 -- both occur in raw SMF drum
+ * clip data, see build_timeline_targeted). Used by the "Drop Note-Offs"
+ * Drums option to identify which drum-timeline events to withhold. */
+static int is_note_off_event(uint8_t status, uint8_t data2) {
+    uint8_t type = status & 0xF0;
+    return type == 0x80 || (type == 0x90 && data2 == 0);
+}
+
+/* Whether the "Drop Note-Offs" Drums option should withhold this note-off.
+ * Only suppresses an off that a LATER note-on for the same note is going to
+ * retrigger anyway -- the case the option exists for: a module that hard-cuts
+ * a still-ringing one-shot the instant it gets a note-off would otherwise
+ * have that tail cut short right before the next hit. The FINAL time a note
+ * appears in the timeline, nothing retriggers it, so its own recorded
+ * note-off is let through untouched instead of being withheld forever.
+ *
+ * Withholding it unconditionally (this option's first cut) caused a
+ * different, real bug on a module whose patch is gated rather than
+ * one-shot -- it holds the sound open until it actually receives a
+ * note-off rather than decaying on its own, so an off suppressed for the
+ * rest of the song left it gated open (silently, or at full volume) for
+ * the remainder of playback, and it only ever released when stop's CC123
+ * "all notes off" fanned out at the very end -- audible as a phantom extra
+ * hit (a cymbal's own long natural tail) exactly when playback stopped,
+ * confirmed against a real song. Letting the last occurrence's own,
+ * correctly-timed off through avoids that: it releases on schedule instead
+ * of being held open until stop. */
+static int should_suppress_note_off(engine_t *e, const smf_event_t *ev) {
+    if (!e->drop_note_offs || !is_note_off_event(ev->status, ev->data2)) return 0;
+    return find_next_note_on_tick(e, ev->data1, ev->tick + 1) > 0;
+}
+
 static void drain_events_up_to(engine_t *e, uint32_t target) {
     if (!e->running || e->live_slot.event_count == 0) return;
     while (e->event_cursor < e->live_slot.event_count) {
@@ -3751,11 +3797,13 @@ static void drain_events_up_to(engine_t *e, uint32_t target) {
         if ((ev->status & 0xF0) == 0x90 && ev->data2 > 0) {
             emit_instruments_follow(e, ev->data1, ev->tick);
         }
-        if (e->emit_directly) {
-            emit_direct_event(e, ev->status, ev->data1, ev->data2, ev->len);
-        } else {
-            uint8_t status = apply_channel_override(ev->status, ev->channel_override);
-            queue_push(e, status, ev->data1, ev->data2, ev->len);
+        if (!should_suppress_note_off(e, ev)) {
+            if (e->emit_directly) {
+                emit_direct_event(e, ev->status, ev->data1, ev->data2, ev->len);
+            } else {
+                uint8_t status = apply_channel_override(ev->status, ev->channel_override);
+                queue_push(e, status, ev->data1, ev->data2, ev->len);
+            }
         }
         e->event_cursor++;
     }
@@ -3769,6 +3817,7 @@ static void drain_events_up_to(engine_t *e, uint32_t target) {
  * paths this helper serves. */
 static void emit_timeline_event(engine_t *e, const smf_event_t *ev) {
     e->last_event_channel_override = ev->channel_override;
+    if (should_suppress_note_off(e, ev)) return;
     if (e->emit_directly) {
         emit_direct_event(e, ev->status, ev->data1, ev->data2, ev->len);
     } else {
@@ -4556,6 +4605,10 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
         e->emit_directly = atoi(val) ? 1 : 0;
         return;
     }
+    if (strcmp(key, "drop_note_offs") == 0) {
+        e->drop_note_offs = atoi(val) ? 1 : 0;
+        return;
+    }
     if (strcmp(key, "move_channel") == 0) {
         e->move_channel = atoi(val) & 0x0F;
         return;
@@ -4868,6 +4921,9 @@ static int arr_get_param(void *instance, const char *key, char *buf, int buf_len
     }
     if (strcmp(key, "emit_directly") == 0) {
         return snprintf(buf, buf_len, "%d", e->emit_directly);
+    }
+    if (strcmp(key, "drop_note_offs") == 0) {
+        return snprintf(buf, buf_len, "%d", e->drop_note_offs);
     }
     if (strcmp(key, "swap_guard_fraction") == 0) {
         return snprintf(buf, buf_len, "%.3f", e->swap_guard_fraction);

@@ -89,6 +89,13 @@
             "label": "DSP Debug Logging",
             "type": "bool",
             "default": false
+        },
+        {
+            "key": "drop_note_offs",
+            "label": "Drop Note-Offs",
+            "type": "bool",
+            "default": false,
+            "help": "Withholds the drum track's own note-off messages, for drum playback modules that don't ring out and cut sounds short otherwise."
         }
     ]
 }
