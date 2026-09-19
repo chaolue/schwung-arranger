@@ -38,9 +38,29 @@
 #include <pthread.h>
 #include <semaphore.h>
 #include <sched.h>
+#include <dlfcn.h>
 #include "plugin_api_v1.h"
 
 static const host_api_v1_t *g_host;
+
+/* Mirrors Schwung's own SHADOW_CHAIN_INSTANCES (shadow_constants.h): the
+ * number of built-in synth chain slots (Move's 4 tracks). Not available to
+ * this module directly -- see the chain-slot export below. */
+#define ARR_CHAIN_SLOTS 4
+
+/* Direct access to a Schwung chain slot's own config (its receive channel,
+ * independent of this plugin's instance), found on the shim by name rather
+ * than through host_api_v1_t -- see the export's own doc comment in
+ * schwung's shadow_chain_mgmt.c (schwung_chain_slot_get_param/set_param).
+ * NULL on a shim build that predates this export; every call site below
+ * guards on it. Resolved once in move_plugin_init_v2 (module load, off the
+ * audio thread); the ordinary C calls made through it afterwards from
+ * set_param/get_param are same-thread, same-process, and as real-time-safe
+ * as any other local function call. */
+typedef int (*chain_slot_get_param_fn)(int slot, const char *key, char *buf, int buf_len);
+typedef int (*chain_slot_set_param_fn)(int slot, const char *key, const char *value);
+static chain_slot_get_param_fn g_chain_slot_get_param;
+static chain_slot_set_param_fn g_chain_slot_set_param;
 
 /* Runtime debug flag. When 0 (default), arr_log/dsp_host_log skip all work,
  * so the hot audio path does no I/O. Set to 1 only when debugging. */
@@ -4456,6 +4476,17 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
         g_dsp_debug = (atoi(val) != 0);
         return;
     }
+    if (strncmp(key, "chain_channel:", 14) == 0) {
+        /* Configure one of Schwung's own chain slots' receive channel
+         * directly, e.g. "chain_channel:0" -> "5". val is "0" for Any,
+         * "1".."16" for an explicit channel -- same contract as the
+         * chain's own "slot:receive_channel" key, passed straight through. */
+        int slot = atoi(key + 14);
+        if (slot >= 0 && slot < ARR_CHAIN_SLOTS && g_chain_slot_set_param) {
+            g_chain_slot_set_param(slot, "slot:receive_channel", val);
+        }
+        return;
+    }
     if (strcmp(key, "song_json") == 0) {
         /* Default to one-shot unless loop is explicitly set afterwards.
          * This prevents stale loop state from causing preview/song to loop
@@ -4822,6 +4853,16 @@ static int arr_get_param(void *instance, const char *key, char *buf, int buf_len
      * atomic/scalar reads are all that's needed -- there is nothing left to
      * free() here. */
 
+    if (strncmp(key, "chain_channel:", 14) == 0) {
+        /* Current receive channel of one of Schwung's own chain slots, e.g.
+         * "chain_channel:0" -> "0" (Any) or "1".."16". -1 if unsupported by
+         * this shim build or the slot index is out of range. */
+        int slot = atoi(key + 14);
+        if (slot >= 0 && slot < ARR_CHAIN_SLOTS && g_chain_slot_get_param) {
+            return g_chain_slot_get_param(slot, "slot:receive_channel", buf, buf_len);
+        }
+        return -1;
+    }
     if (strcmp(key, "timeline_info") == 0) {
         /* Reports the latest PUBLISHED primary build (primary_ch.slot[active]),
          * not the currently-active live_slot -- this is a diagnostic ("did my
@@ -5139,5 +5180,9 @@ static plugin_api_v2_t g_api = {
 
 plugin_api_v2_t* move_plugin_init_v2(const struct host_api_v1 *host) {
     g_host = host;
+    g_chain_slot_get_param = (chain_slot_get_param_fn)
+        dlsym(RTLD_DEFAULT, "schwung_chain_slot_get_param");
+    g_chain_slot_set_param = (chain_slot_set_param_fn)
+        dlsym(RTLD_DEFAULT, "schwung_chain_slot_set_param");
     return &g_api;
 }

@@ -443,8 +443,8 @@ opened as a sub-screen from here.
 
 | Control | Action |
 |---------|--------|
-| Jog wheel (browse mode) | Move between Drums, Inst 1, Inst 2, Click Channel, Swap Guard, DSP Debug |
-| Jog click (on Drums / Inst 1 / Inst 2) | Open that track's Output/MIDI Channel sub-screen |
+| Jog wheel (browse mode) | Move between Drums, Inst 1, Inst 2, Chains, Click Channel, Swap Guard, DSP Debug |
+| Jog click (on Drums / Inst 1 / Inst 2 / Chains) | Open that sub-screen |
 | Jog wheel (edit mode, other fields) | Adjust the value |
 | Jog click (other fields) | Toggle edit / browse mode |
 | Back (edit mode) | Exit edit mode |
@@ -455,6 +455,7 @@ opened as a sub-screen from here.
 | Drums | Drum track's output + MIDI channel (opens a sub-screen — see below) |
 | Inst 1 | Instrument 1's output + MIDI channel (opens a sub-screen — see below) |
 | Inst 2 | Instrument 2's output + MIDI channel (opens a sub-screen — see below) |
+| Chains | View/edit one of Schwung's own 4 built-in chain slots' receive channel directly (opens a sub-screen — see below) |
 | Click Channel | MIDI channel (1–16) used for the count-in click. **Default** follows the Drums output channel |
 | Swap Guard | Mid-clip swap guard window (0–100%). Removed at the outgoing side of a clip boundary to avoid overlaps; on the incoming side (e.g. a fill swapping back into a partially-played groove), any note that fell inside this window is replayed right at the resume point instead of being lost |
 | DSP Debug | Toggles the DSP debug log (`.dsp_log`) on/off |
@@ -481,6 +482,28 @@ Output routing for one track, opened from the Options list.
 |-------|---------|
 | Output | Where this track sends MIDI: External (MIDI_OUT), Move (Move tracks), or Schwung (the synth chain) |
 | MIDI Channel | MIDI channel (1–16) used by the selected output |
+
+**Button LED hints:** Back and Main are lit.
+
+---
+
+### Options: Chains
+
+View and edit one of Schwung's own 4 built-in chain slots' receive channel
+directly, without leaving Arranger — the same setting the native Chain
+screen and Schwung Manager's web UI edit. Point an instrument track's Output
+at Schwung on this same channel (see Options: Inst 1 / Inst 2, above) to
+reach that chain. Requires a Schwung build new enough to export this; on an
+older build the MIDI Channel field reads "—" and cannot be edited.
+
+| Control | Action |
+|---------|--------|
+| Jog wheel (browse mode) | Move between Chain, MIDI Channel |
+| Jog wheel (edit mode, Chain) | Page through chain slots 1–4 |
+| Jog wheel (edit mode, MIDI Channel) | Adjust that chain's receive channel (0 = Any, 1–16 = explicit) |
+| Jog click | Toggle edit / browse mode |
+| Back (edit mode) | Exit edit mode |
+| Back (browse mode) | Return to Options |
 
 **Button LED hints:** Back and Main are lit.
 

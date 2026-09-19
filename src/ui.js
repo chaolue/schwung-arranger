@@ -119,6 +119,7 @@ const VIEW_PERFORMANCE = "performance_view";
 const VIEW_OPTIONS = "options";
 const VIEW_OPTIONS_DRUMS = "options_drums";
 const VIEW_OPTIONS_INST = "options_inst";
+const VIEW_OPTIONS_CHAINS = "options_chains";
 const VIEW_SONG_SETTINGS = "song_settings";
 const VIEW_SETLIST_BANK = "setlist_bank";
 const VIEW_SETLIST_EDIT = "setlist_edit";
@@ -279,6 +280,17 @@ let inst1Output = "external";
 let inst1Channel = 1;
 let inst2Output = "external";
 let inst2Channel = 1;
+/* Options > Chains: view/edit one of Schwung's own built-in chain slots'
+ * receive channel directly from inside Arranger, via the DSP's
+ * "chain_channel:<slot>" get/set_param keys. Unlike the routing settings
+ * above, the chain slot itself is the source of truth (not this module), so
+ * chainChannelDisplay is only a cache of the last read -- refreshed whenever
+ * the Chains screen opens or the selected slot changes. null means unread or
+ * unsupported by this shim build (older host without the chain-slot export;
+ * see readChainChannel). */
+const ARR_CHAIN_SLOTS = 4; /* mirrors Schwung's SHADOW_CHAIN_INSTANCES */
+let optionsChainIndex = 0; /* 0..ARR_CHAIN_SLOTS-1, which chain slot is shown */
+let chainChannelDisplay = null;
 let dspDirectEmit = false;
 let pendingSongJson = null;
 let dspTimelineInfo = null;
@@ -671,7 +683,7 @@ const PAD_PREVIEW_DELAY_MS = 250; /* delay before pad tap triggers insert previe
  * Setlist / clip names that overflow the row width. */
 const SCROLLABLE_MENU_VIEWS = new Set([
     VIEW_ROOT, VIEW_FOLDER_LIST, VIEW_BUILDER, VIEW_TRIM, VIEW_SONG_SETTINGS,
-    VIEW_SONG_BANK, VIEW_OPTIONS, VIEW_OPTIONS_DRUMS, VIEW_OPTIONS_INST,
+    VIEW_SONG_BANK, VIEW_OPTIONS, VIEW_OPTIONS_DRUMS, VIEW_OPTIONS_INST, VIEW_OPTIONS_CHAINS,
     VIEW_SETLIST_BANK, VIEW_SETLIST_EDIT,
     VIEW_SETLIST_PICK, VIEW_SETLIST_CLICK, VIEW_PERF_SETLIST, VIEW_PERFORMANCE,
     VIEW_JAM_FOLDER, VIEW_JAM, VIEW_SECTION_PICK, VIEW_CHORD_PICK, VIEW_INSTRUMENT
@@ -1877,6 +1889,30 @@ function setOutputTarget(target) {
     pushOutputRoutingToDsp();
     needsRedraw = true;
     logDebug("setOutputTarget: target=" + outputTarget + " channel=" + activeOutputChannel() + " direct=" + dspDirectEmit);
+}
+
+/* Read a Schwung chain slot's own receive channel straight from the DSP
+ * (which forwards to the shim's chain-slot export -- see arranger_engine.c's
+ * "chain_channel:" keys). Returns 0-16 (0 = Any), or null if this shim build
+ * predates the export (host_module_get_param returns -1/undefined). Called
+ * synchronously -- the underlying call is a same-thread C call on the shim,
+ * not an async round trip, so there is no polling involved. */
+function readChainChannel(slot) {
+    if (typeof host_module_get_param !== "function") return null;
+    const raw = host_module_get_param("chain_channel:" + slot);
+    if (typeof raw !== "string" || raw.length === 0) return null;
+    const n = parseInt(raw, 10);
+    if (!Number.isFinite(n) || n < 0 || n > 16) return null;
+    return n;
+}
+
+/* Set a Schwung chain slot's receive channel (0 = Any, 1-16 = explicit) and
+ * update the cached display value optimistically. */
+function writeChainChannel(slot, channel) {
+    if (typeof host_module_set_param === "function") {
+        host_module_set_param("chain_channel:" + slot, String(channel));
+    }
+    if (slot === optionsChainIndex) chainChannelDisplay = channel;
 }
 
 /* Push the current output settings to the DSP. Called after restoring
@@ -5756,6 +5792,7 @@ function drawOptions() {
         { key: "drums", label: "Drums", value: currentOutputLabel() + " " + activeOutputChannel() },
         { key: "inst1", label: "Inst 1", value: (OUTPUT_LABELS[inst1Output] || inst1Output) + " " + inst1Channel },
         { key: "inst2", label: "Inst 2", value: (OUTPUT_LABELS[inst2Output] || inst2Output) + " " + inst2Channel },
+        { key: "chains", label: "Chains", value: "Chain " + (optionsChainIndex + 1) },
         { key: "clickchan", label: "Click Channel", value: clickChannel === 0 ? "Default" : String(clickChannel) },
         { key: "swapguard", label: "Swap Guard", value: Math.round(swapGuardFraction * 100) + "%" },
         { key: "dspdebug", label: "DSP Debug", value: dspDebugEnabled ? "On" : "Off" }
@@ -5840,6 +5877,43 @@ function openOptionsInst(index) {
     optionsSubEditing = false;
     currentView = VIEW_OPTIONS_INST;
     menuStack.push({ title: index === 1 ? "Inst 1" : "Inst 2", selectedIndex: 0 });
+    needsRedraw = true;
+}
+
+/* Chains: view/edit one of Schwung's own 4 built-in chain slots' receive
+ * channel directly (see readChainChannel/writeChainChannel). Row 0 pages
+ * through the 4 slots (re-reading the channel each time); row 1 edits that
+ * slot's channel live. chainChannelDisplay null means this shim build
+ * predates the chain-slot export -- shown as "—", not editable. */
+function drawOptionsChains() {
+    drawMenuHeader("Chain " + (optionsChainIndex + 1), "");
+    const chVal = chainChannelDisplay === null ? "—" :
+        (chainChannelDisplay === 0 ? "Any" : String(chainChannelDisplay));
+    const items = [
+        { key: "chain", label: "Chain", value: String(optionsChainIndex + 1) },
+        { key: "channel", label: "MIDI Channel", value: chVal }
+    ];
+    drawMenuList({
+        labelX: 3,
+        items,
+        selectedIndex: optionsSubFocus,
+        getLabel: (item) => item.label,
+        getValue: (item) => item.value,
+        valueAlignRight: true,
+        editMode: optionsSubEditing,
+        labelGap: 2,
+        prioritizeSelectedValue: true,
+        selectedMinLabelChars: 7,
+        listArea: { topY: LIST_TOP_Y, bottomY: LIST_INDICATOR_BOTTOM_Y }
+    });
+}
+
+function openOptionsChains() {
+    optionsSubFocus = 0;
+    optionsSubEditing = false;
+    currentView = VIEW_OPTIONS_CHAINS;
+    chainChannelDisplay = readChainChannel(optionsChainIndex);
+    menuStack.push({ title: "Chain " + (optionsChainIndex + 1), selectedIndex: 0 });
     needsRedraw = true;
 }
 
@@ -6918,12 +6992,12 @@ function duplicateSelectedSong() {
 }
 
 function handleOptionsInput(cc, value) {
-    /* Rows 0-2 (Drums, Instrument 1, Instrument 2) navigate into a submenu;
-     * rows 3-5 (Click Channel, Swap Guard, DSP Debug) edit in place. */
+    /* Rows 0-3 (Drums, Instrument 1, Instrument 2, Chains) navigate into a
+     * submenu; rows 4-6 (Click Channel, Swap Guard, DSP Debug) edit in place. */
     if (cc === MoveMainKnob) {
         const delta = decodeDelta(value);
         if (optionsEditing) {
-            if (optionsFocus === 3) {
+            if (optionsFocus === 4) {
                 /* Adjust the count-in click channel. 0 = follow the primary
                  * output channel (Default); 1-16 = explicit channel. */
                 const newCh = Math.max(0, Math.min(16, clickChannel + delta));
@@ -6931,7 +7005,7 @@ function handleOptionsInput(cc, value) {
                     clickChannel = newCh;
                     saveOutputSettings();
                 }
-            } else if (optionsFocus === 4) {
+            } else if (optionsFocus === 5) {
                 /* Adjust the mid-clip swap guard (0-100%, in 5% steps). */
                 const newG = Math.max(0, Math.min(1, swapGuardFraction + delta * 0.05));
                 if (newG !== swapGuardFraction) {
@@ -6939,7 +7013,7 @@ function handleOptionsInput(cc, value) {
                     saveOutputSettings();
                     pushSwapGuardToDsp();
                 }
-            } else if (optionsFocus === 5) {
+            } else if (optionsFocus === 6) {
                 /* Toggle the DSP debug log. */
                 dspDebugEnabled = !dspDebugEnabled;
                 saveOutputSettings();
@@ -6951,7 +7025,7 @@ function handleOptionsInput(cc, value) {
                 }
             }
         } else {
-            const newIdx = Math.max(0, Math.min(5, optionsFocus + delta));
+            const newIdx = Math.max(0, Math.min(6, optionsFocus + delta));
             if (newIdx !== optionsFocus) {
                 optionsFocus = newIdx;
             }
@@ -6964,6 +7038,8 @@ function handleOptionsInput(cc, value) {
             openOptionsInst(1);
         } else if (optionsFocus === 2) {
             openOptionsInst(2);
+        } else if (optionsFocus === 3) {
+            openOptionsChains();
         } else {
             optionsEditing = !optionsEditing;
             needsRedraw = true;
@@ -7048,6 +7124,46 @@ function handleOptionsInstInput(cc, value) {
                 if (isInst1) inst1Channel = newCh;
                 else inst2Channel = newCh;
                 saveOutputSettings();
+            }
+        } else {
+            const newIdx = Math.max(0, Math.min(1, optionsSubFocus + delta));
+            if (newIdx !== optionsSubFocus) optionsSubFocus = newIdx;
+        }
+        needsRedraw = true;
+    } else if (cc === MoveMainButton && value > 0) {
+        optionsSubEditing = !optionsSubEditing;
+        needsRedraw = true;
+    } else if (cc === MoveBack && value > 0) {
+        if (optionsSubEditing) {
+            optionsSubEditing = false;
+            needsRedraw = true;
+        } else {
+            menuStack.pop();
+            currentView = VIEW_OPTIONS;
+            needsRedraw = true;
+        }
+    }
+}
+
+function handleOptionsChainsInput(cc, value) {
+    if (cc === MoveMainKnob) {
+        const delta = decodeDelta(value);
+        if (optionsSubEditing) {
+            if (optionsSubFocus === 0) {
+                /* Page to a different chain slot; re-read its channel. */
+                const newIdx = Math.max(0, Math.min(ARR_CHAIN_SLOTS - 1, optionsChainIndex + delta));
+                if (newIdx !== optionsChainIndex) {
+                    optionsChainIndex = newIdx;
+                    chainChannelDisplay = readChainChannel(optionsChainIndex);
+                    const frame = menuStack.current();
+                    if (frame) frame.title = "Chain " + (optionsChainIndex + 1);
+                }
+            } else if (chainChannelDisplay !== null) {
+                /* Adjust the selected chain's receive channel. 0 = Any. */
+                const newCh = Math.max(0, Math.min(16, chainChannelDisplay + delta));
+                if (newCh !== chainChannelDisplay) {
+                    writeChainChannel(optionsChainIndex, newCh);
+                }
             }
         } else {
             const newIdx = Math.max(0, Math.min(1, optionsSubFocus + delta));
@@ -10180,6 +10296,7 @@ globalThis.tick = function() {
                 case VIEW_OPTIONS: drawOptions(); break;
                 case VIEW_OPTIONS_DRUMS: drawOptionsDrums(); break;
                 case VIEW_OPTIONS_INST: drawOptionsInst(); break;
+                case VIEW_OPTIONS_CHAINS: drawOptionsChains(); break;
                 case VIEW_SETLIST_BANK: drawSetlistBank(); break;
                 case VIEW_SETLIST_EDIT: drawSetlistEdit(); break;
                 case VIEW_SETLIST_PICK: drawSetlistPick(); break;
@@ -10259,6 +10376,7 @@ function routeCcInput(rawData, cc, value) {
         case VIEW_OPTIONS: handleOptionsInput(cc, value); break;
         case VIEW_OPTIONS_DRUMS: handleOptionsDrumsInput(cc, value); break;
         case VIEW_OPTIONS_INST: handleOptionsInstInput(cc, value); break;
+        case VIEW_OPTIONS_CHAINS: handleOptionsChainsInput(cc, value); break;
         case VIEW_SETLIST_BANK: handleSetlistBankInput(cc, value); break;
         case VIEW_SETLIST_EDIT: handleSetlistEditInput(cc, value); break;
         case VIEW_SETLIST_PICK: handleSetlistPickInput(cc, value); break;
