@@ -682,6 +682,16 @@ typedef struct engine {
      * was turned on with, even if the live per-bar override has since
      * changed (e.g. the playhead moved to a different bar). */
     instrument_t last_inst_resolved[MAX_INSTRUMENTS];
+    /* The tick of the last follow-note attack actually fired for each
+     * instrument (emit_instruments_follow only -- meaningless/unused for the
+     * bar-boundary path). Lets a second matching drum hit landing within the
+     * Swap Guard window of the first (e.g. a source clip's own last kick,
+     * pushed onto the next bar by that same guard window, immediately
+     * followed by that next bar's own genuine downbeat kick when the clip
+     * repeats) be recognized as the same logical attack instead of
+     * retriggering a near-zero-length note. Only meaningful while
+     * last_inst_chord_set[i] is also true -- see emit_instruments_follow. */
+    uint32_t last_inst_follow_tick[MAX_INSTRUMENTS];
     /* Deferred note-off: when a chord is emitted, its note-off is scheduled
      * `note_gap` before the next note-on, so the previous note is cut short
      * rather than the new note being delayed. */
@@ -2226,6 +2236,10 @@ static void emit_instruments_follow(engine_t *e, uint8_t note, uint32_t tick) {
     uint32_t bar = 0;
     int sec_idx = tick_to_section_bar(&e->live_slot.song, tick, e->ticks_per_bar, &bar);
     if (sec_idx < 0) return;
+    /* Also used below to recognize a duplicate-attack hit within the same
+     * window (see is_duplicate_attack) -- hoisted out of the `if` below so
+     * it's in scope there even when this bar isn't near a boundary. */
+    uint32_t guard_ticks = (uint32_t)(e->swap_guard_fraction * e->ticks_per_beat);
     /* A drum hit anticipating the downbeat (e.g. a pushed kick just before
      * the barline) still falls within the outgoing bar by tick, but
      * musically belongs to the bar it's leading into. When it lands within
@@ -2235,7 +2249,6 @@ static void emit_instruments_follow(engine_t *e, uint8_t note, uint32_t tick) {
     if (e->ticks_per_bar > 0) {
         uint32_t abs_bar = tick / e->ticks_per_bar;
         uint32_t bar_end_tick = (abs_bar + 1) * e->ticks_per_bar;
-        uint32_t guard_ticks = (uint32_t)(e->swap_guard_fraction * e->ticks_per_beat);
         if (bar_end_tick > tick && (bar_end_tick - tick) <= guard_ticks) {
             uint32_t next_bar = 0;
             int next_sec = tick_to_section_bar(&e->live_slot.song, bar_end_tick, e->ticks_per_bar, &next_bar);
@@ -2255,11 +2268,28 @@ static void emit_instruments_follow(engine_t *e, uint8_t note, uint32_t tick) {
         if (resolved.follow_note == 0 || resolved.follow_note != note) continue;
         if (bar < MAX_SECTION_BARS && inst->bars[sec_idx][bar] == 0) continue;
         if (ch && ch->set) {
-            /* Fire the new note-on immediately (on the drum hit). */
-            emit_instrument_chord(e, &resolved, ch, 100);
-            e->last_inst_chord[i] = *ch;
-            e->last_inst_chord_set[i] = 1;
-            e->last_inst_resolved[i] = resolved;
+            /* A second matching hit landing within the guard window of the
+             * one that's already sounding (same chord too) is the same
+             * logical attack, not a fresh one -- most commonly a source
+             * clip's own last kick, pushed onto the next bar by the guard
+             * window above, immediately followed by that next bar's own
+             * genuine downbeat kick when the clip repeats (the two are only
+             * a handful of ticks apart). Firing a full second note-on there
+             * produced an audible near-zero-length note right at the seam.
+             * Let the already-sounding note continue and just extend its
+             * scheduled off from THIS hit's own lookahead instead. */
+            uint8_t is_duplicate_attack = e->last_inst_chord_set[i] &&
+                chord_equal(&e->last_inst_chord[i], ch) &&
+                tick >= e->last_inst_follow_tick[i] &&
+                (tick - e->last_inst_follow_tick[i]) <= guard_ticks;
+            if (!is_duplicate_attack) {
+                /* Fire the new note-on immediately (on the drum hit). */
+                emit_instrument_chord(e, &resolved, ch, 100);
+                e->last_inst_chord[i] = *ch;
+                e->last_inst_chord_set[i] = 1;
+                e->last_inst_resolved[i] = resolved;
+                e->last_inst_follow_tick[i] = tick;
+            }
             /* Hold until the next matching drum hit, cut short by note_gap.
              * If there is no next hit, hold until the song end. */
             uint32_t gap = (uint32_t)(resolved.note_gap * e->ticks_per_beat);
