@@ -350,6 +350,47 @@ let backHoldSuspendFired = false;
 let backHoldPressValue = 0;
 let backHoldStatusByte = 0xB0;
 const BACK_SUSPEND_HOLD_MS = 500;
+
+/* Generic version of the same press/hold/replay shape as backHoldActive
+ * above, shared by every OTHER button that gains a long-press action without
+ * losing its existing short-press one: Track1-4 (jump to the matching
+ * Schwung chain) and Menu (jump to Master FX), whose short-press meaning is
+ * real (song settings / instrument menu) and must still fire on a quick tap.
+ * Keyed by cc rather than one copy per button. On press: start the timer,
+ * withhold dispatch. In tick(): once held LONG_PRESS_HOLD_MS, fire the
+ * long-press action and mark fired so release does nothing. On release: if
+ * never fired, replay the deferred press through routeCcInput so a tap
+ * behaves exactly as it did before this existed (see backHoldActive's own
+ * comment for why replaying on release rather than dispatching on press is
+ * what makes a hold distinguishable from a tap at all). Track1-4 have no
+ * short-press meaning today, so their entries pass replay:false and a tap
+ * simply does nothing, same as before this existed. */
+const longPressHolds = new Map(); // cc -> {startTime, fired, pressValue, statusByte, replay}
+const LONG_PRESS_HOLD_MS = 500;
+
+function startLongPressHold(cc, statusByte, pressValue, replay) {
+    longPressHolds.set(cc, { startTime: Date.now(), fired: false, pressValue, statusByte, replay });
+}
+
+function endLongPressHold(cc) {
+    const hold = longPressHolds.get(cc);
+    longPressHolds.delete(cc);
+    if (hold && !hold.fired && hold.replay) {
+        routeCcInput([hold.statusByte, cc, hold.pressValue], cc, hold.pressValue);
+    }
+}
+
+/* CC43=Track1..CC40=Track4 (Move's track CCs are reversed) map onto Chain
+ * 1..Chain 4; MoveMenu jumps to Master FX. Called from tick() once a hold
+ * crosses LONG_PRESS_HOLD_MS. */
+function fireLongPressAction(cc) {
+    if (cc === 43) jumpToSchwungChain(0);
+    else if (cc === 42) jumpToSchwungChain(1);
+    else if (cc === 41) jumpToSchwungChain(2);
+    else if (cc === 40) jumpToSchwungChain(3);
+    else if (cc === MoveMenu) jumpToMasterFxChain();
+}
+
 let needsRedraw = true;
 let ledQueue = [];
 const LEDS_PER_TICK = 8;
@@ -1915,20 +1956,24 @@ function writeChainChannel(slot, channel) {
     if (slot === optionsChainIndex) chainChannelDisplay = channel;
 }
 
-/* Suspend Arranger and jump straight to Schwung's own chain editor for
- * whichever chain slot a track's output is currently reaching -- e.g.
- * Shift+Track1 for Drums. Scans the 4 chain slots for one whose receive
- * channel matches the track's configured channel; a silent no-op if the
- * track isn't routed to Schwung, no slot matches (nothing to jump to), or
- * this shim build predates the jump export. */
-function jumpToAssociatedChain(output, channel) {
-    if (output !== "schwung") return;
-    if (typeof host_module_set_param !== "function") return;
-    for (let slot = 0; slot < ARR_CHAIN_SLOTS; slot++) {
-        if (readChainChannel(slot) === channel) {
-            host_module_set_param("jump_to_chain", String(slot));
-            return;
-        }
+/* Suspend Arranger and jump straight to Schwung's own chain editor for chain
+ * slot N (0-3) -- Track1..Track4 map directly to Chain 1..Chain 4, matching
+ * the chain editor's own numbering. A JS-to-JS call: shadow_ui.js injects
+ * host_jump_to_slot into this module's global scope the same way it injects
+ * host_suspend_overtake, so this needs no DSP round trip. It runs the full
+ * suspend sequence (LED snapshot, parking this module so it can be resumed)
+ * before switching the screen, unlike a bare "poke a shim flag" would --
+ * silent no-op on a shadow_ui.js build that predates the export. */
+function jumpToSchwungChain(slot) {
+    if (typeof host_jump_to_slot === "function") {
+        host_jump_to_slot(slot);
+    }
+}
+
+/* Same, but for Schwung's Master FX chain. */
+function jumpToMasterFxChain() {
+    if (typeof host_jump_to_master_fx === "function") {
+        host_jump_to_master_fx();
     }
 }
 
@@ -10071,6 +10116,17 @@ globalThis.tick = function() {
         }
     }
 
+    /* Promote each held Track1-4 / Menu to its long-press action once it's
+     * been down LONG_PRESS_HOLD_MS -- see longPressHolds' declaration. Same
+     * "checked ahead of everything else" placement as the Back-hold check
+     * above, for the same reason. */
+    for (const [cc, hold] of longPressHolds) {
+        if (!hold.fired && Date.now() - hold.startTime >= LONG_PRESS_HOLD_MS) {
+            hold.fired = true;
+            fireLongPressAction(cc);
+        }
+    }
+
     /* Diagnostic for the LED-queue backlog report: sample ledQueue.length
      * every ~2s (any view, any activity -- the backlog was already large at
      * the START of a preview session, so it isn't obviously jam-specific)
@@ -10435,16 +10491,20 @@ globalThis.onMidiMessageInternal = function(data) {
             }
             return;
         }
-        if (shiftHeld && cc >= 40 && cc <= 43) {
-            /* Shift+TrackN: jump to that track's associated Schwung chain
-             * (if it's routed there) and suspend Arranger in the background.
-             * Move's track CCs are reversed (CC43=Track1..CC40=Track4);
-             * Track4 has no associated Arranger track and is left unbound. */
-            if (value > 0) {
-                if (cc === 43) jumpToAssociatedChain(outputTarget, activeOutputChannel());
-                else if (cc === 42) jumpToAssociatedChain(inst1Output, inst1Channel);
-                else if (cc === 41) jumpToAssociatedChain(inst2Output, inst2Channel);
-            }
+        if (cc >= 40 && cc <= 43) {
+            /* Track1-4 long-press: jump to the matching Schwung chain (see
+             * fireLongPressAction). No short-press meaning today, so a tap
+             * (replay:false) does nothing, same as before this existed. */
+            if (value > 0) startLongPressHold(cc, data[0], value, false);
+            else endLongPressHold(cc);
+            return;
+        }
+        if (cc === MoveMenu) {
+            /* Menu long-press: jump to Master FX. Menu's short-press meaning
+             * (song settings / instrument menu, per view) is real, so a tap
+             * must still replay it -- see longPressHolds' declaration. */
+            if (value > 0) startLongPressHold(cc, data[0], value, true);
+            else endLongPressHold(cc);
             return;
         }
         routeCcInput(data, cc, value);
