@@ -62,6 +62,14 @@ typedef int (*chain_slot_set_param_fn)(int slot, const char *key, const char *va
 static chain_slot_get_param_fn g_chain_slot_get_param;
 static chain_slot_set_param_fn g_chain_slot_set_param;
 
+/* Suspend this overtake module and hand the screen to Schwung's own chain
+ * editor for the given slot, in one atomic call -- see the export's own doc
+ * comment in schwung's schwung_shim.c (schwung_overtake_jump_to_slot). NULL
+ * on a shim build that predates it; guarded the same way as the chain-slot
+ * pair above. Returns 1 if the jump was armed, 0 if refused. */
+typedef int (*overtake_jump_to_slot_fn)(int slot);
+static overtake_jump_to_slot_fn g_overtake_jump_to_slot;
+
 /* Runtime debug flag. When 0 (default), arr_log/dsp_host_log skip all work,
  * so the hot audio path does no I/O. Set to 1 only when debugging. */
 static int g_dsp_debug = 0;
@@ -4487,6 +4495,18 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
         }
         return;
     }
+    if (strcmp(key, "jump_to_chain") == 0) {
+        /* Suspend this module and hand the screen to Schwung's own chain
+         * editor for the given slot (e.g. "0".."3") -- see
+         * schwung_overtake_jump_to_slot's own doc comment. A no-op if this
+         * shim build predates the export, or the jump is refused (e.g. no
+         * overtake module actually active). */
+        int slot = atoi(val);
+        if (g_overtake_jump_to_slot) {
+            g_overtake_jump_to_slot(slot);
+        }
+        return;
+    }
     if (strcmp(key, "song_json") == 0) {
         /* Default to one-shot unless loop is explicitly set afterwards.
          * This prevents stale loop state from causing preview/song to loop
@@ -5184,5 +5204,7 @@ plugin_api_v2_t* move_plugin_init_v2(const struct host_api_v1 *host) {
         dlsym(RTLD_DEFAULT, "schwung_chain_slot_get_param");
     g_chain_slot_set_param = (chain_slot_set_param_fn)
         dlsym(RTLD_DEFAULT, "schwung_chain_slot_set_param");
+    g_overtake_jump_to_slot = (overtake_jump_to_slot_fn)
+        dlsym(RTLD_DEFAULT, "schwung_overtake_jump_to_slot");
     return &g_api;
 }

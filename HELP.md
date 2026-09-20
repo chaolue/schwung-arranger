@@ -14,6 +14,9 @@ Button LED legend:
 |---------|--------|
 | Back (tap) | Screen-specific — see each section below |
 | Back (hold ≥0.5s) | Suspend the module: it parks in the background with playback still running. Return to it from the Schwung Tools menu to pick up where you left off |
+| Shift + Track 1 | Jump to the Schwung chain the Drums track is currently routed to (Options → Drums → Output must be Schwung), suspending the module the same way as Back-hold. No-op if Drums isn't routed to Schwung or no chain slot's channel matches |
+| Shift + Track 2 | Same, for Instrument 1 |
+| Shift + Track 3 | Same, for Instrument 2 |
 
 ---
 

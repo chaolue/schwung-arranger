@@ -1915,6 +1915,23 @@ function writeChainChannel(slot, channel) {
     if (slot === optionsChainIndex) chainChannelDisplay = channel;
 }
 
+/* Suspend Arranger and jump straight to Schwung's own chain editor for
+ * whichever chain slot a track's output is currently reaching -- e.g.
+ * Shift+Track1 for Drums. Scans the 4 chain slots for one whose receive
+ * channel matches the track's configured channel; a silent no-op if the
+ * track isn't routed to Schwung, no slot matches (nothing to jump to), or
+ * this shim build predates the jump export. */
+function jumpToAssociatedChain(output, channel) {
+    if (output !== "schwung") return;
+    if (typeof host_module_set_param !== "function") return;
+    for (let slot = 0; slot < ARR_CHAIN_SLOTS; slot++) {
+        if (readChainChannel(slot) === channel) {
+            host_module_set_param("jump_to_chain", String(slot));
+            return;
+        }
+    }
+}
+
 /* Push the current output settings to the DSP. Called after restoring
  * settings on init so the engine's routing matches what was saved. */
 function applyOutputSettingsToDsp() {
@@ -10415,6 +10432,18 @@ globalThis.onMidiMessageInternal = function(data) {
                 if (!backHoldSuspendFired) {
                     routeCcInput([backHoldStatusByte, cc, backHoldPressValue], cc, backHoldPressValue);
                 }
+            }
+            return;
+        }
+        if (shiftHeld && cc >= 40 && cc <= 43) {
+            /* Shift+TrackN: jump to that track's associated Schwung chain
+             * (if it's routed there) and suspend Arranger in the background.
+             * Move's track CCs are reversed (CC43=Track1..CC40=Track4);
+             * Track4 has no associated Arranger track and is left unbound. */
+            if (value > 0) {
+                if (cc === 43) jumpToAssociatedChain(outputTarget, activeOutputChannel());
+                else if (cc === 42) jumpToAssociatedChain(inst1Output, inst1Channel);
+                else if (cc === 41) jumpToAssociatedChain(inst2Output, inst2Channel);
             }
             return;
         }
