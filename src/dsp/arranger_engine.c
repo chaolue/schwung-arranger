@@ -546,6 +546,14 @@ typedef struct engine {
      * loop wrap (used for groove-end transitions) apart from a plain bar
      * advance (used for bar-end fill transitions). */
     uint32_t wrap_counter;
+    /* playhead_tick as of the last update_bar_counter call. A playhead that
+     * moved backwards is a loop wrap and counts as a bar boundary even when
+     * the bar number doesn't change -- a one-bar loop wraps from bar 0
+     * straight back to bar 0. (wrap_counter can't be used for this: it also
+     * ticks every block through the silent tail after a clip's last event.)
+     * Every place that jumps the playhead and pre-syncs last_bar resets
+     * this too, so those jumps aren't mistaken for a wrap. */
+    uint32_t last_bc_tick;
 
     /* Swap counter: incremented every time a staged timeline is activated via
      * a clip swap. Distinct from bar_counter/wrap_counter so the UI can detect
@@ -673,6 +681,14 @@ typedef struct engine {
      * bass line that's following the kick pattern. Defaults to 1 (audible)
      * -- see arr_create_instance. */
     uint8_t drum_enabled;
+    /* Perform's live mute for the song's own Inst 1/Inst 2 tracks, set via
+     * inst1_enabled/inst2_enabled. Engine-level for the same reason as
+     * drum_enabled: it must survive a song_json rebuild. It used to be
+     * written into live_slot.song.instruments[].enabled, which the rebuild
+     * issued by Play (and every staged swap) overwrites with the song's
+     * saved value -- found live: Inst 1/2 muted while stopped kept playing
+     * after Play, while the pads/buttons showed them muted. Defaults to 1. */
+    uint8_t inst_live_enabled[MAX_INSTRUMENTS];
 
     /* Channel override of the most recently drained event, used by
      * emit_direct_event when a per-clip channel (e.g. a dedicated click
@@ -2161,7 +2177,7 @@ static void emit_instruments_at_tick(engine_t *e, uint32_t tick) {
             (next_ch && next_ch->set) ? next_ch->root : "null");
     for (int i = 0; i < e->live_slot.song.instrument_count && i < MAX_INSTRUMENTS; i++) {
         instrument_t *inst = &e->live_slot.song.instruments[i];
-        if (!inst->enabled) continue;
+        if (!inst->enabled || !e->inst_live_enabled[i]) continue;
         instrument_t resolved;
         resolve_instrument_for_bar(inst, sec_idx, (int)bar, &resolved);
         if (resolved.follow_note > 0) {
@@ -2342,7 +2358,7 @@ static void emit_instruments_follow(engine_t *e, uint8_t note, uint32_t tick) {
     const chord_t *ch = chord_at_bar(sec, bar);
     for (int i = 0; i < e->live_slot.song.instrument_count && i < MAX_INSTRUMENTS; i++) {
         instrument_t *inst = &e->live_slot.song.instruments[i];
-        if (!inst->enabled) continue;
+        if (!inst->enabled || !e->inst_live_enabled[i]) continue;
         instrument_t resolved;
         resolve_instrument_for_bar(inst, sec_idx, (int)bar, &resolved);
         if (resolved.follow_note == 0 || resolved.follow_note != note) continue;
@@ -4175,6 +4191,7 @@ static void handle_loop_or_stop(engine_t *e, uint32_t *target) {
                 e->last_bar = e->live_slot.end_tick > 0
                     ? (resume / e->ticks_per_bar)
                     : 0;
+                e->last_bc_tick = e->playhead_tick;
                 apply_pending_jam_chord(e);
                 emit_jam_instruments_at_tick(e, resume);
                 uint32_t advanced = resume + overshoot;
@@ -4265,7 +4282,9 @@ static void update_bar_counter(engine_t *e) {
     uint32_t bar = e->live_slot.end_tick > 0
         ? (e->playhead_tick / e->ticks_per_bar)
         : 0;
-    if (bar != e->last_bar) {
+    int wrapped = e->playhead_tick < e->last_bc_tick;
+    e->last_bc_tick = e->playhead_tick;
+    if (bar != e->last_bar || wrapped) {
         e->bar_counter++;
         e->last_bar = bar;
         /* Emit the chord for non-follow instruments at each bar boundary. */
@@ -4405,6 +4424,7 @@ static void advance_playhead(engine_t *e, int frames, int sample_rate) {
         e->last_bar = e->live_slot.end_tick > 0
             ? (resume / e->ticks_per_bar)
             : 0;
+        e->last_bc_tick = e->playhead_tick;
         apply_pending_jam_chord(e);
         emit_jam_instruments_at_tick(e, resume);
         if (e->live_slot.end_tick > 0) {
@@ -4501,6 +4521,7 @@ static void* arr_create_instance(const char *module_dir, const char *config_json
     e->last_event_channel_override = -1; /* no per-event override by default */
     e->loop = 1;          /* default to looping for performance mode */
     e->drum_enabled = 1;   /* audible by default; Perform/Jam mute is opt-in */
+    for (int i = 0; i < MAX_INSTRUMENTS; i++) e->inst_live_enabled[i] = 1;
     /* Pre-existing latent bug, newly reachable now that JS/the test harness
      * must poll get_param("state") for primary_published_gen BEFORE any
      * build has ever completed (to capture a baseline generation) rather
@@ -4849,17 +4870,14 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
         return;
     }
     if (strcmp(key, "inst1_enabled") == 0 || strcmp(key, "inst2_enabled") == 0) {
-        /* Perform/Jam live mute for a song-authored instrument track. Direct
-         * field write on e->live_slot.song.instruments[] -- safe: that data
-         * is only ever read on this same (audio) thread, same as every
-         * other live/no-rebuild set_param here (e.g. "tempo"). Disabling
-         * while a note is sounding cuts it off immediately rather than
-         * waiting for its own scheduled/bar-boundary off. */
+        /* Perform live mute for a song-authored instrument track -- see
+         * inst_live_enabled. Disabling while a note is sounding cuts it off
+         * immediately rather than waiting for its own scheduled/bar-boundary
+         * off. */
         int idx = (key[4] == '1') ? 0 : 1;
+        e->inst_live_enabled[idx] = atoi(val) ? 1 : 0;
         if (idx < e->live_slot.song.instrument_count) {
-            instrument_t *inst = &e->live_slot.song.instruments[idx];
-            inst->enabled = atoi(val) ? 1 : 0;
-            if (!inst->enabled && e->last_inst_chord_set[idx]) {
+            if (!e->inst_live_enabled[idx] && e->last_inst_chord_set[idx]) {
                 emit_instrument_chord_off(e, &e->last_inst_resolved[idx], &e->last_inst_chord[idx]);
                 e->last_inst_chord_set[idx] = 0;
                 e->pending_off_set[idx] = 0;
@@ -4991,6 +5009,7 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
         e->last_playhead_tick = 0;
         e->tick_remainder = 0.0;
         e->last_bar = 0;
+        e->last_bc_tick = 0;
         for (int i = 0; i < MAX_INSTRUMENTS; i++) {
             e->last_inst_chord_set[i] = 0;
             e->pending_off_set[i] = 0;
@@ -5041,6 +5060,7 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
         e->last_playhead_tick = 0;
         e->tick_remainder = 0.0;
         e->last_bar = (uint32_t)bar;
+        e->last_bc_tick = e->playhead_tick;
         for (int i = 0; i < MAX_INSTRUMENTS; i++) {
             e->last_inst_chord_set[i] = 0;
             e->pending_off_set[i] = 0;
