@@ -131,6 +131,7 @@ const VIEW_SECTION_PICK = "section_pick";
 const VIEW_CHORD_PICK = "chord_pick";
 const VIEW_INSTRUMENT = "instrument";
 const VIEW_INSTRUMENT_BAR = "instrument_bar";
+const VIEW_JAM_INSTRUMENT = "jam_instrument";
 
 /* Section names offered when adding a new section via Shift + Loop. */
 const SECTION_NAMES = [
@@ -530,6 +531,13 @@ let transportBeatsPerBar = 0; /* observed transport beats in last complete bar *
 let lastSubdivisionIndex = 0; /* current subdivision within transport beat */
 let lastSubFlashMs = 0;       /* wall-clock anchor of the current sub-beat flash */
 
+/* Live Perform-mode mute toggles (Row1/3/4 track buttons) -- purely a
+ * runtime performance control, not persisted, and reset to all-on whenever
+ * Perform is (re)entered or a new song loads (see perfLoadSong). */
+let perfDrumEnabled = true;
+let perfInst1Enabled = true;
+let perfInst2Enabled = true;
+
 /* Performance / setlist playback state */
 let perfPlaying = false;            /* is the setlist advancing on its own */
 let perfSongIndex = 0;              /* index into currentSetlist.songs */
@@ -569,6 +577,51 @@ let perfSetTotalSec = 0;            /* cached total duration of the whole setlis
 let perfSetTotalKeyCached = "";     /* cache key for perfSetTotalSec */
 
 /* ── Jam mode state ─────────────────────────────────────────────────── */
+/* Live Jam-mode mute toggles (Row1/3/4 track buttons) -- separate from
+ * perfDrumEnabled/etc. above so Perform and Jam don't affect each other.
+ * Not persisted; reset to all-on whenever Jam is (re)entered. Inst1/2
+ * enabled also gate whether the chord-pad grid layout is shown -- see
+ * jamChordModeActive(). */
+let jamDrumEnabled = true;
+let jamInst1Enabled = true;
+let jamInst2Enabled = true;
+
+/* Jam chord performance: the key the 8 chord pads are built from (reuses
+ * diatonicChord, ui.js:1123), and JS's own mirror of the DSP's pending/live
+ * chord split (see arranger_engine.c's jam_chord_pending/jam_chord_live) so
+ * pad LEDs can show "selected, takes effect next bar" vs. "currently
+ * sounding" without a round trip. While playing, a pad press stays pending
+ * until promoted locally on the next bar_counter change (polled off
+ * transport/state), mirroring the DSP's own bar-boundary promotion timing
+ * (see updateDspState). While stopped, jamChordLiveDegree instead holds
+ * whatever chord will resume the moment Play is pressed -- see
+ * jamQueuedChordDegree, drawJamLEDs, and jamPlayClip's own promotion (which
+ * mirrors the DSP's "play" handler promoting immediately, since a chord
+ * picked while stopped has no "current bar" to wait for). Not persisted --
+ * resets whenever Jam is (re)entered. */
+let jamKey = "C";
+let jamChordPendingDegree = -1;     /* 0-7 (7 = octave-root pad), -1 = none queued */
+let jamChordLiveDegree = -1;
+let jamLastBarCounterForChord = -1; /* last-seen bar_counter, to detect a boundary crossing */
+
+/* Per-Jam-instrument live config (Shift+Row3/Row4 menu -- see
+ * openJamInstrumentMenu). Mirrors the fields pushed to the DSP's jam_inst[]
+ * via jam_inst<N>_* set_param keys (arranger_engine.c), each applied
+ * immediately, no rebuild. Inst 1 defaults to follow_note 36 (kick) with
+ * bass voicing, a low root note driven by the beat. Inst 2 defaults to
+ * follow_note "off" (0) with chord voicing -- it instead uses the
+ * "trigger once per bar" fallback (emit_jam_instruments_at_tick), giving a
+ * sustained chordal pad by default rather than a second beat-driven bass.
+ * Not persisted -- resets to these defaults each session. */
+let jamInstConfig = [
+    { octave: 3, voicing: "bass", inversion: 0, note_gap: 0.25, follow_note: 36 },
+    { octave: 3, voicing: "chord", inversion: 0, note_gap: 0.25, follow_note: 0 }
+];
+let jamInstrumentEditIndex = 0;  /* 0 = Inst 1, 1 = Inst 2 -- which jamInstConfig entry the menu edits */
+let jamInstrumentFocus = 0;
+let jamInstrumentEditing = false;
+let jamInstRoutingPushed = [false, false]; /* has jam_inst<N>_channel/_output been sent yet (see pushJamInstrumentRouting) */
+
 let jamGrooves = [];                /* grooves for the selected folder: { path, name, type, bars } */
 let jamFills = [];                  /* fills for the selected folder */
 let jamGrooveScroll = 0;            /* scroll offset for the groove pad grid (rows) */
@@ -2506,6 +2559,31 @@ function updateDspState() {
         tr = host_module_get_param("transport");
         if (tr) {
             lastDspTransport = JSON.parse(tr);
+            /* Mirror the DSP's own jam_chord_pending -> jam_chord_live
+             * promotion timing (apply_pending_jam_chord, called from
+             * update_bar_counter) so the chord pads' pending/live LED
+             * colours update at the same bar boundary the DSP actually
+             * applies the change, without a round trip. Own counter
+             * (jamLastBarCounterForChord), separate from the pre-existing
+             * jamLastBarCounter used by the groove/fill queue logic below --
+             * that one is reset at specific clip-swap points not relevant
+             * here, and reusing it risked interfering with its own timing. */
+            const bc = lastDspTransport.bar_counter;
+            if (typeof bc === "number") {
+                if (jamLastBarCounterForChord < 0) {
+                    jamLastBarCounterForChord = bc;
+                } else if (bc !== jamLastBarCounterForChord) {
+                    jamLastBarCounterForChord = bc;
+                    if (jamChordPendingDegree >= 0) {
+                        jamChordLiveDegree = jamChordPendingDegree;
+                        jamChordPendingDegree = -1;
+                        stepLedsDirty = true;
+                        /* See handleJamChordPad's comment: drawJamLEDs only
+                         * redraws the pad grid on ledDirtyAll. */
+                        ledDirtyAll = true;
+                    }
+                }
+            }
         }
     } catch (e) {
         logDebug("updateDspState transport parse error=" + e + " raw=" + String(tr));
@@ -3176,6 +3254,9 @@ function updateButtonLEDs() {
                     }
                 }
                 active.set(MovePlay, perfPlaying ? PureRed : PureGreen);
+                active.set(MoveRow1, perfDrumEnabled ? TRACK_ROW_COLOUR[TRACK_DRUM] : Black);
+                active.set(MoveRow3, perfInst1Enabled ? TRACK_ROW_COLOUR[TRACK_INSTRUMENT_1] : Black);
+                active.set(MoveRow4, perfInst2Enabled ? TRACK_ROW_COLOUR[TRACK_INSTRUMENT_2] : Black);
                 break;
             case VIEW_JAM_FOLDER:
                 active.set(MoveBack, WhiteLedBright);
@@ -3184,16 +3265,19 @@ function updateButtonLEDs() {
             case VIEW_JAM:
                 active.set(MoveBack, WhiteLedBright);
                 {
-                    const maxScroll = Math.max(0, Math.ceil(jamGrooves.length / 16) - 1);
+                    const maxScroll = Math.max(0, Math.ceil(jamGrooves.length / (jamGrooveCols() * 4)) - 1);
                     /* Reversed: Up scrolls down, Down scrolls up. */
                     if (jamGrooveScroll < maxScroll) active.set(MoveUp, WhiteLedBright);
                     if (jamGrooveScroll > 0) active.set(MoveDown, WhiteLedBright);
                     const fills = jamVisibleFills();
-                    const maxFillScroll = Math.max(0, Math.ceil(fills.length / 16) - 1);
+                    const maxFillScroll = Math.max(0, Math.ceil(fills.length / (jamFillCols() * 4)) - 1);
                     if (jamFillScroll > 0) active.set(MoveLeft, WhiteLedBright);
                     if (jamFillScroll < maxFillScroll) active.set(MoveRight, WhiteLedBright);
                 }
                 active.set(MovePlay, jamPlaying ? PureRed : Black);
+                active.set(MoveRow1, jamDrumEnabled ? TRACK_ROW_COLOUR[TRACK_DRUM] : Black);
+                active.set(MoveRow3, jamInst1Enabled ? TRACK_ROW_COLOUR[TRACK_INSTRUMENT_1] : Black);
+                active.set(MoveRow4, jamInst2Enabled ? TRACK_ROW_COLOUR[TRACK_INSTRUMENT_2] : Black);
                 break;
         }
     }
@@ -4013,6 +4097,66 @@ function jamImminentNext() {
  *     bar-end restart (then purered);
  *   - other grooves are dimmed type colour; fills are shown by type (dimmed
  *     unless queued/playing). */
+/* True whenever the chord-pad performance grid should replace part of the
+ * Grooves/Fills grid -- i.e. at least one Jam instrument is enabled via its
+ * track button (Row3/Row4). See drawJamLEDs/handleJamPad/jamGrooveCols. */
+function jamChordModeActive() {
+    return jamInst1Enabled || jamInst2Enabled;
+}
+
+/* Grooves/Fills column counts and the chord block's own column count,
+ * given the current chord-mode state -- single source of truth for
+ * drawJamLEDs, handleJamPad, and the pagination math (jamGroovePerPage/
+ * jamFillPerPage) so they can never disagree on the layout. */
+function jamGrooveCols() { return jamChordModeActive() ? 3 : 4; }
+function jamFillCols() { return jamChordModeActive() ? 3 : 4; }
+function jamGrooveColOffset() { return jamChordModeActive() ? 2 : 0; }
+function jamFillColOffset() { return jamChordModeActive() ? 5 : 4; }
+
+/* Chord pad degree (0-7) for a (row, col) position within the 2-column
+ * chord block (columns 0-1): column 0 rows 0-3 (bottom to top) = the
+ * diatonic degrees 0-3 (I, ii, iii, IV), column 1 rows 0-3 = degrees 4-6
+ * (V, vi, vii°) then row 3 = the 8th "octave root" pad (same chord as
+ * degree 0, played an octave up -- see jamChordForDegree). Row 0 = bottom,
+ * matching the hardware's own bottom-left-to-top-right pad numbering. */
+export function jamChordDegreeForPad(row, col) {
+    return col * 4 + row;
+}
+
+/* {root, quality, shift} for a chord pad degree (0-7), built from jamKey via
+ * diatonicChord (ui.js:1154). shift is added to the instrument's own octave
+ * on the DSP side (jam_chord_live_octave_shift) -- chord_t itself carries
+ * no octave. */
+export function jamChordForDegree(degree) {
+    const c = diatonicChord(jamKey, degree === 7 ? 0 : degree);
+    return { root: c.root, quality: c.quality, shift: degree === 7 ? 1 : 0 };
+}
+
+/* The single chord pad degree that represents "what's currently in effect
+ * or about to be" -- used both for the status-line chord label (drawJam)
+ * and the stopped-state pad highlight (drawJamLEDs). While playing, that's
+ * the live (sounding) chord, falling back to a pending pick that hasn't
+ * been promoted yet (e.g. the instant after a press, before the next
+ * transport poll); while stopped, it's whichever the user most recently
+ * chose -- a fresh pending pick made while stopped, or (if none) the chord
+ * that was live when playback stopped, since "play" resumes that chord
+ * immediately (see arranger_engine.c's "play" handler calling
+ * apply_pending_jam_chord). -1 if nothing has ever been chosen. */
+function jamQueuedChordDegree() {
+    if (jamPlaying) {
+        return jamChordLiveDegree >= 0 ? jamChordLiveDegree : jamChordPendingDegree;
+    }
+    return jamChordPendingDegree >= 0 ? jamChordPendingDegree : jamChordLiveDegree;
+}
+
+/* Short display label for a chord pad degree (e.g. "D", "F#m", "D+8" for
+ * the octave-root pad), or null for -1 (nothing chosen) -- used to build
+ * drawJam's status line. */
+function jamChordDegreeLabel(degree) {
+    if (degree < 0) return null;
+    return chordLabel(jamChordForDegree(degree)) + (degree === 7 ? "+8" : "");
+}
+
 function drawJamLEDs() {
     const curKey = (jamCurrentClip ? jamCurrentClip.path : "null") + "|" + jamCurrentType +
         "|" + (jamQueuedGroove ? jamQueuedGroove.path : "-") + "|" + jamQueue.length;
@@ -4025,19 +4169,51 @@ function drawJamLEDs() {
     const desired = new Uint8Array(NUM_PADS);
     for (let p = 0; p < NUM_PADS; p++) desired[p] = Black;
 
-    const grooveCols = 4;
-    const fillCols = 4;
+    const chordMode = jamChordModeActive();
+    const grooveCols = jamGrooveCols();
+    const fillCols = jamFillCols();
+    const grooveColOffset = jamGrooveColOffset();
+    const fillColOffset = jamFillColOffset();
     const rows = 4;
 
     const imminent = jamImminentNext();
 
-    /* Grooves: left 4 columns, scrolled by jamGrooveScroll (rows). */
+    /* Chord pads: columns 0-1, only while chord mode is active -- see
+     * jamChordModeActive. While playing: live (currently-sounding) chord
+     * white, pending (just pressed, takes effect next bar) red, everything
+     * else dim. While stopped: a single green pad shows whichever chord is
+     * queued to start the moment Play is pressed (jamQueuedChordDegree) --
+     * there's no "next bar" to distinguish pending from live while
+     * stopped, so there's only one highlighted state. */
+    if (chordMode) {
+        const queued = jamPlaying ? -1 : jamQueuedChordDegree();
+        for (let row = 0; row < rows; row++) {
+            for (let col = 0; col < 2; col++) {
+                const degree = jamChordDegreeForPad(row, col);
+                const p = row * 8 + col;
+                if (jamPlaying) {
+                    if (degree === jamChordLiveDegree) {
+                        desired[p] = White;
+                    } else if (degree === jamChordPendingDegree) {
+                        desired[p] = PureRed;
+                    } else {
+                        desired[p] = DarkGrey;
+                    }
+                } else {
+                    desired[p] = (degree === queued) ? PureGreen : DarkGrey;
+                }
+            }
+        }
+    }
+
+    /* Grooves: scrolled by jamGrooveScroll (rows), columns/offset shift
+     * left when chord mode frees up columns 0-1. */
     for (let r = 0; r < rows; r++) {
         for (let c = 0; c < grooveCols; c++) {
             const idx = (r + jamGrooveScroll * rows) * grooveCols + c;
             const clip = jamGrooves[idx];
             if (!clip) continue;
-            const p = r * 8 + c;
+            const p = r * 8 + grooveColOffset + c;
             const isCurrent = jamCurrentClip && jamCurrentClip.path === clip.path;
             const isQueued = jamQueuedGroove && jamQueuedGroove.path === clip.path;
             /* The return groove is only the next clip when a fill is playing
@@ -4097,9 +4273,10 @@ function drawJamLEDs() {
         }
     }
 
-    /* Fills: right 4 columns, filtered by current groove type, scrolled by
-     * jamFillScroll (rows). Only the next fill to play (front of the queue)
-     * is highlighted; fills queued further back are white. */
+    /* Fills: right columns (3 or 4 depending on chord mode), filtered by
+     * current groove type, scrolled by jamFillScroll (rows). Only the next
+     * fill to play (front of the queue) is highlighted; fills queued
+     * further back are white. */
     const nextFill = (jamQueue.length > 0) ? jamQueue[0] : null;
     const fills = jamVisibleFills();
     for (let r = 0; r < rows; r++) {
@@ -4107,7 +4284,7 @@ function drawJamLEDs() {
             const idx = (r + jamFillScroll * rows) * fillCols + c;
             const clip = fills[idx];
             if (!clip) continue;
-            const p = r * 8 + (4 + c);
+            const p = r * 8 + fillColOffset + c;
             if (jamCurrentClip && jamCurrentClip.path === clip.path) {
                 desired[p] = White;
             } else if (nextFill && nextFill.path === clip.path) {
@@ -5227,6 +5404,140 @@ function handleInstrumentBarMenuInput(cc, value) {
     }
 }
 
+/* ── Jam instrument menu (live Octave/Follow Note/Voicing/Inversion/Note
+ * Gap for one of the two Jam-performed instruments) ──────────────────── */
+
+/* Seed the DSP's jam_inst[idx] the first time that instrument is enabled in
+ * a session: MIDI channel/output (reusing whatever Options -> Instrument
+ * 1/2 already has configured -- inst1Output/inst1Channel/inst2Output/
+ * inst2Channel -- the same routing a song-authored instrument would use;
+ * channel/output aren't exposed in the live Jam menu itself, Options is
+ * still the place to change them) plus the rest of jamInstConfig's current
+ * values. Without this, the DSP's jam_inst[] fields (follow_note
+ * especially) would stay at their calloc default of 0/silent until the
+ * user happened to open Shift+Row3/4 and turn a knob, even though the JS
+ * side already shows non-zero defaults (see jamInstConfig). */
+function pushJamInstrumentRouting(idx) {
+    if (jamInstRoutingPushed[idx]) return;
+    jamInstRoutingPushed[idx] = true;
+    if (typeof host_module_set_param !== "function" &&
+        typeof host_module_set_param_blocking !== "function") return;
+    /* Several DIFFERENT keys back to back, all needed together for the
+     * instrument to be usable at all (especially output/channel -- without
+     * a valid destination it's silent even though everything else is
+     * configured correctly). In co-run/overtake mode set_param is
+     * fire-and-forget over a SINGLE shared shadow_param SHM slot, so
+     * several non-blocking writes in a row race: the host drains them one
+     * at a time and a later write can clobber an earlier one before it's
+     * consumed. Use the blocking variant so each write is fully consumed
+     * before the next -- same reasoning/pattern as pushOutputRoutingToDsp. */
+    const block = typeof host_module_set_param_blocking === "function";
+    const set = block ? host_module_set_param_blocking : host_module_set_param;
+    const t = block ? 100 : undefined;
+    const output = idx === 0 ? inst1Output : inst2Output;
+    const channel = idx === 0 ? inst1Channel : inst2Channel;
+    const key = "jam_inst" + (idx + 1) + "_";
+    set(key + "output", output, t);
+    /* channel-1: inst1Channel/inst2Channel are the 1-based UI value; the
+     * DSP's jam_inst<N>_channel handler (like move_channel/schwung_channel/
+     * output_channel) takes an already-0-based channel directly, no
+     * conversion of its own -- matching pushOutputRoutingToDsp's
+     * "output_channel", String(activeOutputChannel() - 1)" just above.
+     * Sending the raw 1-based value here (missed originally) put every Jam
+     * instrument's MIDI channel one higher than intended -- e.g. channel 1
+     * landing as 0-based 1 (channel 2) instead of 0-based 0 (channel 1) --
+     * which for "move" output routes to a different internal Move slot
+     * than Options -> Instrument actually configured, silencing it even
+     * though every other setting was correct. */
+    set(key + "channel", String(channel - 1), t);
+    const cfg = jamInstConfig[idx];
+    set(key + "octave", String(cfg.octave), t);
+    set(key + "voicing", cfg.voicing, t);
+    set(key + "inversion", String(cfg.inversion), t);
+    set(key + "note_gap", String(cfg.note_gap), t);
+    set(key + "follow_note", String(cfg.follow_note), t);
+}
+
+function openJamInstrumentMenu(idx) {
+    jamInstrumentEditIndex = idx;
+    jamInstrumentFocus = 0;
+    jamInstrumentEditing = false;
+    currentView = VIEW_JAM_INSTRUMENT;
+    menuStack.push({ title: (idx === 0 ? "Inst 1" : "Inst 2") + " (Jam)", selectedIndex: 0 });
+    needsRedraw = true;
+}
+
+function drawJamInstrumentMenu() {
+    const cfg = jamInstConfig[jamInstrumentEditIndex];
+    drawMenuHeader((jamInstrumentEditIndex === 0 ? "Inst 1" : "Inst 2") + " (Jam)", "");
+    const items = [
+        { key: "octave", label: "Octave", value: String(cfg.octave) },
+        { key: "follow", label: "Follow Note", value: cfg.follow_note > 0 ? String(cfg.follow_note) : "Off" },
+        { key: "voicing", label: "Voicing", value: cfg.voicing === "chord" ? "Chord" : "Bass" },
+        { key: "inversion", label: "Inversion", value: inversionLabel(cfg.inversion) },
+        { key: "gap", label: "Note Gap", value: noteGapLabel(cfg.note_gap) }
+    ];
+    drawMenuList({
+        labelX: 3,
+        items,
+        selectedIndex: jamInstrumentFocus,
+        getLabel: (item) => item.label,
+        getValue: (item) => item.value,
+        valueAlignRight: true,
+        editMode: jamInstrumentEditing,
+        labelGap: 2,
+        prioritizeSelectedValue: true,
+        selectedMinLabelChars: 6,
+        listArea: { topY: LIST_TOP_Y, bottomY: LIST_INDICATOR_BOTTOM_Y }
+    });
+}
+
+function handleJamInstrumentMenuInput(cc, value) {
+    const idx = jamInstrumentEditIndex;
+    const cfg = jamInstConfig[idx];
+    const key = "jam_inst" + (idx + 1) + "_";
+    if (cc === MoveMainKnob) {
+        const delta = decodeDelta(value);
+        if (jamInstrumentEditing) {
+            if (jamInstrumentFocus === 0) {
+                cfg.octave = Math.max(-1, Math.min(8, cfg.octave + delta));
+                if (typeof host_module_set_param === "function") host_module_set_param(key + "octave", String(cfg.octave));
+            } else if (jamInstrumentFocus === 1) {
+                cfg.follow_note = Math.max(0, Math.min(127, cfg.follow_note + delta));
+                if (typeof host_module_set_param === "function") host_module_set_param(key + "follow_note", String(cfg.follow_note));
+            } else if (jamInstrumentFocus === 2) {
+                cfg.voicing = (cfg.voicing === "chord") ? "bass" : "chord";
+                if (typeof host_module_set_param === "function") host_module_set_param(key + "voicing", cfg.voicing);
+            } else if (jamInstrumentFocus === 3) {
+                cfg.inversion = Math.max(0, Math.min(3, cfg.inversion + delta));
+                if (typeof host_module_set_param === "function") host_module_set_param(key + "inversion", String(cfg.inversion));
+            } else if (jamInstrumentFocus === 4) {
+                /* Note gap: 0 = none, then 1/16, 1/8, 1/4, 1/2, 1 beat. */
+                const steps = [0, 0.0625, 0.125, 0.25, 0.5, 1.0];
+                const i = steps.indexOf(cfg.note_gap);
+                const newIdx = Math.max(0, Math.min(steps.length - 1, (i < 0 ? 3 : i) + delta));
+                cfg.note_gap = steps[newIdx];
+                if (typeof host_module_set_param === "function") host_module_set_param(key + "note_gap", String(cfg.note_gap));
+            }
+        } else {
+            jamInstrumentFocus = Math.max(0, Math.min(4, jamInstrumentFocus + delta));
+        }
+        needsRedraw = true;
+    } else if (cc === MoveMainButton && value > 0) {
+        jamInstrumentEditing = !jamInstrumentEditing;
+        needsRedraw = true;
+    } else if (cc === MoveBack && value > 0) {
+        if (jamInstrumentEditing) {
+            jamInstrumentEditing = false;
+            needsRedraw = true;
+        } else {
+            menuStack.pop();
+            currentView = VIEW_JAM;
+            needsRedraw = true;
+        }
+    }
+}
+
 function openTrimView() {
     /* Use the displayed section (auto-followed/jumped during playback) so the
      * trim edits the live section's clip, not the stale currentSectionIndex. */
@@ -6219,7 +6530,29 @@ function drawJam() {
     }
     print(2, LIST_TOP_Y + 18, "Grooves: " + jamGrooves.length + "  Fills: " + jamVisibleFills().length, 1);
     const [tsNum, tsDen] = inferTimeSigFromFolder(folderName);
-    print(2, LIST_TOP_Y + 27, "BPM: " + jamBpm + "  " + tsNum + "/" + tsDen, 1);
+    let bottomLine;
+    if (jamChordModeActive()) {
+        /* Key, the chord that's sounding/queued-to-resume, and (while
+         * playing, when they differ) a not-yet-promoted queued change, all
+         * on one line -- see jamChordDegreeLabel/jamQueuedChordDegree,
+         * which also drive the pad LED highlight in drawJamLEDs, so the
+         * text and the pads always agree. BPM/time-sig make way for this
+         * while the chord grid is showing. */
+        bottomLine = "Key: " + jamKey;
+        if (jamPlaying) {
+            const liveText = jamChordDegreeLabel(jamChordLiveDegree);
+            const pendingText = jamChordDegreeLabel(jamChordPendingDegree);
+            if (liveText && pendingText) bottomLine += "  " + liveText + ">" + pendingText;
+            else if (liveText) bottomLine += "  " + liveText;
+            else if (pendingText) bottomLine += "  >" + pendingText;
+            else bottomLine += "  —";
+        } else {
+            bottomLine += "  " + (jamChordDegreeLabel(jamQueuedChordDegree()) || "—");
+        }
+    } else {
+        bottomLine = "BPM: " + jamBpm + "  " + tsNum + "/" + tsDen;
+    }
+    print(2, LIST_TOP_Y + 27, bottomLine, 1);
     drawJamHoldOverlay();
 }
 
@@ -7322,6 +7655,27 @@ function handlePerformanceInput(cc, value) {
             logDebug("PERFPLAY start selectedSection=" + perfSelectedSection + " selectedSong=" + perfSelectedSong + " songIndex=" + perfSongIndex);
             perfStart();
         }
+    } else if ((cc === MoveRow1 || cc === MoveRow3 || cc === MoveRow4) && value > 0) {
+        /* Live mute toggle for drums/Inst 1/Inst 2, same track-button
+         * mapping as Song Builder (Row1=drums, Row3=Inst1, Row4=Inst2; Row2
+         * reserved/unused here too). */
+        if (cc === MoveRow1) {
+            perfDrumEnabled = !perfDrumEnabled;
+            if (typeof host_module_set_param === "function") {
+                host_module_set_param("drum_enabled", perfDrumEnabled ? "1" : "0");
+            }
+        } else if (cc === MoveRow3) {
+            perfInst1Enabled = !perfInst1Enabled;
+            if (typeof host_module_set_param === "function") {
+                host_module_set_param("inst1_enabled", perfInst1Enabled ? "1" : "0");
+            }
+        } else {
+            perfInst2Enabled = !perfInst2Enabled;
+            if (typeof host_module_set_param === "function") {
+                host_module_set_param("inst2_enabled", perfInst2Enabled ? "1" : "0");
+            }
+        }
+        needsRedraw = true;
     } else if (cc === MoveBack && value > 0) {
         perfStop();
         menuStack.pop();
@@ -7416,6 +7770,48 @@ function handleJamFolderInput(cc, value) {
         jamBpm = inferTempoFromFolder(libraryFolders[folderIndex] || "");
         currentView = VIEW_JAM;
         menuStack.push({ title: "Jam", selectedIndex: 0 });
+        /* Live mute toggles and the chord register are a per-session
+         * performance control, not a saved preference -- reset on every
+         * (re)entry and push that to the DSP in case a previous Perform/Jam
+         * session left something in place (drum_enabled and the jam_inst/
+         * jam_chord state aren't part of any song JSON, so they persist on
+         * the engine instance until explicitly reset). Drums default ON
+         * (Jam is drum-clip-centric); the two instruments default OFF --
+         * unlike Perform, there's no baked song to inherit an "on" state
+         * from, and defaulting them on would force the chord-pad grid to
+         * appear the instant Jam is entered, before the user has asked for
+         * it (see jamChordModeActive/drawJamLEDs). */
+        jamDrumEnabled = true;
+        jamInst1Enabled = false;
+        jamInst2Enabled = false;
+        jamChordPendingDegree = -1;
+        jamChordLiveDegree = -1;
+        jamLastBarCounterForChord = -1;
+        jamInstConfig = [
+            { octave: 3, voicing: "bass", inversion: 0, note_gap: 0.25, follow_note: 36 },
+            { octave: 3, voicing: "chord", inversion: 0, note_gap: 0.25, follow_note: 0 }
+        ];
+        jamInstRoutingPushed = [false, false];
+        /* Three different keys back to back -- use the blocking variant so
+         * none of them can be clobbered by the next before the DSP
+         * consumes it (see pushJamInstrumentRouting's comment). */
+        if (typeof host_module_set_param === "function" ||
+            typeof host_module_set_param_blocking === "function") {
+            const block = typeof host_module_set_param_blocking === "function";
+            const set = block ? host_module_set_param_blocking : host_module_set_param;
+            const t = block ? 100 : undefined;
+            set("drum_enabled", "1", t);
+            set("jam_inst1_enabled", "0", t);
+            set("jam_inst2_enabled", "0", t);
+            /* Clear the DSP's own jam_chord_live/pending too -- they're
+             * engine-level state that outlives a song_json reload (see the
+             * comment above), so without this a chord selected in a
+             * previous Jam visit kept sounding the instant an instrument
+             * was re-enabled here, even though the pad grid (reset just
+             * above) showed nothing selected. A real bug: leaving Jam and
+             * coming back must fully reset the chord, not just its display. */
+            set("jam_chord", "off", t);
+        }
         needsRedraw = true;
         stepLedsDirty = true;
         ledDirtyAll = true;
@@ -7622,6 +8018,21 @@ function jamPlayClip(clip, forceNonLoop) {
         jamLastBarCounter = -1;
         jamLastWrapCounter = -1;
         jamLastSwapCounter = -1;
+        /* Every path through here issues a fresh "play" (a full restart to
+         * tick 0, not a smooth staged swap -- see jamSwapStaged, which never
+         * calls jamPlayClip), and the DSP's own "play" handler now promotes
+         * any pending Jam chord to live immediately for exactly that reason
+         * (see apply_pending_jam_chord's call site in arranger_engine.c).
+         * Mirror that promotion here so the pad LEDs/status line don't lag
+         * behind by a transport poll. jamLastBarCounterForChord is rebased
+         * so the ordinary bar_counter-change promotion (mid-performance
+         * pad presses -- see updateDspState) doesn't also fire for this
+         * same change. */
+        if (jamChordPendingDegree >= 0) {
+            jamChordLiveDegree = jamChordPendingDegree;
+            jamChordPendingDegree = -1;
+        }
+        jamLastBarCounterForChord = -1;
         /* Wait one tick after starting a clip before evaluating boundaries, so
          * the first bar=1 (which the DSP always reports at playback start)
          * isn't mistaken for a loop wrap / groove finish. Without this, fills
@@ -8208,40 +8619,52 @@ function jamTick() {
 function handleJamInput(cc, value) {
     if (cc === MoveMainKnob) {
         const delta = decodeDelta(value);
-        /* Jog wheel adjusts the BPM in realtime (no restart). */
-        const newBpm = Math.max(20, Math.min(300, jamBpm + delta));
-        if (newBpm !== jamBpm) {
-            jamBpm = newBpm;
-            if (typeof host_module_set_param === "function") {
-                host_module_set_param("tempo", String(jamBpm));
-            }
+        if (shiftHeld) {
+            /* Shift+jogwheel cycles the key used for the chord-pad grid
+             * (see jamKey, diatonicChord). Only meaningful while at least
+             * one Jam instrument is enabled, but harmless to adjust either
+             * way -- it just won't be visible until the chord pads appear. */
+            const idx = KEYS.indexOf(jamKey);
+            const newIdx = ((idx < 0 ? 0 : idx) + delta) % KEYS.length;
+            jamKey = KEYS[(newIdx + KEYS.length) % KEYS.length];
             needsRedraw = true;
+            stepLedsDirty = true;
+        } else {
+            /* Jog wheel adjusts the BPM in realtime (no restart). */
+            const newBpm = Math.max(20, Math.min(300, jamBpm + delta));
+            if (newBpm !== jamBpm) {
+                jamBpm = newBpm;
+                if (typeof host_module_set_param === "function") {
+                    host_module_set_param("tempo", String(jamBpm));
+                }
+                needsRedraw = true;
+            }
         }
     } else if (cc === MoveShift) {
         shiftHeld = value > 0;
     } else if (cc === MoveUp && value > 0) {
         /* Reversed: Up scrolls the groove pads down (next page). */
-        const maxScroll = Math.max(0, Math.ceil(jamGrooves.length / 16) - 1);
+        const maxScroll = Math.max(0, Math.ceil(jamGrooves.length / (jamGrooveCols() * 4)) - 1);
         jamGrooveScroll = Math.min(maxScroll, jamGrooveScroll + 1);
         needsRedraw = true;
         ledDirtyAll = true;
     } else if (cc === MoveDown && value > 0) {
         /* Reversed: Down scrolls the groove pads up (previous page). */
-        const maxScroll = Math.max(0, Math.ceil(jamGrooves.length / 16) - 1);
+        const maxScroll = Math.max(0, Math.ceil(jamGrooves.length / (jamGrooveCols() * 4)) - 1);
         jamGrooveScroll = Math.max(0, jamGrooveScroll - 1);
         needsRedraw = true;
         ledDirtyAll = true;
     } else if (cc === MoveLeft && value > 0) {
         /* Left scrolls the fills up (previous page). */
         const fills = jamVisibleFills();
-        const maxFillScroll = Math.max(0, Math.ceil(fills.length / 16) - 1);
+        const maxFillScroll = Math.max(0, Math.ceil(fills.length / (jamFillCols() * 4)) - 1);
         jamFillScroll = Math.max(0, jamFillScroll - 1);
         needsRedraw = true;
         ledDirtyAll = true;
     } else if (cc === MoveRight && value > 0) {
         /* Right scrolls the fills down (next page). */
         const fills = jamVisibleFills();
-        const maxFillScroll = Math.max(0, Math.ceil(fills.length / 16) - 1);
+        const maxFillScroll = Math.max(0, Math.ceil(fills.length / (jamFillCols() * 4)) - 1);
         jamFillScroll = Math.min(maxFillScroll, jamFillScroll + 1);
         needsRedraw = true;
         ledDirtyAll = true;
@@ -8262,6 +8685,18 @@ function handleJamInput(cc, value) {
             jamHoldClip = null;
             jamHoldTriggerTime = 0;
             jamHoldOverlayShown = false;
+            /* The DSP cuts off any sounding Jam instrument note on stop
+             * regardless (emit_jam_instruments_all_off), but leaves
+             * jam_chord_live untouched (see arr_set_param's "stop" handler)
+             * so the SAME chord resumes automatically on the next Play --
+             * mirror that here by leaving jamChordLiveDegree alone too, so
+             * drawJamLEDs can highlight it green (queued to resume) while
+             * stopped. A not-yet-promoted pending pick is discarded either
+             * way (it was queued for a bar boundary that will now never
+             * arrive), matching the DSP clearing jam_chord_pending_set on
+             * stop. */
+            jamChordPendingDegree = -1;
+            jamLastBarCounterForChord = -1;
             hideOverlay();
             stopPlayback();
             needsRedraw = true;
@@ -8282,6 +8717,38 @@ function handleJamInput(cc, value) {
             stepLedsDirty = true;
             ledDirtyAll = true;
         }
+    } else if (shiftHeld && (cc === MoveRow3 || cc === MoveRow4) && value > 0) {
+        /* Shift+Row3/Row4: open the live Octave/Follow Note/Voicing/
+         * Inversion/Note Gap menu for that Jam instrument, instead of
+         * toggling its mute. */
+        openJamInstrumentMenu(cc === MoveRow3 ? 0 : 1);
+    } else if ((cc === MoveRow1 || cc === MoveRow3 || cc === MoveRow4) && value > 0) {
+        /* Live mute toggle for drums/Inst 1/Inst 2 -- same track-button
+         * mapping as Song Builder (Row1=drums, Row3=Inst1, Row4=Inst2; Row2
+         * is reserved/unused here, same as in Perform). Toggling an
+         * instrument also flips the chord-pad grid layout on/off -- see
+         * jamChordModeActive/drawJamLEDs/handleJamPad. */
+        if (cc === MoveRow1) {
+            jamDrumEnabled = !jamDrumEnabled;
+            if (typeof host_module_set_param === "function") {
+                host_module_set_param("drum_enabled", jamDrumEnabled ? "1" : "0");
+            }
+        } else if (cc === MoveRow3) {
+            jamInst1Enabled = !jamInst1Enabled;
+            if (typeof host_module_set_param === "function") {
+                host_module_set_param("jam_inst1_enabled", jamInst1Enabled ? "1" : "0");
+            }
+            if (jamInst1Enabled) pushJamInstrumentRouting(0);
+        } else {
+            jamInst2Enabled = !jamInst2Enabled;
+            if (typeof host_module_set_param === "function") {
+                host_module_set_param("jam_inst2_enabled", jamInst2Enabled ? "1" : "0");
+            }
+            if (jamInst2Enabled) pushJamInstrumentRouting(1);
+        }
+        needsRedraw = true;
+        stepLedsDirty = true;
+        ledDirtyAll = true;
     } else if (cc === MoveBack && value > 0) {
         /* Stop and return to the folder picker. */
         jamPlaying = false;
@@ -8315,18 +8782,84 @@ function handleJamInput(cc, value) {
 
 /* Handle a pad press in Jam mode. Left 4 columns = grooves (scrollable),
  * right 4 columns = fills (filtered by current groove type). */
+/* A chord pad press (row/col within the 2-column chord block). Behavior
+ * depends on transport state:
+ *  - Playing: queues that chord for the enabled Jam instrument(s), taking
+ *    effect at the next bar boundary -- see jam_chord's DSP-side handling
+ *    (arr_set_param) and apply_pending_jam_chord.
+ *  - Stopped: there's no "next bar" to defer to, so the pad directly
+ *    becomes what will play the instant Play is pressed (green -- see
+ *    drawJamLEDs/jamQueuedChordDegree and the "play" handler's own
+ *    apply_pending_jam_chord call). Pressing the pad that is ALREADY
+ *    queued instead un-queues it (chord cleared, nothing plays on the next
+ *    Play until a chord is chosen again).
+ * Release events are ignored; this is a simple select action, not a
+ * hold-to-preview like the groove/fill pads. */
+function handleJamChordPad(row, col, velocity) {
+    if (velocity === 0) return;
+    const degree = jamChordDegreeForPad(row, col);
+
+    if (!jamPlaying) {
+        const queuedDegree = jamQueuedChordDegree();
+        if (degree === queuedDegree) {
+            jamChordPendingDegree = -1;
+            jamChordLiveDegree = -1;
+            if (typeof host_module_set_param === "function") {
+                host_module_set_param("jam_chord", "off");
+            }
+            logJam("CHORD-PAD degree=" + degree + " un-queued (stopped)");
+        } else {
+            const chord = jamChordForDegree(degree);
+            jamChordPendingDegree = degree;
+            jamChordLiveDegree = -1;
+            if (typeof host_module_set_param === "function") {
+                host_module_set_param("jam_chord", chord.root + ":" + chord.quality + ":" + chord.shift);
+            }
+            logJam("CHORD-PAD degree=" + degree + " root=" + chord.root + " quality=" + chord.quality +
+                " shift=" + chord.shift + " queued (stopped)");
+        }
+        needsRedraw = true;
+        stepLedsDirty = true;
+        ledDirtyAll = true;
+        return;
+    }
+
+    const chord = jamChordForDegree(degree);
+    jamChordPendingDegree = degree;
+    if (typeof host_module_set_param === "function") {
+        host_module_set_param("jam_chord", chord.root + ":" + chord.quality + ":" + chord.shift);
+    }
+    logJam("CHORD-PAD degree=" + degree + " root=" + chord.root + " quality=" + chord.quality + " shift=" + chord.shift);
+    needsRedraw = true;
+    stepLedsDirty = true;
+    /* drawJamLEDs (which actually colours the chord pads red/white/dim) is
+     * only called from the ledDirtyAll branch of the LED update, not every
+     * tick -- stepLedsDirty alone (which only governs the separate bar/beat
+     * step-LED strip) would leave the pad grid showing stale colours until
+     * something else happened to set ledDirtyAll. */
+    ledDirtyAll = true;
+}
+
 function handleJamPad(padIndex, velocity) {
     const col = padIndex % 8;
     const row = Math.floor(padIndex / 8);
+    if (jamChordModeActive() && col < 2) {
+        handleJamChordPad(row, col, velocity);
+        return;
+    }
+    const grooveCols = jamGrooveCols();
+    const grooveColOffset = jamGrooveColOffset();
+    const fillColOffset = jamFillColOffset();
     let clip = null;
-    if (col < 4) {
+    if (col >= grooveColOffset && col < grooveColOffset + grooveCols) {
         /* Groove pad. */
-        const idx = (row + jamGrooveScroll * 4) * 4 + col;
+        const idx = (row + jamGrooveScroll * 4) * grooveCols + (col - grooveColOffset);
         clip = jamGrooves[idx];
-    } else {
+    } else if (col >= fillColOffset) {
         /* Fill pad. */
+        const fillCols = jamFillCols();
         const fills = jamVisibleFills();
-        const fillIdx = (row + jamFillScroll * 4) * 4 + (col - 4);
+        const fillIdx = (row + jamFillScroll * 4) * fillCols + (col - fillColOffset);
         clip = fills[fillIdx];
     }
     if (!clip) return;
@@ -9009,7 +9542,7 @@ function buildPerfLayout() {
 
 /* Load the given setlist song index (0-based) into the builder state and send
  * it to the DSP as a one-shot timeline. */
-function perfLoadSong(index) {
+function perfLoadSong(index, preserveToggles) {
     if (!currentSetlist) return false;
     if (index < 0 || index >= currentSetlist.songs.length) return false;
     const entry = currentSetlist.songs[index];
@@ -9019,6 +9552,38 @@ function perfLoadSong(index) {
     perfSongLoaded = true;
     perfFullSong = JSON.parse(JSON.stringify(currentSong));
     perfFullSongLoaded = false; /* DSP gets it on the next playCurrentSong */
+    /* Live mute toggles are a per-session performance control, not a saved
+     * preference -- reset to match THIS song's own authored instrument
+     * enabled flags (drums always on; an instrument slot the song never
+     * configured defaults to off, same as instrumentForTrack's own default)
+     * whenever the user actually switches to a DIFFERENT song, so an
+     * unrelated song's mute state doesn't carry over. preserveToggles skips
+     * that reset -- used by callers that reload the SAME already-selected
+     * song purely to guarantee fresh internal state (e.g. perfStart, right
+     * before playback begins) -- a real bug found live: without this,
+     * pressing Play after muting Inst 1/2 while stopped silently turned
+     * them back on, because perfStart's own "always reload before playing"
+     * reload was indistinguishable from a genuine song switch. The current
+     * values are still (re-)pushed either way, because drum_enabled is
+     * engine-level (not part of the song JSON) and wouldn't otherwise be
+     * cleared/restored by the upcoming song_json rebuild alone. */
+    if (!preserveToggles) {
+        perfDrumEnabled = true;
+        perfInst1Enabled = !!(perfFullSong.instruments && perfFullSong.instruments[0] && perfFullSong.instruments[0].enabled);
+        perfInst2Enabled = !!(perfFullSong.instruments && perfFullSong.instruments[1] && perfFullSong.instruments[1].enabled);
+    }
+    /* Three different keys back to back -- use the blocking variant so none
+     * of them can be clobbered by the next before the DSP consumes it (see
+     * pushJamInstrumentRouting's comment). */
+    if (typeof host_module_set_param === "function" ||
+        typeof host_module_set_param_blocking === "function") {
+        const block = typeof host_module_set_param_blocking === "function";
+        const set = block ? host_module_set_param_blocking : host_module_set_param;
+        const t = block ? 100 : undefined;
+        set("drum_enabled", perfDrumEnabled ? "1" : "0", t);
+        set("inst1_enabled", perfInst1Enabled ? "1" : "0", t);
+        set("inst2_enabled", perfInst2Enabled ? "1" : "0", t);
+    }
     perfSongSections = buildPerfLayout();
     currentSectionIndex = 0;
     playbackSectionIndex = 0;
@@ -9179,13 +9744,16 @@ function perfStart() {
     stopPlayback();
     /* Always reload the full song from the setlist before starting. A previous
      * queued section jump may have left `currentSong` as a sliced one-shot, and
-     * reusing it would play from the wrong section or fail with zero events. */
+     * reusing it would play from the wrong section or fail with zero events.
+     * preserveToggles=true: this is the SAME song the user was already on
+     * while stopped, not a switch to a different one, so any mute toggles
+     * set while stopped must survive into playback -- see perfLoadSong. */
     if (perfSongIndex < 0 || perfSongIndex >= currentSetlist.songs.length) {
         const start = perfNextPlayable(0);
         if (start < 0) return; /* no playable songs in the setlist */
         perfSongIndex = start;
     }
-    if (!perfLoadSong(perfSongIndex)) return;
+    if (!perfLoadSong(perfSongIndex, true)) return;
     perfSongSections = buildPerfLayout();
     perfPlaying = true;
     perfQueuedSection = -1;
@@ -9509,7 +10077,8 @@ function perfTick() {
         if (Date.now() - perfClickStartMs >= perfClickTotalMs) {
             logDebug("perfTick: pad-flash click ended, starting song");
             perfClickPlaying = false;
-            if (perfLoadSong(perfSongIndex)) {
+            /* preserveToggles=true: same song, mid count-in -- see perfStart. */
+            if (perfLoadSong(perfSongIndex, true)) {
                 perfObservedRunningSincePlay = false; /* see its declaration */
                 playCurrentSong();
             }
@@ -9563,8 +10132,9 @@ function perfTick() {
             perfClickPlaying = false;
             perfClickMute = false;
             if (!perfClickSongStaged) {
-                /* Staging wasn't ready: blocking rebuild (rare fallback). */
-                if (perfLoadSong(perfSongIndex)) {
+                /* Staging wasn't ready: blocking rebuild (rare fallback).
+                 * preserveToggles=true: same song, mid count-in -- see perfStart. */
+                if (perfLoadSong(perfSongIndex, true)) {
                     perfObservedRunningSincePlay = false; /* see its declaration */
                     playCurrentSong();
                     perfFullSongLoaded = true;
@@ -10192,6 +10762,7 @@ globalThis.tick = function() {
                 case VIEW_CHORD_PICK: drawChordPick(); break;
                 case VIEW_INSTRUMENT: drawInstrument(); break;
                 case VIEW_INSTRUMENT_BAR: drawInstrumentBarMenu(); break;
+                case VIEW_JAM_INSTRUMENT: drawJamInstrumentMenu(); break;
             }
         }
         needsRedraw = false;
@@ -10271,6 +10842,7 @@ function routeCcInput(rawData, cc, value) {
         case VIEW_CHORD_PICK: handleChordPickInput(cc, value); break;
         case VIEW_INSTRUMENT: handleInstrumentInput(cc, value); break;
         case VIEW_INSTRUMENT_BAR: handleInstrumentBarMenuInput(cc, value); break;
+        case VIEW_JAM_INSTRUMENT: handleJamInstrumentMenuInput(cc, value); break;
     }
 }
 
