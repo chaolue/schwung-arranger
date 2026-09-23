@@ -663,6 +663,17 @@ typedef struct engine {
      * to clear stuck notes on stop/song change). Off by default. */
     int drop_note_offs;
 
+    /* Live Perform/Jam mute for the drum timeline (Row1 track button in the
+     * UI). Gates note-ON emission only in drain_events_up_to/
+     * emit_timeline_event (mirrors drop_note_offs's is_note_off_event split,
+     * inverted) -- note-offs still pass through so nothing already sounding
+     * gets stuck, and follow-note instruments (both the song's own and
+     * Jam's live-chord ones, see jam_inst below) still see every raw drum
+     * note-on internally, muted or not: muting drums must not silence a
+     * bass line that's following the kick pattern. Defaults to 1 (audible)
+     * -- see arr_create_instance. */
+    uint8_t drum_enabled;
+
     /* Channel override of the most recently drained event, used by
      * emit_direct_event when a per-clip channel (e.g. a dedicated click
      * channel) should take precedence over the output-target channel. */
@@ -719,6 +730,43 @@ typedef struct engine {
      * rather than the new note being delayed. */
     uint32_t pending_off_tick[MAX_INSTRUMENTS];
     uint8_t pending_off_set[MAX_INSTRUMENTS];
+
+    /* Jam mode's live-performed instruments (2 -- Inst 1/Inst 2). Deliberately
+     * separate from live_slot.song.instruments[]: Jam's timeline is rebuilt/
+     * swapped far more often than Song Builder's, and none of the per-bar
+     * override/mute-map/multi-section machinery those carry applies here --
+     * a Jam instrument just has a config (set live via jam_inst<N>_* set_param
+     * keys, direct field writes, no rebuild) and follows the SAME shared
+     * "current chord" register (jam_chord_live below) whichever of the two
+     * are enabled, since only one 8-pad chord area exists physically. The
+     * instrument_t type is reused purely as a convenient value holder --
+     * bars/overrides/override_count on these two entries are never read. */
+    instrument_t jam_inst[2];
+    /* The chord Jam's live instruments are currently sounding, and the one
+     * queued to replace it at the next bar boundary (see
+     * apply_pending_jam_chord, called from update_bar_counter). Shared
+     * across both jam_inst entries -- see jam_inst's own comment. */
+    chord_t jam_chord_live;
+    chord_t jam_chord_pending;
+    uint8_t jam_chord_pending_set;
+    /* Octave shift (in octaves, e.g. 1 = +12 semitones) applied on top of
+     * the instrument's own octave for the currently-live/pending chord --
+     * used by the 8th ("octave root") chord pad, which is otherwise the
+     * same root/quality as the 1st. chord_t itself carries no octave. */
+    int8_t jam_chord_live_octave_shift;
+    int8_t jam_chord_pending_octave_shift;
+    /* Per-jam-instrument tracking, mirroring last_inst_chord/pending_off
+     * above but sized for exactly the 2 Jam instruments -- kept separate
+     * rather than reusing the MAX_INSTRUMENTS-sized arrays above because
+     * fire_pending_instrument_notes_off/emit_instruments_all_off iterate
+     * bounded by live_slot.song.instrument_count, which Jam instruments
+     * are never part of. */
+    chord_t jam_last_chord[2];
+    uint8_t jam_last_chord_set[2];
+    instrument_t jam_last_resolved[2];
+    uint32_t jam_last_follow_tick[2];
+    uint32_t jam_pending_off_tick[2];
+    uint8_t jam_pending_off_set[2];
 
     /* Folder/song scan caches as fixed double-buffers. The worker scans into
      * slot [1 - active] and flips active when done; the audio thread only
@@ -2340,6 +2388,146 @@ static void emit_instruments_follow(engine_t *e, uint8_t note, uint32_t tick) {
     }
 }
 
+/* Jam mode's live-performed instruments: same follow-note-triggered
+ * hold/note_gap/duplicate-attack-suppression behavior as
+ * emit_instruments_follow above, but reading the chord from the shared
+ * jam_chord_live register (set by pad presses, promoted from
+ * jam_chord_pending at each bar boundary -- see apply_pending_jam_chord)
+ * instead of a section's baked chords[] array. No section/bar lookup at
+ * all: unlike the song-authored path, a Jam instrument's chord never
+ * carries forward from "whatever bar we happen to be in" -- it's always
+ * just whatever was last selected, or nothing if no pad has been pressed
+ * yet (jam_chord_live.set == 0, in which case the instrument stays silent
+ * even if its follow_note matches). */
+static void emit_jam_instruments_follow(engine_t *e, uint8_t note, uint32_t tick) {
+    if (!e || !e->jam_chord_live.set) return;
+    uint32_t guard_ticks = (uint32_t)(e->swap_guard_fraction * e->ticks_per_beat);
+    /* A drum hit anticipating the downbeat (e.g. a pushed kick just before
+     * the barline) still falls within the outgoing bar by tick, but
+     * musically belongs to the bar it's leading into -- same reasoning as
+     * emit_instruments_follow (Song Builder/Perform), adapted to Jam's
+     * pending/live chord register in place of a section's per-bar chords[].
+     * When the hit lands within the Swap Guard window of the next bar
+     * boundary AND a new chord is already queued (jam_chord_pending_set),
+     * use that queued chord for this attack instead of holding the
+     * outgoing one a beat early; apply_pending_jam_chord promotes it for
+     * real shortly after, at the boundary itself. */
+    const chord_t *ch = &e->jam_chord_live;
+    int8_t octave_shift = e->jam_chord_live_octave_shift;
+    if (e->ticks_per_bar > 0 && e->jam_chord_pending_set) {
+        uint32_t abs_bar = tick / e->ticks_per_bar;
+        uint32_t bar_end_tick = (abs_bar + 1) * e->ticks_per_bar;
+        if (bar_end_tick > tick && (bar_end_tick - tick) <= guard_ticks) {
+            ch = &e->jam_chord_pending;
+            octave_shift = e->jam_chord_pending_octave_shift;
+        }
+    }
+    for (int i = 0; i < 2; i++) {
+        instrument_t *inst = &e->jam_inst[i];
+        if (!inst->enabled) continue;
+        if (inst->follow_note == 0 || inst->follow_note != note) continue;
+        instrument_t resolved = *inst;
+        resolved.octave += octave_shift;
+        uint8_t is_duplicate_attack = e->jam_last_chord_set[i] &&
+            chord_equal(&e->jam_last_chord[i], ch) &&
+            tick >= e->jam_last_follow_tick[i] &&
+            (tick - e->jam_last_follow_tick[i]) <= guard_ticks;
+        if (!is_duplicate_attack) {
+            emit_instrument_chord(e, &resolved, ch, 100);
+            e->jam_last_chord[i] = *ch;
+            e->jam_last_chord_set[i] = 1;
+            e->jam_last_resolved[i] = resolved;
+            e->jam_last_follow_tick[i] = tick;
+        }
+        uint32_t gap = (uint32_t)(resolved.note_gap * e->ticks_per_beat);
+        uint32_t next = find_next_note_on_tick(e, note, tick + 1);
+        uint32_t off_tick = (next > 0) ? ((next > gap) ? (next - gap) : next) : e->live_slot.end_tick;
+        if (off_tick > tick) {
+            e->jam_pending_off_tick[i] = off_tick;
+            e->jam_pending_off_set[i] = 1;
+        }
+    }
+}
+
+/* Companion to fire_pending_instrument_notes_off, for the 2 Jam instruments'
+ * own pending-off tracking. Called from advance_playhead alongside it. */
+static void fire_pending_jam_instrument_notes_off(engine_t *e, uint32_t tick) {
+    if (!e) return;
+    for (int i = 0; i < 2; i++) {
+        if (!e->jam_pending_off_set[i]) continue;
+        if (e->jam_pending_off_tick[i] > tick) continue;
+        if (e->jam_last_chord_set[i]) {
+            emit_instrument_chord_off(e, &e->jam_last_resolved[i], &e->jam_last_chord[i]);
+            e->jam_last_chord_set[i] = 0;
+        }
+        e->jam_pending_off_set[i] = 0;
+    }
+}
+
+/* Cut off both Jam instruments' currently-sounding notes immediately (no
+ * bar-boundary wait) -- used on stop and on disabling a Jam instrument. */
+static void emit_jam_instruments_all_off(engine_t *e) {
+    if (!e) return;
+    for (int i = 0; i < 2; i++) {
+        if (e->jam_last_chord_set[i]) {
+            emit_instrument_chord_off(e, &e->jam_last_resolved[i], &e->jam_last_chord[i]);
+            e->jam_last_chord_set[i] = 0;
+        }
+        e->jam_pending_off_set[i] = 0;
+    }
+}
+
+/* Promote a pending Jam chord (set by the most recent pad press) to live at
+ * a bar boundary -- called from update_bar_counter. Does not itself emit
+ * anything; the next matching drum hit sounds the new chord via
+ * emit_jam_instruments_follow. */
+static void apply_pending_jam_chord(engine_t *e) {
+    if (!e->jam_chord_pending_set) return;
+    e->jam_chord_live = e->jam_chord_pending;
+    e->jam_chord_live_octave_shift = e->jam_chord_pending_octave_shift;
+    e->jam_chord_pending_set = 0;
+}
+
+/* Bar-boundary fallback for a Jam instrument with Follow Note "Off" (0):
+ * with no drum hit to attach an attack to, fire the current live chord
+ * fresh at every bar boundary instead -- a genuine retrigger each bar (not
+ * just a sustain held across bars unchanged), so "once per bar" is audible
+ * even when the chord hasn't changed since the last bar. Called from
+ * update_bar_counter, after apply_pending_jam_chord so a chord that just
+ * became live this same boundary is what fires. Mutually exclusive with
+ * emit_jam_instruments_follow by construction (that path only ever matches
+ * follow_note != 0); an instrument with follow_note==0 and no chord chosen
+ * yet stays silent, same as the drum-hit path. */
+static void emit_jam_instruments_at_tick(engine_t *e, uint32_t tick) {
+    if (!e->jam_chord_live.set || e->ticks_per_bar == 0) return;
+    const chord_t *ch = &e->jam_chord_live;
+    for (int i = 0; i < 2; i++) {
+        instrument_t *inst = &e->jam_inst[i];
+        if (!inst->enabled || inst->follow_note != 0) continue;
+        if (e->jam_last_chord_set[i]) {
+            emit_instrument_chord_off(e, &e->jam_last_resolved[i], &e->jam_last_chord[i]);
+            e->jam_last_chord_set[i] = 0;
+        }
+        instrument_t resolved = *inst;
+        resolved.octave += e->jam_chord_live_octave_shift;
+        emit_instrument_chord(e, &resolved, ch, 100);
+        e->jam_last_chord[i] = *ch;
+        e->jam_last_chord_set[i] = 1;
+        e->jam_last_resolved[i] = resolved;
+        /* Cut short by note_gap before the NEXT bar boundary's own attack,
+         * same convention as the song-authored bar-boundary path
+         * (emit_instruments_at_tick). */
+        uint32_t gap = (uint32_t)(resolved.note_gap * e->ticks_per_beat);
+        uint32_t off_tick = tick + e->ticks_per_bar - gap;
+        if (off_tick > tick) {
+            e->jam_pending_off_tick[i] = off_tick;
+            e->jam_pending_off_set[i] = 1;
+        } else {
+            e->jam_pending_off_set[i] = 0;
+        }
+    }
+}
+
 /* -------------------------------------------------------------------------- */
 /* Song loading from JSON                                                     */
 /* -------------------------------------------------------------------------- */
@@ -3786,6 +3974,19 @@ static int should_suppress_note_off(engine_t *e, const smf_event_t *ev) {
     return find_next_note_on_tick(e, ev->data1, ev->tick + 1) > 0;
 }
 
+/* Whether the Perform/Jam "drums" mute (drum_enabled) should withhold this
+ * drum-timeline event. Only note-ONs are gated -- note-offs always pass
+ * through so a note already sounding when the mute is toggled on doesn't
+ * hang. Follow-note instruments (song-authored and Jam's live-chord ones)
+ * see the raw note-on regardless, via emit_instruments_follow/
+ * emit_jam_instruments_follow, both called before this check -- muting the
+ * drums must not silence a bass line that's still tracking the kick. */
+static int should_suppress_note_on(engine_t *e, const smf_event_t *ev) {
+    if (e->drum_enabled) return 0;
+    uint8_t type = ev->status & 0xF0;
+    return type == 0x90 && ev->data2 > 0;
+}
+
 static void drain_events_up_to(engine_t *e, uint32_t target) {
     if (!e->running || e->live_slot.event_count == 0) return;
     while (e->event_cursor < e->live_slot.event_count) {
@@ -3793,11 +3994,13 @@ static void drain_events_up_to(engine_t *e, uint32_t target) {
         if (ev->tick >= target) break;
         e->last_event_channel_override = ev->channel_override;
         /* Follow-note instruments: emit the chord when a matching drum
-         * note-on fires (e.g. bass follows the kick). */
+         * note-on fires (e.g. bass follows the kick). Always runs, even
+         * while drum_enabled is off -- see should_suppress_note_on. */
         if ((ev->status & 0xF0) == 0x90 && ev->data2 > 0) {
             emit_instruments_follow(e, ev->data1, ev->tick);
+            emit_jam_instruments_follow(e, ev->data1, ev->tick);
         }
-        if (!should_suppress_note_off(e, ev)) {
+        if (!should_suppress_note_off(e, ev) && !should_suppress_note_on(e, ev)) {
             if (e->emit_directly) {
                 emit_direct_event(e, ev->status, ev->data1, ev->data2, ev->len);
             } else {
@@ -3817,7 +4020,7 @@ static void drain_events_up_to(engine_t *e, uint32_t target) {
  * paths this helper serves. */
 static void emit_timeline_event(engine_t *e, const smf_event_t *ev) {
     e->last_event_channel_override = ev->channel_override;
-    if (should_suppress_note_off(e, ev)) return;
+    if (should_suppress_note_off(e, ev) || should_suppress_note_on(e, ev)) return;
     if (e->emit_directly) {
         emit_direct_event(e, ev->status, ev->data1, ev->data2, ev->len);
     } else {
@@ -3959,10 +4162,21 @@ static void handle_loop_or_stop(engine_t *e, uint32_t *target) {
                     if (guard == 0) guard = 1;
                     rescue_guard_window_events(e, resume, guard);
                 }
-                /* The timeline changed; track the new clip's starting bar. */
+                /* The timeline changed; track the new clip's starting bar.
+                 * Pre-syncing last_bar to the new clip's own starting bar
+                 * means update_bar_counter's normal "bar != last_bar" check
+                 * will never see this as a change (it's already caught up),
+                 * so the once-per-bar/bar-boundary-promotion calls it would
+                 * otherwise make are fired explicitly here instead -- a real
+                 * bug found live: a chord queued right before a fill
+                 * finished and auto-returned to its groove sat pending for
+                 * a full extra bar, because this exact transition never
+                 * tripped that check. */
                 e->last_bar = e->live_slot.end_tick > 0
                     ? (resume / e->ticks_per_bar)
                     : 0;
+                apply_pending_jam_chord(e);
+                emit_jam_instruments_at_tick(e, resume);
                 uint32_t advanced = resume + overshoot;
                 if (e->live_slot.end_tick > 0) {
                     *target = advanced % e->live_slot.end_tick;
@@ -4000,6 +4214,7 @@ static void handle_loop_or_stop(engine_t *e, uint32_t *target) {
                 emit_all_notes_off(e);
                 /* Cut off any instrument chord notes still sounding. */
                 emit_instruments_all_off(e);
+                emit_jam_instruments_all_off(e);
                 if (e->playhead_tick > e->live_slot.end_tick) e->playhead_tick = e->live_slot.end_tick;
             }
         }
@@ -4055,6 +4270,11 @@ static void update_bar_counter(engine_t *e) {
         e->last_bar = bar;
         /* Emit the chord for non-follow instruments at each bar boundary. */
         emit_instruments_at_tick(e, e->playhead_tick);
+        /* Promote a pending Jam chord-pad selection to live BEFORE firing
+         * the once-per-bar fallback below, so a chord that just became
+         * live this boundary is the one that fires. */
+        apply_pending_jam_chord(e);
+        emit_jam_instruments_at_tick(e, e->playhead_tick);
     }
 }
 
@@ -4172,10 +4392,21 @@ static void advance_playhead(engine_t *e, int frames, int sample_rate) {
             if (guard == 0) guard = 1;
             rescue_guard_window_events(e, resume, guard);
         }
-        /* The timeline changed; track the new clip's starting bar. */
+        /* The timeline changed; track the new clip's starting bar. Pre-
+         * syncing last_bar here means update_bar_counter's own "bar !=
+         * last_bar" check will never see this transition as a change, so
+         * fire the once-per-bar/bar-boundary-promotion calls it would
+         * otherwise make explicitly -- see the matching comment at the
+         * AUTOSWAP site above. This is the exact scenario reported live: a
+         * chord queued while a groove/fill swap was also queued for the
+         * same bar sat pending an extra bar, because THIS transition (not
+         * the swap being queued, but it actually landing) is what
+         * update_bar_counter never got to see. */
         e->last_bar = e->live_slot.end_tick > 0
             ? (resume / e->ticks_per_bar)
             : 0;
+        apply_pending_jam_chord(e);
+        emit_jam_instruments_at_tick(e, resume);
         if (e->live_slot.end_tick > 0) {
             target = (resume + remaining) % e->live_slot.end_tick;
         } else {
@@ -4221,6 +4452,7 @@ static void advance_playhead(engine_t *e, int frames, int sample_rate) {
     /* Fire any scheduled instrument note-offs whose tick has been reached
      * (the note_gap before the next note-on, cutting the previous note short). */
     fire_pending_instrument_notes_off(e, e->playhead_tick);
+    fire_pending_jam_instrument_notes_off(e, e->playhead_tick);
     update_bar_counter(e);
 }
 
@@ -4268,6 +4500,7 @@ static void* arr_create_instance(const char *module_dir, const char *config_json
     e->schwung_channel = 9;  /* channel 10 for GM drums */
     e->last_event_channel_override = -1; /* no per-event override by default */
     e->loop = 1;          /* default to looping for performance mode */
+    e->drum_enabled = 1;   /* audible by default; Perform/Jam mute is opt-in */
     /* Pre-existing latent bug, newly reachable now that JS/the test harness
      * must poll get_param("state") for primary_published_gen BEFORE any
      * build has ever completed (to capture a baseline generation) rather
@@ -4609,6 +4842,110 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
         e->drop_note_offs = atoi(val) ? 1 : 0;
         return;
     }
+    if (strcmp(key, "drum_enabled") == 0) {
+        /* Perform/Jam live mute for the drum timeline -- see drum_enabled's
+         * declaration and should_suppress_note_on. */
+        e->drum_enabled = atoi(val) ? 1 : 0;
+        return;
+    }
+    if (strcmp(key, "inst1_enabled") == 0 || strcmp(key, "inst2_enabled") == 0) {
+        /* Perform/Jam live mute for a song-authored instrument track. Direct
+         * field write on e->live_slot.song.instruments[] -- safe: that data
+         * is only ever read on this same (audio) thread, same as every
+         * other live/no-rebuild set_param here (e.g. "tempo"). Disabling
+         * while a note is sounding cuts it off immediately rather than
+         * waiting for its own scheduled/bar-boundary off. */
+        int idx = (key[4] == '1') ? 0 : 1;
+        if (idx < e->live_slot.song.instrument_count) {
+            instrument_t *inst = &e->live_slot.song.instruments[idx];
+            inst->enabled = atoi(val) ? 1 : 0;
+            if (!inst->enabled && e->last_inst_chord_set[idx]) {
+                emit_instrument_chord_off(e, &e->last_inst_resolved[idx], &e->last_inst_chord[idx]);
+                e->last_inst_chord_set[idx] = 0;
+                e->pending_off_set[idx] = 0;
+            }
+        }
+        return;
+    }
+    if (strcmp(key, "jam_inst1_enabled") == 0 || strcmp(key, "jam_inst2_enabled") == 0) {
+        int idx = (key[8] == '1') ? 0 : 1;
+        e->jam_inst[idx].enabled = atoi(val) ? 1 : 0;
+        if (!e->jam_inst[idx].enabled && e->jam_last_chord_set[idx]) {
+            emit_instrument_chord_off(e, &e->jam_last_resolved[idx], &e->jam_last_chord[idx]);
+            e->jam_last_chord_set[idx] = 0;
+            e->jam_pending_off_set[idx] = 0;
+        }
+        return;
+    }
+    if (strcmp(key, "jam_inst1_octave") == 0 || strcmp(key, "jam_inst2_octave") == 0) {
+        int idx = (key[8] == '1') ? 0 : 1;
+        e->jam_inst[idx].octave = atoi(val);
+        return;
+    }
+    if (strcmp(key, "jam_inst1_voicing") == 0 || strcmp(key, "jam_inst2_voicing") == 0) {
+        int idx = (key[8] == '1') ? 0 : 1;
+        e->jam_inst[idx].voicing = (strcmp(val, "chord") == 0) ? 1 : 0;
+        return;
+    }
+    if (strcmp(key, "jam_inst1_inversion") == 0 || strcmp(key, "jam_inst2_inversion") == 0) {
+        int idx = (key[8] == '1') ? 0 : 1;
+        int v = atoi(val);
+        e->jam_inst[idx].inversion = (uint8_t)(v < 0 ? 0 : v);
+        return;
+    }
+    if (strcmp(key, "jam_inst1_note_gap") == 0 || strcmp(key, "jam_inst2_note_gap") == 0) {
+        int idx = (key[8] == '1') ? 0 : 1;
+        e->jam_inst[idx].note_gap = atof(val);
+        return;
+    }
+    if (strcmp(key, "jam_inst1_follow_note") == 0 || strcmp(key, "jam_inst2_follow_note") == 0) {
+        int idx = (key[8] == '1') ? 0 : 1;
+        int v = atoi(val);
+        e->jam_inst[idx].follow_note = (uint8_t)(v < 0 ? 0 : (v > 127 ? 127 : v));
+        return;
+    }
+    if (strcmp(key, "jam_inst1_channel") == 0 || strcmp(key, "jam_inst2_channel") == 0) {
+        int idx = (key[8] == '1') ? 0 : 1;
+        e->jam_inst[idx].channel = atoi(val) & 0x0F;
+        return;
+    }
+    if (strcmp(key, "jam_inst1_output") == 0 || strcmp(key, "jam_inst2_output") == 0) {
+        int idx = (key[8] == '1') ? 0 : 1;
+        if (strcmp(val, "move") == 0) e->jam_inst[idx].output_target = OUTPUT_TARGET_MOVE;
+        else if (strcmp(val, "schwung") == 0) e->jam_inst[idx].output_target = OUTPUT_TARGET_SCHWUNG;
+        else e->jam_inst[idx].output_target = OUTPUT_TARGET_EXTERNAL;
+        return;
+    }
+    if (strcmp(key, "jam_chord") == 0) {
+        /* "off" (or empty) clears the chord entirely -- no chord queued,
+         * none live, and any currently-sounding Jam instrument note is cut
+         * immediately. Used when the pad the user just queued (while
+         * stopped) is pressed again, to un-queue it -- see handleJamChordPad
+         * in ui.js. */
+        if (val[0] == '\0' || strcmp(val, "off") == 0) {
+            e->jam_chord_pending_set = 0;
+            e->jam_chord_pending.set = 0;
+            e->jam_chord_live.set = 0;
+            emit_jam_instruments_all_off(e);
+            return;
+        }
+        /* "<root>:<quality>:<octaveShift>", e.g. "D:maj:0" or "C:maj:1" (the
+         * 8th/"octave root" chord pad). Queues the chord for promotion to
+         * live at the next bar boundary -- see apply_pending_jam_chord,
+         * called from update_bar_counter and from "play" (below). Does NOT
+         * touch jam_chord_live directly. */
+        char root[8] = {0}, quality[8] = {0};
+        int shift = 0;
+        if (sscanf(val, "%7[^:]:%7[^:]:%d", root, quality, &shift) >= 2) {
+            copy_trunc(e->jam_chord_pending.root, sizeof(e->jam_chord_pending.root), root);
+            copy_trunc(e->jam_chord_pending.quality, sizeof(e->jam_chord_pending.quality), quality);
+            e->jam_chord_pending.bass[0] = '\0';
+            e->jam_chord_pending.set = 1;
+            e->jam_chord_pending_octave_shift = (int8_t)shift;
+            e->jam_chord_pending_set = 1;
+        }
+        return;
+    }
     if (strcmp(key, "move_channel") == 0) {
         e->move_channel = atoi(val) & 0x0F;
         return;
@@ -4663,6 +5000,17 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
         /* Emit the first bar's chord immediately (update_bar_counter only
          * fires on a bar *change*, so bar 0 would otherwise be silent). */
         emit_instruments_at_tick(e, 0);
+        /* A chord picked while stopped (or still pending from just before
+         * a stop) has no "current bar" to defer to -- promote it to live
+         * right away, so it's what plays from bar 0, not bar 1. This also
+         * covers "play" resuming a chord that was already live (e.g. left
+         * over from before a stop/replay): apply_pending_jam_chord is a
+         * no-op when nothing is pending, leaving jam_chord_live as-is. */
+        apply_pending_jam_chord(e);
+        /* Same reasoning for a Jam instrument with Follow Note "Off": bar 0
+         * needs its own once-per-bar attack too, not just bar 1 onward
+         * (update_bar_counter only fires on a bar *change*). */
+        emit_jam_instruments_at_tick(e, 0);
         dsp_log_enqueue_worker("PLAY tempo=%.1f tpb=%u ts=%d/%d bars=%u",
                      e->tempo_bpm, e->ticks_per_beat,
                      e->time_sig_num, e->time_sig_den,
@@ -4712,6 +5060,16 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
         emit_all_notes_off(e);
         /* Send note-offs for any instrument chords still sounding. */
         emit_instruments_all_off(e);
+        emit_jam_instruments_all_off(e);
+        /* Discard any not-yet-promoted Jam chord pick -- it was queued for
+         * a future bar boundary that will now never arrive, so resuming it
+         * later (see "play"'s apply_pending_jam_chord call) would be
+         * surprising. jam_chord_live is deliberately left untouched: it is
+         * what "play" resumes with by default, and what the pad grid
+         * highlights green while stopped (see drawJamLEDs/jamQueuedChordDegree
+         * in ui.js) -- the chord that was actually playing when stop was
+         * pressed. */
+        e->jam_chord_pending_set = 0;
         /* Clear active_source so get_param("state") doesn't keep reporting a
          * clip that stopped as if it were still the current one. Found via a
          * real Jam-mode bug: ui.js's reactive active_source sync (which
@@ -4924,6 +5282,9 @@ static int arr_get_param(void *instance, const char *key, char *buf, int buf_len
     }
     if (strcmp(key, "drop_note_offs") == 0) {
         return snprintf(buf, buf_len, "%d", e->drop_note_offs);
+    }
+    if (strcmp(key, "drum_enabled") == 0) {
+        return snprintf(buf, buf_len, "%d", e->drum_enabled);
     }
     if (strcmp(key, "swap_guard_fraction") == 0) {
         return snprintf(buf, buf_len, "%.3f", e->swap_guard_fraction);
