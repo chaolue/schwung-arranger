@@ -346,6 +346,7 @@ Play through a setlist.
 | Pad press (other song / click pad) | Select that song; Play will start from there |
 | Up / Down | Scroll the pad window up / down one row |
 | Jog wheel | Scroll the info display |
+| Track 1 / 3 / 4 | Turn Drums / Inst 1 / Inst 2 on or off (kept when Play is pressed) |
 | Play | Start playback from the current / selected song or section |
 | Back | Stop and return to Root Menu |
 
@@ -357,12 +358,15 @@ Play through a setlist.
 | Pad press again (same section) | Escalate the jump to the end of the current bar |
 | Pad press (other song / click pad) | Queue a jump to that song at the next section boundary |
 | Up / Down | Scroll the pad window up / down one row |
+| Track 1 / 3 / 4 | Turn Drums / Inst 1 / Inst 2 on or off immediately |
 | Play | Stop playback |
 | Back | Stop playback and return to Root Menu |
 
 The pad window shows 4 rows of sections at a time. When playback reaches the third visible row, the window auto-scrolls up one row so the next row of sections becomes visible at the top. The currently playing pad/section is shown in bright green; queued jumps flash white. Step LEDs show bar progress within the current section, or the selected section's clip layout while stopped. The active bar flashes white-to-black on the beat for a prominent cue, then returns to its clip colour on the next bar.
 
-**Button LED hints:** Back, Up, Down and Play are lit; Play is green when stopped and red while playing.
+The Track buttons are live mutes, not saved to the song. Each song starts with its own instrument settings (drums always on) when you switch to it; a mute set while stopped stays in place when you press Play.
+
+**Button LED hints:** Back, Up, Down and Play are lit; Play is green when stopped and red while playing. Track 1, 3 and 4 are lit in their track colour while that part is on, and off while it is muted.
 
 ---
 
@@ -402,6 +406,8 @@ Choose which folder of clips to jam with. The folder's name (BPM / time signatur
 
 Layer a groove with fills on the fly. Left 4 columns of pads are grooves; right 4 columns are fills (filtered by the current groove's part type).
 
+Press Track 3 or Track 4 to turn on Inst 1 or Inst 2 and play chords over the groove. While either instrument is on, the two left columns become chord pads and the grooves and fills shrink to 3 columns each. See **Jam Chord Pads** below.
+
 #### While stopped
 
 | Control | Action |
@@ -409,7 +415,12 @@ Layer a groove with fills on the fly. Left 4 columns of pads are grooves; right 
 | Tap a groove pad | Start that groove looping |
 | Tap an intro fill pad | Start playback with that intro fill, then return to the first intro groove |
 | Hold a pad (past the delay) | Preview the clip as a one-shot until you release it (no overlay; the clip name shows in "Now:") |
+| Tap a chord pad | Queue that chord to start when playback starts (pad turns green) |
+| Tap the green chord pad again | Clear the queued chord |
 | Jog wheel | Adjust the BPM in realtime |
+| Shift + Jog wheel | Change the key of the chord pads |
+| Track 1 / 3 / 4 | Turn Drums / Inst 1 / Inst 2 on or off |
+| Shift + Track 3 / 4 | Open the settings for Inst 1 / Inst 2 |
 | Play | Stop (if a preview is playing) |
 | Back | Return to the Jam Folder picker |
 
@@ -421,9 +432,13 @@ Layer a groove with fills on the fly. Left 4 columns of pads are grooves; right 
 | Tap the same groove pad again | Escalate to a bar-end restart of that groove |
 | Tap a fill pad | Queue that fill to play at the next bar-end, then return to the groove |
 | Press the return groove's pad during a fill | Restart that groove from its beginning when the fill ends (pad turns red) |
+| Tap a chord pad | Queue that chord for the start of the next bar (pad turns red, then white once playing) |
 | Up / Down | Scroll the groove pads up / down |
 | Left / Right | Scroll the fill pads up / down |
 | Jog wheel | Change the BPM in realtime |
+| Shift + Jog wheel | Change the key of the chord pads |
+| Track 1 / 3 / 4 | Turn Drums / Inst 1 / Inst 2 on or off immediately |
+| Shift + Track 3 / 4 | Open the settings for Inst 1 / Inst 2 |
 | Play | Stop playback |
 | Back | Stop and return to the Jam Folder picker |
 
@@ -431,7 +446,42 @@ While a fill plays, the groove it will return to is shown in green; once the ret
 
 Step LEDs show the current clip's bar layout, flashing white-to-black on the current bar as it plays. Fills overlay the groove's bars where they fall.
 
-**Button LED hints:** Back, Up, Down, Left and Right are lit; Play is red while playing.
+**Button LED hints:** Back, Up, Down, Left and Right are lit; Play is red while playing. Track 1, 3 and 4 are lit in their track colour while that part is on.
+
+#### Jam Chord Pads
+
+Turn on Inst 1 or Inst 2 with Track 3 or Track 4 to show the chord pads. The two left columns hold the 8 chords of the current key, starting at the bottom-left pad and going up each column: I, ii, iii, IV (column 1), then V, vi, vii° and the root chord an octave up (column 2). Shift + Jog wheel changes the key.
+
+Both instruments play the same chosen chord.
+
+- **While playing:** a tapped chord pad turns red and takes effect at the start of the next bar, then turns white. If a groove or fill change is queued for the same bar, the chord changes with it.
+- **While stopped:** the chord that was playing stays lit green and resumes when you press Play. Tap another pad to choose a different starting chord, or tap the green pad again to clear it.
+
+The chord keeps playing until you pick another one, turn the instrument off, or stop playback. Leaving Jam clears the chord.
+
+With chord pads showing, an extra line at the bottom of the display shows the key and the current chord, plus the queued chord while one is waiting (e.g. `Key: C  Chord: C>G`). The BPM and time signature stay on the line above.
+
+#### Jam Instrument Settings
+
+Hold Shift and press Track 3 or Track 4 to open that instrument's settings. Changes take effect immediately while playing and are not saved.
+
+| Control | Action |
+|---------|--------|
+| Jog wheel (browse mode) | Move between Octave, Follow Note, Voicing, Inversion, Note Gap |
+| Jog wheel (edit mode) | Change the selected setting |
+| Jog click | Toggle edit / browse mode |
+| Back (edit mode) | Return to browse mode |
+| Back (browse mode) | Return to Jam Mode |
+
+| Setting | Effect |
+|---------|--------|
+| Octave | Octave the chord is played in |
+| Follow Note | The drum note that triggers each chord hit. A hit just before the barline plays the next bar's chord. **Off** plays the chord once at the start of every bar |
+| Voicing | **Bass** plays the chord's root note; **Chord** plays the full chord |
+| Inversion | Which chord note is at the bottom |
+| Note Gap | How early each note is cut before the next one |
+
+Inst 1 starts on Follow Note = kick with Bass voicing; Inst 2 starts on Follow Note = Off with Chord voicing. Both use the output and MIDI channel set in **Options**.
 
 ---
 

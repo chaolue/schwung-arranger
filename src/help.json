@@ -92,21 +92,65 @@
         "In Perform, tap a",
         "pad to queue a song",
         "or section, then",
-        "press Play."
+        "press Play.",
+        "",
+        "Track 1/3/4: turn",
+        "Drums/Inst 1/Inst 2",
+        "on or off."
       ]
     },
     {
       "title": "Jam Mode",
-      "lines": [
-        "Left pads: grooves.",
-        "Right pads: fills.",
-        "",
-        "Tap a fill to queue",
-        "it for the next",
-        "bar end.",
-        "",
-        "Jog wheel changes",
-        "BPM live."
+      "children": [
+        {
+          "title": "Grooves & Fills",
+          "lines": [
+            "Left pads: grooves.",
+            "Right pads: fills.",
+            "",
+            "Tap a fill to queue",
+            "it for the next",
+            "bar end.",
+            "",
+            "Jog wheel changes",
+            "BPM live."
+          ]
+        },
+        {
+          "title": "Chord Pads",
+          "lines": [
+            "Track 3/4: turn",
+            "Inst 1/2 on or off.",
+            "",
+            "When on, the 2 left",
+            "columns are chords",
+            "of the key.",
+            "",
+            "Shift+Jog: key.",
+            "",
+            "Playing: red = next",
+            "bar, white = now.",
+            "Stopped: green =",
+            "plays on Play; tap",
+            "again to clear."
+          ]
+        },
+        {
+          "title": "Instruments",
+          "lines": [
+            "Shift+Track 3/4",
+            "opens Inst 1/2",
+            "settings (live).",
+            "",
+            "Follow Note: drum",
+            "note that plays",
+            "the chord. Off =",
+            "once per bar.",
+            "",
+            "Track 1: drums",
+            "on/off."
+          ]
+        }
       ]
     },
     {
