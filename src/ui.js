@@ -603,6 +603,7 @@ let jamKey = "C";
 let jamChordPendingDegree = -1;     /* 0-7 (7 = octave-root pad), -1 = none queued */
 let jamChordLiveDegree = -1;
 let jamLastBarCounterForChord = -1; /* last-seen bar_counter, to detect a boundary crossing */
+let jamLastSwapCounterForChord = -1; /* last-seen swap_counter -- a groove/fill swap is a boundary too, see updateDspState */
 
 /* Per-Jam-instrument live config (Shift+Row3/Row4 menu -- see
  * openJamInstrumentMenu). Mirrors the fields pushed to the DSP's jam_inst[]
@@ -2254,6 +2255,25 @@ function deleteSetlist(setlist) {
 
 /* ── MIDI output routing ────────────────────────────────────────────── */
 
+/* Push the live drum/instrument mutes that belong to the mode about to
+ * play. drum_enabled and inst1/inst2_enabled are engine-level and survive a
+ * song rebuild, so without this a mute set in Perform or Jam would carry
+ * over into Song Builder playback. Perform uses its Track-button toggles;
+ * Jam uses its drum toggle (its own instruments are the separate jam_inst
+ * ones, so the song-instrument mutes are simply cleared); anything else
+ * plays everything. */
+function pushLiveMutesToDsp(set, t) {
+    let drums = true, inst1 = true, inst2 = true;
+    if (currentMode === MODE_PERFORMANCE) {
+        drums = perfDrumEnabled; inst1 = perfInst1Enabled; inst2 = perfInst2Enabled;
+    } else if (currentMode === MODE_JAM) {
+        drums = jamDrumEnabled;
+    }
+    set("drum_enabled", drums ? "1" : "0", t);
+    set("inst1_enabled", inst1 ? "1" : "0", t);
+    set("inst2_enabled", inst2 ? "1" : "0", t);
+}
+
 /* Build the current song's timeline in the DSP WITHOUT starting playback.
  * Used when jumping to a section on first load: we want the full song timeline
  * built so a subsequent play_from_bar seek is instant, but we must NOT send
@@ -2268,6 +2288,7 @@ function buildSongTimelineOnly(onConfirmed) {
     const t = block ? 100 : undefined; /* delivery-only budget now -- see playCurrentSong */
     set("library_root", LIBRARY_ROOT, t);
     pushOutputRoutingToDsp();
+    pushLiveMutesToDsp(set, t);
     set("loop", "0", t);
     requestPrimaryBuild(function () {
         set("song_json", json, t);
@@ -2301,6 +2322,7 @@ function playCurrentSong(preloadStaged, onConfirmed) {
         /* Ensure library_root is set first so clip resolution works. */
         set("library_root", LIBRARY_ROOT, t);
         pushOutputRoutingToDsp();
+        pushLiveMutesToDsp(set, t);
         set("loop", "0", t);
         /* The error/timeline_info/resolved_clips checks that used to follow
          * song_json immediately only became meaningful once the build
@@ -2568,12 +2590,20 @@ function updateDspState() {
              * jamLastBarCounter used by the groove/fill queue logic below --
              * that one is reset at specific clip-swap points not relevant
              * here, and reusing it risked interfering with its own timing. */
+            /* A groove/fill swap applies the queued chord too (the DSP's
+             * swap sites call apply_pending_jam_chord directly), but it
+             * doesn't advance bar_counter -- so swap_counter is watched as
+             * well, or the pads stayed red/white after the chord had
+             * already changed. */
             const bc = lastDspTransport.bar_counter;
-            if (typeof bc === "number") {
-                if (jamLastBarCounterForChord < 0) {
+            const sc = lastDspTransport.swap_counter;
+            if (typeof bc === "number" && typeof sc === "number") {
+                if (jamLastBarCounterForChord < 0 || jamLastSwapCounterForChord < 0) {
                     jamLastBarCounterForChord = bc;
-                } else if (bc !== jamLastBarCounterForChord) {
+                    jamLastSwapCounterForChord = sc;
+                } else if (bc !== jamLastBarCounterForChord || sc !== jamLastSwapCounterForChord) {
                     jamLastBarCounterForChord = bc;
+                    jamLastSwapCounterForChord = sc;
                     if (jamChordPendingDegree >= 0) {
                         jamChordLiveDegree = jamChordPendingDegree;
                         jamChordPendingDegree = -1;
@@ -6530,29 +6560,26 @@ function drawJam() {
     }
     print(2, LIST_TOP_Y + 18, "Grooves: " + jamGrooves.length + "  Fills: " + jamVisibleFills().length, 1);
     const [tsNum, tsDen] = inferTimeSigFromFolder(folderName);
-    let bottomLine;
+    print(2, LIST_TOP_Y + 27, "BPM: " + jamBpm + "  " + tsNum + "/" + tsDen, 1);
     if (jamChordModeActive()) {
         /* Key, the chord that's sounding/queued-to-resume, and (while
-         * playing, when they differ) a not-yet-promoted queued change, all
-         * on one line -- see jamChordDegreeLabel/jamQueuedChordDegree,
-         * which also drive the pad LED highlight in drawJamLEDs, so the
-         * text and the pads always agree. BPM/time-sig make way for this
-         * while the chord grid is showing. */
-        bottomLine = "Key: " + jamKey;
+         * playing, when they differ) a not-yet-promoted queued change, on
+         * their own bottom line -- see jamChordDegreeLabel/
+         * jamQueuedChordDegree, which also drive the pad LED highlight in
+         * drawJamLEDs, so the text and the pads always agree. */
+        let chordText;
         if (jamPlaying) {
             const liveText = jamChordDegreeLabel(jamChordLiveDegree);
             const pendingText = jamChordDegreeLabel(jamChordPendingDegree);
-            if (liveText && pendingText) bottomLine += "  " + liveText + ">" + pendingText;
-            else if (liveText) bottomLine += "  " + liveText;
-            else if (pendingText) bottomLine += "  >" + pendingText;
-            else bottomLine += "  —";
+            if (liveText && pendingText) chordText = liveText + ">" + pendingText;
+            else if (liveText) chordText = liveText;
+            else if (pendingText) chordText = ">" + pendingText;
+            else chordText = "—";
         } else {
-            bottomLine += "  " + (jamChordDegreeLabel(jamQueuedChordDegree()) || "—");
+            chordText = jamChordDegreeLabel(jamQueuedChordDegree()) || "—";
         }
-    } else {
-        bottomLine = "BPM: " + jamBpm + "  " + tsNum + "/" + tsDen;
+        print(2, LIST_TOP_Y + 36, "Key: " + jamKey + "  Chord: " + chordText, 1);
     }
-    print(2, LIST_TOP_Y + 27, bottomLine, 1);
     drawJamHoldOverlay();
 }
 
@@ -7787,6 +7814,7 @@ function handleJamFolderInput(cc, value) {
         jamChordPendingDegree = -1;
         jamChordLiveDegree = -1;
         jamLastBarCounterForChord = -1;
+        jamLastSwapCounterForChord = -1;
         jamInstConfig = [
             { octave: 3, voicing: "bass", inversion: 0, note_gap: 0.25, follow_note: 36 },
             { octave: 3, voicing: "chord", inversion: 0, note_gap: 0.25, follow_note: 0 }
@@ -8033,6 +8061,7 @@ function jamPlayClip(clip, forceNonLoop) {
             jamChordPendingDegree = -1;
         }
         jamLastBarCounterForChord = -1;
+        jamLastSwapCounterForChord = -1;
         /* Wait one tick after starting a clip before evaluating boundaries, so
          * the first bar=1 (which the DSP always reports at playback start)
          * isn't mistaken for a loop wrap / groove finish. Without this, fills
@@ -8697,6 +8726,7 @@ function handleJamInput(cc, value) {
              * stop. */
             jamChordPendingDegree = -1;
             jamLastBarCounterForChord = -1;
+            jamLastSwapCounterForChord = -1;
             hideOverlay();
             stopPlayback();
             needsRedraw = true;
