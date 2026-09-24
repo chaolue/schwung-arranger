@@ -186,6 +186,12 @@ const CHORD_INTERVALS = {
 
 /* Display label for a chord quality (used to render a compact chord name,
  * e.g. "Cm7" or "C" for a plain major — hence "maj" being blank). */
+/* Inversion value meaning "Auto": voice leading by the chord's scale degree
+ * (I, ii, vii root; iii, IV 2nd inversion; V, vi 1st inversion), each chord
+ * placed so its lowest note is the one nearest the key's root. Resolved on
+ * the DSP side (chord_voiced_notes). Default for new instruments and Jam. */
+const INVERSION_AUTO = 4;
+
 const CHORD_QUALITY_LABEL = {
     "maj": "", "min": "m", "dim": "dim", "aug": "aug", "7": "7",
     "m7": "m7", "maj7": "maj7", "dim7": "dim7", "sus2": "sus2", "sus4": "sus4"
@@ -602,6 +608,12 @@ let jamInst2Enabled = true;
 let jamKey = "C";
 let jamChordPendingDegree = -1;     /* 0-7 (7 = octave-root pad), -1 = none queued */
 let jamChordLiveDegree = -1;
+/* The key each of those chords was built in -- a key change (Shift+jog)
+ * re-queues the chord in the new key, so the live chord can briefly be in a
+ * different key from jamKey and must be labelled with its own. */
+let jamChordPendingKey = "C";
+let jamKeyChangePending = false; /* key turned with Shift held; applied on Shift release */
+let jamChordLiveKey = "C";
 let jamLastBarCounterForChord = -1; /* last-seen bar_counter, to detect a boundary crossing */
 let jamLastSwapCounterForChord = -1; /* last-seen swap_counter -- a groove/fill swap is a boundary too, see updateDspState */
 
@@ -615,8 +627,8 @@ let jamLastSwapCounterForChord = -1; /* last-seen swap_counter -- a groove/fill 
  * sustained chordal pad by default rather than a second beat-driven bass.
  * Not persisted -- resets to these defaults each session. */
 let jamInstConfig = [
-    { octave: 3, voicing: "bass", inversion: 0, note_gap: 0.25, follow_note: 36 },
-    { octave: 3, voicing: "chord", inversion: 0, note_gap: 0.25, follow_note: 0 }
+    { octave: 3, voicing: "bass", inversion: INVERSION_AUTO, note_gap: 0.25, follow_note: 36 },
+    { octave: 3, voicing: "chord", inversion: INVERSION_AUTO, note_gap: 0.25, follow_note: 0 }
 ];
 let jamInstrumentEditIndex = 0;  /* 0 = Inst 1, 1 = Inst 2 -- which jamInstConfig entry the menu edits */
 let jamInstrumentFocus = 0;
@@ -702,6 +714,13 @@ let jamHoldOverlayShown = false;    /* true once the hold-overlay has been shown
  * instead of being hard-truncated by the shared drawOverlay(). */
 let jamHoldScroller = createTextScroller({ scrollInterval: 8, delayFrames: 12 });
 let jamHoldName = "";
+/* Chord pad being held (degree 0-7, -1 = none) and when it was pressed.
+ * Chord pads act on release: a quick tap selects the chord, a hold past
+ * PAD_PREVIEW_DELAY_MS only shows its name in the hold overlay (same as
+ * groove/fill pads while playing). */
+let jamChordHoldDegree = -1;
+let jamChordHoldTime = 0;
+let jamChordHoldShown = false;
 let jamHoldBars = 1;
 
 /* Dedicated marquee scroller for the Jam header (folder name). */
@@ -1292,14 +1311,14 @@ function instrumentForTrack(track) {
             octave: 3,
             follow_note: 0,
             voicing: "bass",
-            inversion: 0,
+            inversion: INVERSION_AUTO,
             note_gap: 0.25,
             bars: [],
             overrides: []
         };
     }
     if (!currentSong.instruments[idx].overrides) currentSong.instruments[idx].overrides = [];
-    if (typeof currentSong.instruments[idx].inversion !== "number") currentSong.instruments[idx].inversion = 0;
+    if (typeof currentSong.instruments[idx].inversion !== "number") currentSong.instruments[idx].inversion = INVERSION_AUTO;
     return currentSong.instruments[idx];
 }
 
@@ -1410,8 +1429,18 @@ export function setInstrumentBarOverrideField(inst, sectionIndex, barIndex, fiel
  * audible with "chord" voicing -- a triad clamps 3rd inversion down to 2nd
  * on the DSP side, so labelling all four here is harmless either way. */
 export function inversionLabel(inv) {
-    const labels = ["Root", "1st Inv", "2nd Inv", "3rd Inv"];
-    return labels[Math.max(0, Math.min(3, inv || 0))];
+    const labels = ["Root", "1st Inv", "2nd Inv", "3rd Inv", "Auto"];
+    return labels[Math.max(0, Math.min(INVERSION_AUTO, inv || 0))];
+}
+
+/* A chord's scale degree (0-6) in a major key by its root, or -1 if the root
+ * isn't in the key. Sent to the DSP with each chord for the Auto inversion. */
+export function chordDegreeInKey(chord, key) {
+    if (!chord) return -1;
+    const keyPc = noteSemitone(key);
+    const rootPc = noteSemitone(chord.root);
+    if (keyPc < 0 || rootPc < 0) return -1;
+    return [0, 2, 4, 5, 7, 9, 11].indexOf(((rootPc - keyPc) % 12 + 12) % 12);
 }
 
 /* Display label for the note-gap value (fraction of a beat). */
@@ -1486,7 +1515,10 @@ export function toEngineSongJson(song) {
                 chordsOut.push(ch ? {
                     root: ch.root || "C",
                     quality: ch.quality || "maj",
-                    bass: ch.bass || ""
+                    bass: ch.bass || "",
+                    /* For the Auto inversion -- see INVERSION_AUTO. */
+                    degree: chordDegreeInKey(ch, song.key || DEFAULT_KEY),
+                    key: song.key || DEFAULT_KEY
                 } : null);
             }
         }
@@ -2261,17 +2293,27 @@ function deleteSetlist(setlist) {
  * over into Song Builder playback. Perform uses its Track-button toggles;
  * Jam uses its drum toggle (its own instruments are the separate jam_inst
  * ones, so the song-instrument mutes are simply cleared); anything else
- * plays everything. */
+ * plays everything.
+ *
+ * Jam's own instruments are switched off outside Jam too. They're
+ * engine-level as well and were only reset on entering Jam, so leaving Jam
+ * with one on left it playing Jam's last chord over Perform/Song Builder
+ * (Inst 2's once-per-bar default played it every bar) -- found live, where
+ * it looked like Perform's Inst 2 mute not working. */
 function pushLiveMutesToDsp(set, t) {
     let drums = true, inst1 = true, inst2 = true;
+    let jamInst1 = false, jamInst2 = false;
     if (currentMode === MODE_PERFORMANCE) {
         drums = perfDrumEnabled; inst1 = perfInst1Enabled; inst2 = perfInst2Enabled;
     } else if (currentMode === MODE_JAM) {
         drums = jamDrumEnabled;
+        jamInst1 = jamInst1Enabled; jamInst2 = jamInst2Enabled;
     }
     set("drum_enabled", drums ? "1" : "0", t);
     set("inst1_enabled", inst1 ? "1" : "0", t);
     set("inst2_enabled", inst2 ? "1" : "0", t);
+    set("jam_inst1_enabled", jamInst1 ? "1" : "0", t);
+    set("jam_inst2_enabled", jamInst2 ? "1" : "0", t);
 }
 
 /* Build the current song's timeline in the DSP WITHOUT starting playback.
@@ -2606,6 +2648,7 @@ function updateDspState() {
                     jamLastSwapCounterForChord = sc;
                     if (jamChordPendingDegree >= 0) {
                         jamChordLiveDegree = jamChordPendingDegree;
+                        jamChordLiveKey = jamChordPendingKey;
                         jamChordPendingDegree = -1;
                         stepLedsDirty = true;
                         /* See handleJamChordPad's comment: drawJamLEDs only
@@ -4157,9 +4200,16 @@ export function jamChordDegreeForPad(row, col) {
  * diatonicChord (ui.js:1154). shift is added to the instrument's own octave
  * on the DSP side (jam_chord_live_octave_shift) -- chord_t itself carries
  * no octave. */
-export function jamChordForDegree(degree) {
-    const c = diatonicChord(jamKey, degree === 7 ? 0 : degree);
-    return { root: c.root, quality: c.quality, shift: degree === 7 ? 1 : 0 };
+export function jamChordForDegree(degree, key) {
+    const k = key || jamKey;
+    const c = diatonicChord(k, degree === 7 ? 0 : degree);
+    /* The engine places every root in the same octave by pitch class, so in
+     * any key but C the degrees whose root wraps past C (e.g. C, D, E, F# in
+     * G) would drop below the tonic. Shift those up an octave so the pads
+     * always climb from the key's root; the 8th pad is the root an octave
+     * up. */
+    const wraps = noteSemitone(c.root) < noteSemitone(k);
+    return { root: c.root, quality: c.quality, shift: (degree === 7 || wraps) ? 1 : 0 };
 }
 
 /* The single chord pad degree that represents "what's currently in effect
@@ -4179,12 +4229,18 @@ function jamQueuedChordDegree() {
     return jamChordPendingDegree >= 0 ? jamChordPendingDegree : jamChordLiveDegree;
 }
 
+/* The "jam_chord" set_param value for a chord pad: root, quality, octave
+ * shift, plus degree and key for the Auto inversion. */
+function jamChordParam(chord, degree, key) {
+    return chord.root + ":" + chord.quality + ":" + chord.shift + ":" + degree + ":" + key;
+}
+
 /* Short display label for a chord pad degree (e.g. "D", "F#m", "D+8" for
  * the octave-root pad), or null for -1 (nothing chosen) -- used to build
  * drawJam's status line. */
-function jamChordDegreeLabel(degree) {
+function jamChordDegreeLabel(degree, key) {
     if (degree < 0) return null;
-    return chordLabel(jamChordForDegree(degree)) + (degree === 7 ? "+8" : "");
+    return chordLabel(jamChordForDegree(degree, key)) + (degree === 7 ? "+8" : "");
 }
 
 function drawJamLEDs() {
@@ -4222,10 +4278,13 @@ function drawJamLEDs() {
                 const degree = jamChordDegreeForPad(row, col);
                 const p = row * 8 + col;
                 if (jamPlaying) {
-                    if (degree === jamChordLiveDegree) {
-                        desired[p] = White;
-                    } else if (degree === jamChordPendingDegree) {
+                    /* Queued is checked first: after a key change the
+                     * queued chord is usually on the same pad as the live
+                     * one, and should still show red until it lands. */
+                    if (degree === jamChordPendingDegree) {
                         desired[p] = PureRed;
+                    } else if (degree === jamChordLiveDegree) {
+                        desired[p] = White;
                     } else {
                         desired[p] = DarkGrey;
                     }
@@ -4814,7 +4873,7 @@ function scrollHeader(title, maxChars) {
 }
 
 function drawRoot() {
-    drawMenuHeader("Arranger", "v0.4");
+    drawMenuHeader("Arranger", "v0.5");
     drawMenuList({
         labelX: 3,
         items: [
@@ -4945,7 +5004,8 @@ function drawScrollingOverlay(scroller, name, bars) {
     let display = name;
     if (display.length > 18) display = scroller.getScrolledText(display, 18);
     print(boxX + 4, boxY + 2, display, 1);
-    print(boxX + 4, boxY + 14, "Value: " + bars + " bar" + (bars > 1 ? "s" : ""), 1);
+    const sub = (typeof bars === "string") ? bars : "Value: " + bars + " bar" + (bars > 1 ? "s" : "");
+    print(boxX + 4, boxY + 14, sub, 1);
 }
 
 /* Custom overlay for the Song Builder pad preview, using the shared scrolling
@@ -5285,10 +5345,10 @@ function handleInstrumentInput(cc, value) {
             } else if (instrumentFocus === 3) {
                 inst.voicing = (inst.voicing === "chord") ? "bass" : "chord";
             } else if (instrumentFocus === 4) {
-                /* Inversion: root/1st/2nd/3rd. Clamped per-chord (a triad has
-                 * no 3rd inversion) on the DSP side; the menu just offers all
-                 * four so a 7th/maj7/m7/dim7 chord can use the 3rd. */
-                inst.inversion = Math.max(0, Math.min(3, (inst.inversion || 0) + delta));
+                /* Inversion: root/1st/2nd/3rd/Auto. Clamped per-chord (a triad
+                 * has no 3rd inversion) on the DSP side; the menu just offers
+                 * all four so a 7th/maj7/m7/dim7 chord can use the 3rd. */
+                inst.inversion = Math.max(0, Math.min(INVERSION_AUTO, (inst.inversion || 0) + delta));
             } else if (instrumentFocus === 5) {
                 /* Note gap: 0 = none, then 1/16, 1/8, 1/4, 1/2, 1 beat. */
                 const steps = [0, 0.0625, 0.125, 0.25, 0.5, 1.0];
@@ -5408,7 +5468,7 @@ function handleInstrumentBarMenuInput(cc, value) {
             } else if (instrumentBarFocus === 4) {
                 const ov = instrumentBarOverride(inst, sec, bar);
                 const cur = ov && ov.inversion !== null && ov.inversion !== undefined ? ov.inversion : null;
-                setInstrumentBarOverrideField(inst, sec, bar, "inversion", cycleOptionalInt(cur, delta, 0, 3));
+                setInstrumentBarOverrideField(inst, sec, bar, "inversion", cycleOptionalInt(cur, delta, 0, INVERSION_AUTO));
             }
         } else {
             instrumentBarFocus = Math.max(0, Math.min(4, instrumentBarFocus + delta));
@@ -5539,7 +5599,7 @@ function handleJamInstrumentMenuInput(cc, value) {
                 cfg.voicing = (cfg.voicing === "chord") ? "bass" : "chord";
                 if (typeof host_module_set_param === "function") host_module_set_param(key + "voicing", cfg.voicing);
             } else if (jamInstrumentFocus === 3) {
-                cfg.inversion = Math.max(0, Math.min(3, cfg.inversion + delta));
+                cfg.inversion = Math.max(0, Math.min(INVERSION_AUTO, cfg.inversion + delta));
                 if (typeof host_module_set_param === "function") host_module_set_param(key + "inversion", String(cfg.inversion));
             } else if (jamInstrumentFocus === 4) {
                 /* Note gap: 0 = none, then 1/16, 1/8, 1/4, 1/2, 1 beat. */
@@ -6569,14 +6629,15 @@ function drawJam() {
          * drawJamLEDs, so the text and the pads always agree. */
         let chordText;
         if (jamPlaying) {
-            const liveText = jamChordDegreeLabel(jamChordLiveDegree);
-            const pendingText = jamChordDegreeLabel(jamChordPendingDegree);
+            const liveText = jamChordDegreeLabel(jamChordLiveDegree, jamChordLiveKey);
+            const pendingText = jamChordDegreeLabel(jamChordPendingDegree, jamChordPendingKey);
             if (liveText && pendingText) chordText = liveText + ">" + pendingText;
             else if (liveText) chordText = liveText;
             else if (pendingText) chordText = ">" + pendingText;
             else chordText = "—";
         } else {
-            chordText = jamChordDegreeLabel(jamQueuedChordDegree()) || "—";
+            chordText = jamChordDegreeLabel(jamQueuedChordDegree(),
+                jamChordPendingDegree >= 0 ? jamChordPendingKey : jamChordLiveKey) || "—";
         }
         print(2, LIST_TOP_Y + 36, "Key: " + jamKey + "  Chord: " + chordText, 1);
     }
@@ -7815,9 +7876,12 @@ function handleJamFolderInput(cc, value) {
         jamChordLiveDegree = -1;
         jamLastBarCounterForChord = -1;
         jamLastSwapCounterForChord = -1;
+        jamChordHoldDegree = -1;
+        jamChordHoldShown = false;
+        jamKeyChangePending = false;
         jamInstConfig = [
-            { octave: 3, voicing: "bass", inversion: 0, note_gap: 0.25, follow_note: 36 },
-            { octave: 3, voicing: "chord", inversion: 0, note_gap: 0.25, follow_note: 0 }
+            { octave: 3, voicing: "bass", inversion: INVERSION_AUTO, note_gap: 0.25, follow_note: 36 },
+            { octave: 3, voicing: "chord", inversion: INVERSION_AUTO, note_gap: 0.25, follow_note: 0 }
         ];
         jamInstRoutingPushed = [false, false];
         /* Three different keys back to back -- use the blocking variant so
@@ -8058,6 +8122,7 @@ function jamPlayClip(clip, forceNonLoop) {
          * same change. */
         if (jamChordPendingDegree >= 0) {
             jamChordLiveDegree = jamChordPendingDegree;
+            jamChordLiveKey = jamChordPendingKey;
             jamChordPendingDegree = -1;
         }
         jamLastBarCounterForChord = -1;
@@ -8656,8 +8721,13 @@ function handleJamInput(cc, value) {
             const idx = KEYS.indexOf(jamKey);
             const newIdx = ((idx < 0 ? 0 : idx) + delta) % KEYS.length;
             jamKey = KEYS[(newIdx + KEYS.length) % KEYS.length];
+            /* The chord moves to the new key only once Shift is released
+             * (see jamApplyKeyChangeOnShiftRelease), so turning through several
+             * keys on the way doesn't queue each one. */
+            jamKeyChangePending = true;
             needsRedraw = true;
             stepLedsDirty = true;
+            ledDirtyAll = true;
         } else {
             /* Jog wheel adjusts the BPM in realtime (no restart). */
             const newBpm = Math.max(20, Math.min(300, jamBpm + delta));
@@ -8826,8 +8896,59 @@ function handleJamInput(cc, value) {
  * Release events are ignored; this is a simple select action, not a
  * hold-to-preview like the groove/fill pads. */
 function handleJamChordPad(row, col, velocity) {
-    if (velocity === 0) return;
     const degree = jamChordDegreeForPad(row, col);
+    if (velocity > 0) {
+        jamChordHoldDegree = degree;
+        jamChordHoldTime = Date.now();
+        jamChordHoldShown = false;
+        return;
+    }
+    if (degree !== jamChordHoldDegree) return;
+    const wasShown = jamChordHoldShown;
+    jamChordHoldDegree = -1;
+    jamChordHoldShown = false;
+    if (wasShown) {
+        /* Held: the name was shown, so don't select the chord. */
+        jamHoldOverlayShown = false;
+        jamHoldName = "";
+        hideOverlay();
+        needsRedraw = true;
+        return;
+    }
+    jamSelectChordDegree(degree);
+}
+
+/* After a key change, queue the current chord's degree again in the new key
+ * so the change is heard: at the next bar while playing (like a pad press),
+ * or when Play is pressed while stopped. Nothing to do if no chord is set. */
+function jamRequeueChordInKey() {
+    const degree = jamChordPendingDegree >= 0 ? jamChordPendingDegree : jamChordLiveDegree;
+    if (degree < 0) return;
+    const chord = jamChordForDegree(degree);
+    jamChordPendingDegree = degree;
+    jamChordPendingKey = jamKey;
+    if (!jamPlaying) jamChordLiveDegree = -1;
+    if (typeof host_module_set_param === "function") {
+        host_module_set_param("jam_chord", jamChordParam(chord, degree, jamKey));
+    }
+    logJam("KEY-CHANGE key=" + jamKey + " requeue degree=" + degree + " root=" + chord.root + " quality=" + chord.quality);
+}
+
+/* Called on every Shift release (from onMidiMessageInternal, which consumes
+ * Shift before any per-view handler sees it): move the current chord to a key
+ * chosen with Shift+jogwheel. Only re-queues if the key actually ended up
+ * different from the one the current chord is in. */
+function jamApplyKeyChangeOnShiftRelease() {
+    if (!jamKeyChangePending) return;
+    jamKeyChangePending = false;
+    const chordKey = jamChordPendingDegree >= 0 ? jamChordPendingKey : jamChordLiveKey;
+    if (jamKey !== chordKey) jamRequeueChordInKey();
+    needsRedraw = true;
+    ledDirtyAll = true;
+}
+
+/* Select a chord pad's chord (a quick tap on it -- see handleJamChordPad). */
+function jamSelectChordDegree(degree) {
 
     if (!jamPlaying) {
         const queuedDegree = jamQueuedChordDegree();
@@ -8841,9 +8962,10 @@ function handleJamChordPad(row, col, velocity) {
         } else {
             const chord = jamChordForDegree(degree);
             jamChordPendingDegree = degree;
+            jamChordPendingKey = jamKey;
             jamChordLiveDegree = -1;
             if (typeof host_module_set_param === "function") {
-                host_module_set_param("jam_chord", chord.root + ":" + chord.quality + ":" + chord.shift);
+                host_module_set_param("jam_chord", jamChordParam(chord, degree, jamKey));
             }
             logJam("CHORD-PAD degree=" + degree + " root=" + chord.root + " quality=" + chord.quality +
                 " shift=" + chord.shift + " queued (stopped)");
@@ -8856,8 +8978,9 @@ function handleJamChordPad(row, col, velocity) {
 
     const chord = jamChordForDegree(degree);
     jamChordPendingDegree = degree;
+    jamChordPendingKey = jamKey;
     if (typeof host_module_set_param === "function") {
-        host_module_set_param("jam_chord", chord.root + ":" + chord.quality + ":" + chord.shift);
+        host_module_set_param("jam_chord", jamChordParam(chord, degree, jamKey));
     }
     logJam("CHORD-PAD degree=" + degree + " root=" + chord.root + " quality=" + chord.quality + " shift=" + chord.shift);
     needsRedraw = true;
@@ -8873,7 +8996,7 @@ function handleJamChordPad(row, col, velocity) {
 function handleJamPad(padIndex, velocity) {
     const col = padIndex % 8;
     const row = Math.floor(padIndex / 8);
-    if (jamChordModeActive() && col < 2) {
+    if (col < 2 && (jamChordModeActive() || (velocity === 0 && jamChordHoldDegree >= 0))) {
         handleJamChordPad(row, col, velocity);
         return;
     }
@@ -8881,8 +9004,16 @@ function handleJamPad(padIndex, velocity) {
     const grooveColOffset = jamGrooveColOffset();
     const fillColOffset = jamFillColOffset();
     let clip = null;
+    /* Whether this pad is a groove or a fill, decided from the current
+     * layout. Grooves shift to columns 2-4 while the chord pads are showing,
+     * so the release handlers below must not assume "column < 4 is a
+     * groove" -- found live: a groove in column 4 was queued as a fill (it
+     * played at the next bar instead of the groove's end, and never lit as
+     * a queued groove). */
+    let isGroovePad = false;
     if (col >= grooveColOffset && col < grooveColOffset + grooveCols) {
         /* Groove pad. */
+        isGroovePad = true;
         const idx = (row + jamGrooveScroll * 4) * grooveCols + (col - grooveColOffset);
         clip = jamGrooves[idx];
     } else if (col >= fillColOffset) {
@@ -8941,7 +9072,7 @@ function handleJamPad(padIndex, velocity) {
             jamStopPlayback();
         } else {
             /* Quick press (released before the delay): start loop playback. */
-            if (col < 4) jamQueueGroove(clip);
+            if (isGroovePad) jamQueueGroove(clip);
             else jamQueueFill(clip);
         }
         jamPreviewPad = -1;
@@ -8955,7 +9086,7 @@ function handleJamPad(padIndex, velocity) {
          * press (released before the hold delay), queue the clip normally. */
         hideOverlay();
         if (!jamHoldOverlayShown) {
-            if (col < 4) jamQueueGroove(clip);
+            if (isGroovePad) jamQueueGroove(clip);
             else jamQueueFill(clip);
         }
         jamHoldPad = -1;
@@ -10646,6 +10777,22 @@ globalThis.tick = function() {
         }
     }
 
+    /* Jam chord pad hold: show the chord's name once held past the delay. */
+    if (currentView === VIEW_JAM && jamChordHoldDegree >= 0 && !jamChordHoldShown &&
+        Date.now() - jamChordHoldTime >= PAD_PREVIEW_DELAY_MS) {
+        const degree = jamChordHoldDegree;
+        const chord = jamChordForDegree(degree);
+        const roman = ["I", "ii", "iii", "IV", "V", "vi", "vii", "I"][degree];
+        jamChordHoldShown = true;
+        jamHoldOverlayShown = true;
+        jamHoldName = chord.root + " " + (CHORD_TYPE_LABEL[chord.quality] || chord.quality) +
+            (degree === 7 ? " +8ve" : "");
+        jamHoldBars = roman + " in key " + jamKey;
+        jamHoldScroller.setSelected(jamHoldName);
+        needsRedraw = true;
+        logJam("CHORD-HOLD overlay -> " + jamHoldName);
+    }
+
     /* Retry loading the builder's clip pads if they weren't ready yet (e.g.
      * a song opened on a fresh boot before the DSP folder scan finished).
      * Ensure libraryFolders is populated, re-resolve the folder by name, then
@@ -10884,6 +11031,7 @@ globalThis.onMidiMessageInternal = function(data) {
     if (status === 0xB0) {
         if (cc === MoveShift) {
             shiftHeld = value > 0;
+            if (!shiftHeld) jamApplyKeyChangeOnShiftRelease();
             return;
         }
         if (cc === MoveBack) {
