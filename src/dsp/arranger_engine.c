@@ -227,12 +227,22 @@ typedef struct {
     int8_t  channel;             /* MIDI channel override for this clip; -1 = engine output channel */
 } section_clip_t;
 
+/* instrument_t.inversion value meaning "Auto": voice-leading inversion by the
+ * chord's scale degree -- see chord_voiced_notes. */
+#define INVERSION_AUTO 4
+
 /* A chord on a bar: root note name, quality, optional bass note (slash chord). */
 typedef struct {
     char root[8];
     char quality[8];
     char bass[8];            /* "" = no slash bass */
     uint8_t set;             /* 1 if this bar has a chord */
+    /* Scale degree (0-6, 7 = Jam's octave-root pad) in key_pc, or -1 if
+     * unknown / not in the key. Used by the Auto (voice-leading) inversion
+     * -- see chord_voiced_notes. Sent by the UI, which knows the key. */
+    int8_t degree;
+    int8_t key_pc;           /* key's pitch class 0-11, -1 if unknown */
+    int8_t octave_shift;     /* extra octaves for this chord (Jam pads climbing past C) */
 } chord_t;
 
 /* MAX_INSTRUMENT_OVERRIDES is sparse (one entry per bar that actually
@@ -264,7 +274,8 @@ typedef struct {
     /* Full-chord inversion (voicing 1 only; meaningless for bass voicing):
      * 0 = root position, 1/2/3 = first/second/third inversion (clamped to
      * the chord's own tone count - 1 by chord_voiced_intervals -- a triad
-     * has no third inversion). */
+     * has no third inversion), INVERSION_AUTO = voice leading by degree --
+     * see chord_voiced_notes. */
     uint8_t inversion;
     double note_gap;         /* gap (fraction of a beat) between note-off and the next note-on; 0 = none */
     /* Per-section per-bar on/off map: 1 = send, 0 = muted. */
@@ -765,12 +776,6 @@ typedef struct engine {
     chord_t jam_chord_live;
     chord_t jam_chord_pending;
     uint8_t jam_chord_pending_set;
-    /* Octave shift (in octaves, e.g. 1 = +12 semitones) applied on top of
-     * the instrument's own octave for the currently-live/pending chord --
-     * used by the 8th ("octave root") chord pad, which is otherwise the
-     * same root/quality as the 1st. chord_t itself carries no octave. */
-    int8_t jam_chord_live_octave_shift;
-    int8_t jam_chord_pending_octave_shift;
     /* Per-jam-instrument tracking, mirroring last_inst_chord/pending_off
      * above but sized for exactly the 2 Jam instruments -- kept separate
      * rather than reusing the MAX_INSTRUMENTS-sized arrays above because
@@ -1999,37 +2004,61 @@ static void emit_instrument_event(engine_t *e, const instrument_t *inst,
     }
 }
 
-/* Emit the chord for a given section/bar on an instrument. voicing 0 = bass
- * note (root, or slash bass), 1 = full chord. Returns the number of notes
- * emitted (so the caller can send matching note-offs). */
-static int emit_instrument_chord(engine_t *e, const instrument_t *inst,
-                                 const chord_t *ch, uint8_t vel) {
-    if (!ch || !ch->set) return 0;
+/* Auto inversion's voice-leading pattern by scale degree: I, ii, vii root;
+ * iii, IV 2nd inversion; V, vi 1st inversion (index 7 = Jam's octave-root
+ * pad, same as I). */
+static const int AUTO_INVERSION_BY_DEGREE[8] = { 0, 0, 2, 2, 1, 1, 0, 0 };
+
+/* The MIDI notes an instrument plays for a chord (both note-on and note-off
+ * use this, so they always match). voicing 0 = bass note (slash bass or
+ * root), 1 = full chord. With INVERSION_AUTO and a known key, the inversion
+ * comes from the chord's degree and the chord is placed so its lowest note is
+ * the one nearest the key's root -- e.g. in C at octave 3: I = C3 E3 G3,
+ * V = B2 D3 G3, IV = C3 F3 A3 -- rather than stacked up from its own root.
+ * Returns the note count. */
+static int chord_voiced_notes(const instrument_t *inst, const chord_t *ch, int *notes) {
     int root_pc = note_name_semitone(ch->root);
     if (root_pc < 0) root_pc = 0;
-    int base = (inst->octave + 1) * 12;
+    int base = (inst->octave + 1) * 12 + 12 * ch->octave_shift;
+    int n;
     if (inst->voicing) {
-        /* Full chord voicing. */
         int intervals[4];
-        int n = chord_voiced_intervals(ch->quality, inst->inversion, intervals, 4);
-        for (int i = 0; i < n; i++) {
-            int note = base + root_pc + intervals[i];
-            if (note < 0) note = 0;
-            if (note > 127) note = 127;
-            emit_instrument_event(e, inst, 0x90, (uint8_t)note, vel);
+        int inv = inst->inversion;
+        int is_auto = (inv == INVERSION_AUTO);
+        if (is_auto) inv = (ch->degree >= 0 && ch->degree < 8) ? AUTO_INVERSION_BY_DEGREE[ch->degree] : 0;
+        n = chord_voiced_intervals(ch->quality, inv, intervals, 4);
+        if (is_auto && ch->key_pc >= 0) {
+            int low = root_pc + intervals[0];
+            int d = ((low - ch->key_pc) % 12 + 12) % 12;
+            if (d > 5) d -= 12;
+            int lowest = (inst->octave + 1) * 12 + ch->key_pc + d + (ch->degree == 7 ? 12 : 0);
+            for (int i = 0; i < n; i++) notes[i] = lowest + (root_pc + intervals[i] - low);
+        } else {
+            for (int i = 0; i < n; i++) notes[i] = base + root_pc + intervals[i];
         }
-        return n;
     } else {
-        /* Bass note: slash bass if set, else root. */
         const char *bass = (ch->bass[0]) ? ch->bass : ch->root;
         int bass_pc = note_name_semitone(bass);
         if (bass_pc < 0) bass_pc = root_pc;
-        int note = base + bass_pc;
-        if (note < 0) note = 0;
-        if (note > 127) note = 127;
-        emit_instrument_event(e, inst, 0x90, (uint8_t)note, vel);
-        return 1;
+        notes[0] = base + bass_pc;
+        n = 1;
     }
+    for (int i = 0; i < n; i++) {
+        if (notes[i] < 0) notes[i] = 0;
+        if (notes[i] > 127) notes[i] = 127;
+    }
+    return n;
+}
+
+/* Emit the chord for a given section/bar on an instrument. Returns the number
+ * of notes emitted (so the caller can send matching note-offs). */
+static int emit_instrument_chord(engine_t *e, const instrument_t *inst,
+                                 const chord_t *ch, uint8_t vel) {
+    if (!ch || !ch->set) return 0;
+    int notes[4];
+    int n = chord_voiced_notes(inst, ch, notes);
+    for (int i = 0; i < n; i++) emit_instrument_event(e, inst, 0x90, (uint8_t)notes[i], vel);
+    return n;
 }
 
 /* Send note-offs for the chord previously emitted on an instrument (so a
@@ -2037,27 +2066,9 @@ static int emit_instrument_chord(engine_t *e, const instrument_t *inst,
 static void emit_instrument_chord_off(engine_t *e, const instrument_t *inst,
                                       const chord_t *ch) {
     if (!ch || !ch->set) return;
-    int root_pc = note_name_semitone(ch->root);
-    if (root_pc < 0) root_pc = 0;
-    int base = (inst->octave + 1) * 12;
-    if (inst->voicing) {
-        int intervals[4];
-        int n = chord_voiced_intervals(ch->quality, inst->inversion, intervals, 4);
-        for (int i = 0; i < n; i++) {
-            int note = base + root_pc + intervals[i];
-            if (note < 0) note = 0;
-            if (note > 127) note = 127;
-            emit_instrument_event(e, inst, 0x80, (uint8_t)note, 0);
-        }
-    } else {
-        const char *bass = (ch->bass[0]) ? ch->bass : ch->root;
-        int bass_pc = note_name_semitone(bass);
-        if (bass_pc < 0) bass_pc = root_pc;
-        int note = base + bass_pc;
-        if (note < 0) note = 0;
-        if (note > 127) note = 127;
-        emit_instrument_event(e, inst, 0x80, (uint8_t)note, 0);
-    }
+    int notes[4];
+    int n = chord_voiced_notes(inst, ch, notes);
+    for (int i = 0; i < n; i++) emit_instrument_event(e, inst, 0x80, (uint8_t)notes[i], 0);
 }
 
 /* Find the per-bar override entry for a section/bar, or NULL if that bar has
@@ -2128,7 +2139,9 @@ static int chord_equal(const chord_t *a, const chord_t *b) {
     if (!a->set) return 1;
     return strcmp(a->root, b->root) == 0 &&
            strcmp(a->quality, b->quality) == 0 &&
-           strcmp(a->bass, b->bass) == 0;
+           strcmp(a->bass, b->bass) == 0 &&
+           a->octave_shift == b->octave_shift &&
+           a->degree == b->degree && a->key_pc == b->key_pc;
 }
 
 /* Total bars across all sections of the song. */
@@ -2415,6 +2428,8 @@ static void emit_instruments_follow(engine_t *e, uint8_t note, uint32_t tick) {
  * just whatever was last selected, or nothing if no pad has been pressed
  * yet (jam_chord_live.set == 0, in which case the instrument stays silent
  * even if its follow_note matches). */
+static void apply_pending_jam_chord(engine_t *e); /* defined below */
+
 static void emit_jam_instruments_follow(engine_t *e, uint8_t note, uint32_t tick) {
     if (!e || !e->jam_chord_live.set) return;
     uint32_t guard_ticks = (uint32_t)(e->swap_guard_fraction * e->ticks_per_beat);
@@ -2428,14 +2443,23 @@ static void emit_jam_instruments_follow(engine_t *e, uint8_t note, uint32_t tick
      * use that queued chord for this attack instead of holding the
      * outgoing one a beat early; apply_pending_jam_chord promotes it for
      * real shortly after, at the boundary itself. */
+    /* A hit in a bar the engine hasn't registered yet -- the bar number moved
+     * on, or the playhead wrapped back (a loop restart, including one-bar
+     * loops) -- is on the far side of the boundary the queued chord is
+     * waiting for. update_bar_counter only promotes it at the end of the
+     * audio block, after this block's hits have already played, so without
+     * this a kick exactly on the downbeat played the OLD chord. Found
+     * live. */
+    if (e->jam_chord_pending_set && e->ticks_per_bar > 0 &&
+        (tick / e->ticks_per_bar != e->last_bar || tick < e->last_bc_tick)) {
+        apply_pending_jam_chord(e);
+    }
     const chord_t *ch = &e->jam_chord_live;
-    int8_t octave_shift = e->jam_chord_live_octave_shift;
     if (e->ticks_per_bar > 0 && e->jam_chord_pending_set) {
         uint32_t abs_bar = tick / e->ticks_per_bar;
         uint32_t bar_end_tick = (abs_bar + 1) * e->ticks_per_bar;
         if (bar_end_tick > tick && (bar_end_tick - tick) <= guard_ticks) {
             ch = &e->jam_chord_pending;
-            octave_shift = e->jam_chord_pending_octave_shift;
         }
     }
     for (int i = 0; i < 2; i++) {
@@ -2443,11 +2467,15 @@ static void emit_jam_instruments_follow(engine_t *e, uint8_t note, uint32_t tick
         if (!inst->enabled) continue;
         if (inst->follow_note == 0 || inst->follow_note != note) continue;
         instrument_t resolved = *inst;
-        resolved.octave += octave_shift;
+        /* Distance from the previous attack, measured across a loop wrap
+         * too: a pushed kick just before the loop end followed by the
+         * downbeat just after it is the same attack, not two. */
+        uint32_t since_last = (tick >= e->jam_last_follow_tick[i])
+            ? tick - e->jam_last_follow_tick[i]
+            : tick + e->live_slot.end_tick - e->jam_last_follow_tick[i];
         uint8_t is_duplicate_attack = e->jam_last_chord_set[i] &&
             chord_equal(&e->jam_last_chord[i], ch) &&
-            tick >= e->jam_last_follow_tick[i] &&
-            (tick - e->jam_last_follow_tick[i]) <= guard_ticks;
+            since_last <= guard_ticks;
         if (!is_duplicate_attack) {
             emit_instrument_chord(e, &resolved, ch, 100);
             e->jam_last_chord[i] = *ch;
@@ -2500,7 +2528,6 @@ static void emit_jam_instruments_all_off(engine_t *e) {
 static void apply_pending_jam_chord(engine_t *e) {
     if (!e->jam_chord_pending_set) return;
     e->jam_chord_live = e->jam_chord_pending;
-    e->jam_chord_live_octave_shift = e->jam_chord_pending_octave_shift;
     e->jam_chord_pending_set = 0;
 }
 
@@ -2525,7 +2552,6 @@ static void emit_jam_instruments_at_tick(engine_t *e, uint32_t tick) {
             e->jam_last_chord_set[i] = 0;
         }
         instrument_t resolved = *inst;
-        resolved.octave += e->jam_chord_live_octave_shift;
         emit_instrument_chord(e, &resolved, ch, 100);
         e->jam_last_chord[i] = *ch;
         e->jam_last_chord_set[i] = 1;
@@ -2981,6 +3007,11 @@ static void parse_section_chords(const char *arr, section_t *sec) {
                 } else if (strncmp(p + 1, "bass", 4) == 0) {
                     char v[8];
                     if (json_get_string_at(p, "bass", v, sizeof(v))) copy_trunc(ch->bass, sizeof(ch->bass), v);
+                } else if (strncmp(p + 1, "degree\"", 7) == 0) {
+                    int v; if (json_get_int_at(p, "degree", &v)) ch->degree = (int8_t)((v >= 0 && v <= 7) ? v : -1);
+                } else if (strncmp(p + 1, "key\"", 4) == 0) {
+                    char v[8];
+                    if (json_get_string_at(p, "key", v, sizeof(v))) ch->key_pc = (int8_t)note_name_semitone(v);
                 }
             }
             p++;
@@ -2995,6 +3026,8 @@ static void parse_section_chords(const char *arr, section_t *sec) {
                 chord_t *ch = &sec->chords[bar];
                 memset(ch, 0, sizeof(*ch));
                 ch->set = 1;
+                ch->degree = -1;
+                ch->key_pc = -1;
                 copy_trunc(ch->quality, sizeof(ch->quality), "maj");
             }
             p++;
@@ -4124,6 +4157,9 @@ static void handle_loop_or_stop(engine_t *e, uint32_t *target) {
                 *target, e->live_slot.end_tick, e->event_cursor, e->live_slot.event_count,
                 e->loop, staging_have_new && staged->event_count > 0);
         if (e->loop) {
+            /* A real wrap past the loop end, as opposed to the events simply
+             * running out in the silent tail before it. */
+            int real_wrap = e->live_slot.end_tick > 0 && *target > e->live_slot.end_tick;
             if (e->live_slot.end_tick > 0) {
                 *target = *target % e->live_slot.end_tick;
             } else {
@@ -4134,9 +4170,20 @@ static void handle_loop_or_stop(engine_t *e, uint32_t *target) {
             e->event_cursor = 0;
             /* A full loop wrap back to bar 1. */
             e->wrap_counter++;
-            while (e->event_cursor < e->live_slot.event_count &&
-                   e->live_slot.events[e->event_cursor].tick < *target) {
-                e->event_cursor++;
+            if (real_wrap) {
+                /* Play the loop's own start up to where this block's overshoot
+                 * lands. This used to just step the cursor past events before
+                 * *target without playing them, so whenever a block overshot
+                 * the loop end by a tick or more, the downbeat (tick 0) was
+                 * dropped -- and with it the follow-note bass it triggers.
+                 * Found live: a two-bar Jam groove intermittently lost its
+                 * first bass note. Same fix as the AUTOSWAP branch below. */
+                drain_events_up_to(e, *target);
+            } else {
+                while (e->event_cursor < e->live_slot.event_count &&
+                       e->live_slot.events[e->event_cursor].tick < *target) {
+                    e->event_cursor++;
+                }
             }
         } else if (staging_have_new && staged->event_count > 0) {
             /* Jam-mode: a non-looping clip (fill) reached its end and the
@@ -4287,13 +4334,20 @@ static void update_bar_counter(engine_t *e) {
     if (bar != e->last_bar || wrapped) {
         e->bar_counter++;
         e->last_bar = bar;
-        /* Emit the chord for non-follow instruments at each bar boundary. */
-        emit_instruments_at_tick(e, e->playhead_tick);
-        /* Promote a pending Jam chord-pad selection to live BEFORE firing
-         * the once-per-bar fallback below, so a chord that just became
-         * live this boundary is the one that fires. */
-        apply_pending_jam_chord(e);
-        emit_jam_instruments_at_tick(e, e->playhead_tick);
+        /* Not when playback just stopped at the end of a non-looping clip
+         * or song: the boundary it stopped on is the end, not a new bar, and
+         * handle_loop_or_stop has already sent every note-off -- firing the
+         * next bar's chord here left it sounding after the stop until the
+         * UI's own "stop" arrived. Found live, in Jam and Perform. */
+        if (e->running) {
+            /* Emit the chord for non-follow instruments at each bar boundary. */
+            emit_instruments_at_tick(e, e->playhead_tick);
+            /* Promote a pending Jam chord-pad selection to live BEFORE firing
+             * the once-per-bar fallback below, so a chord that just became
+             * live this boundary is the one that fires. */
+            apply_pending_jam_chord(e);
+            emit_jam_instruments_at_tick(e, e->playhead_tick);
+        }
     }
 }
 
@@ -4947,19 +5001,22 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
             emit_jam_instruments_all_off(e);
             return;
         }
-        /* "<root>:<quality>:<octaveShift>", e.g. "D:maj:0" or "C:maj:1" (the
-         * 8th/"octave root" chord pad). Queues the chord for promotion to
+        /* "<root>:<quality>:<octaveShift>[:<degree>:<key>]", e.g. "D:maj:0"
+         * or "C:maj:1:7:C" (the 8th/"octave root" chord pad in C). degree/key
+         * feed the Auto inversion (chord_voiced_notes). Queues the chord for promotion to
          * live at the next bar boundary -- see apply_pending_jam_chord,
          * called from update_bar_counter and from "play" (below). Does NOT
          * touch jam_chord_live directly. */
-        char root[8] = {0}, quality[8] = {0};
-        int shift = 0;
-        if (sscanf(val, "%7[^:]:%7[^:]:%d", root, quality, &shift) >= 2) {
+        char root[8] = {0}, quality[8] = {0}, keyname[8] = {0};
+        int shift = 0, degree = -1;
+        if (sscanf(val, "%7[^:]:%7[^:]:%d:%d:%7s", root, quality, &shift, &degree, keyname) >= 2) {
             copy_trunc(e->jam_chord_pending.root, sizeof(e->jam_chord_pending.root), root);
             copy_trunc(e->jam_chord_pending.quality, sizeof(e->jam_chord_pending.quality), quality);
             e->jam_chord_pending.bass[0] = '\0';
             e->jam_chord_pending.set = 1;
-            e->jam_chord_pending_octave_shift = (int8_t)shift;
+            e->jam_chord_pending.octave_shift = (int8_t)shift;
+            e->jam_chord_pending.degree = (int8_t)((degree >= 0 && degree <= 7) ? degree : -1);
+            e->jam_chord_pending.key_pc = (int8_t)(keyname[0] ? note_name_semitone(keyname) : -1);
             e->jam_chord_pending_set = 1;
         }
         return;
