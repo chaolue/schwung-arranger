@@ -132,7 +132,10 @@
             "bar, white = now.",
             "Stopped: green =",
             "plays on Play; tap",
-            "again to clear."
+            "again to clear.",
+            "",
+            "Hold a chord pad",
+            "to see its name."
           ]
         },
         {

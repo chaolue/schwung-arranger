@@ -185,7 +185,7 @@ Instrument track.
 
 | Control | Action |
 |---------|--------|
-| Jog wheel (browse mode) | Move between Enabled, Octave, Follow Note, Voicing, Note Gap |
+| Jog wheel (browse mode) | Move between Enabled, Octave, Follow Note, Voicing, Inversion, Note Gap |
 | Jog wheel (edit mode) | Adjust the selected value |
 | Jog click | Toggle edit / browse mode; on Enabled it toggles On/Off directly |
 | Back (edit mode) | Exit edit mode |
@@ -197,7 +197,10 @@ Instrument track.
 | Octave | Octave shift applied to the chord/note (-1 to 8) |
 | Follow Note | When set (1–127), the instrument fires alongside that drum note instead of on the chord/bar grid (e.g. a bass that follows the kick). 0 = off, follows the bar grid instead |
 | Voicing | **Chord** plays the full chord; **Bass** plays only the chord's root/bass note |
+| Inversion | Which chord note is at the bottom (Chord voicing only): **Root**, **1st**, **2nd**, **3rd**, or **Auto** (see below) |
 | Note Gap | How far before the next note-on this instrument's current note is cut short (0 to 1 beat), so notes don't run into each other |
+
+**Auto** inversion (the default for new instruments) voice-leads by the chord's place in the song key, so chords move smoothly instead of jumping up and down the keyboard: I, ii and vii° in root position; iii and IV in 2nd inversion; V and vi in 1st inversion. Each chord is also placed so its lowest note is the one nearest the key's root. In C that gives I `C E G`, ii `D F A`, iii `B E G`, IV `C F A`, V `B D G`, vi `C E A`, vii° `B D F`. Chords whose root isn't in the key play in root position. It follows the song key, including after a key change. Songs made before Auto existed keep their saved inversion; pick Auto to switch.
 
 Output routing and MIDI channel for each instrument are set globally in
 **Options**, not here — see Options below.
@@ -417,6 +420,7 @@ Press Track 3 or Track 4 to turn on Inst 1 or Inst 2 and play chords over the gr
 | Hold a pad (past the delay) | Preview the clip as a one-shot until you release it (no overlay; the clip name shows in "Now:") |
 | Tap a chord pad | Queue that chord to start when playback starts (pad turns green) |
 | Tap the green chord pad again | Clear the queued chord |
+| Hold a chord pad | Show the chord's name and degree in the overlay (doesn't select it) |
 | Jog wheel | Adjust the BPM in realtime |
 | Shift + Jog wheel | Change the key of the chord pads |
 | Track 1 / 3 / 4 | Turn Drums / Inst 1 / Inst 2 on or off |
@@ -433,6 +437,7 @@ Press Track 3 or Track 4 to turn on Inst 1 or Inst 2 and play chords over the gr
 | Tap a fill pad | Queue that fill to play at the next bar-end, then return to the groove |
 | Press the return groove's pad during a fill | Restart that groove from its beginning when the fill ends (pad turns red) |
 | Tap a chord pad | Queue that chord for the start of the next bar (pad turns red, then white once playing) |
+| Hold a chord pad | Show the chord's name and degree in the overlay (doesn't select it) |
 | Up / Down | Scroll the groove pads up / down |
 | Left / Right | Scroll the fill pads up / down |
 | Jog wheel | Change the BPM in realtime |
@@ -450,7 +455,7 @@ Step LEDs show the current clip's bar layout, flashing white-to-black on the cur
 
 #### Jam Chord Pads
 
-Turn on Inst 1 or Inst 2 with Track 3 or Track 4 to show the chord pads. The two left columns hold the 8 chords of the current key, starting at the bottom-left pad and going up each column: I, ii, iii, IV (column 1), then V, vi, vii° and the root chord an octave up (column 2). Shift + Jog wheel changes the key.
+Turn on Inst 1 or Inst 2 with Track 3 or Track 4 to show the chord pads. The two left columns hold the 8 chords of the current key, starting at the bottom-left pad and going up each column: I, ii, iii, IV (column 1), then V, vi, vii° and the root chord an octave up (column 2). Shift + Jog wheel changes the key. Changing the key moves the current chord into the new key once you release Shift, taking effect at the start of the next bar (or when you press Play, if stopped); its pad shows red until then.
 
 Both instruments play the same chosen chord.
 
@@ -478,7 +483,7 @@ Hold Shift and press Track 3 or Track 4 to open that instrument's settings. Chan
 | Octave | Octave the chord is played in |
 | Follow Note | The drum note that triggers each chord hit. A hit just before the barline plays the next bar's chord. **Off** plays the chord once at the start of every bar |
 | Voicing | **Bass** plays the chord's root note; **Chord** plays the full chord |
-| Inversion | Which chord note is at the bottom |
+| Inversion | Which chord note is at the bottom (Chord voicing only). **Auto**, the default, voice-leads by the chord's place in the key, the same as Song Builder's Auto |
 | Note Gap | How early each note is cut before the next one |
 
 Inst 1 starts on Follow Note = kick with Bass voicing; Inst 2 starts on Follow Note = Off with Chord voicing. Both use the output and MIDI channel set in **Options**.
