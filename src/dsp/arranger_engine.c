@@ -4,7 +4,8 @@
  * Responsibilities:
  *  - Parse Standard MIDI File Type 1 from the user's MIDI library.
  *  - Build a merged, boundary-guarded event timeline per Arranger Song.
- *  - Drive playback from incoming MIDI clock, synced to Move's transport.
+ *  - Drive playback from the audio clock at the song's tempo; Move's own
+ *    transport Start/Stop (MIDI 0xFA/0xFC) start and stop it too.
  *  - Emit note-on/note-off events to the host for routing (external / Move /
  *    Schwung chain) via the v2 generator plugin API.
  *
@@ -195,6 +196,7 @@ typedef struct {
     uint32_t end_tick;
     int      event_count;
     smf_event_t *events;
+    uint32_t last_use;       /* e->clip_use_serial of the last build that resolved it */
 } clip_t;
 
 /* One entry in the lazy whole-library clip index: a clip leaf name mapped to
@@ -558,6 +560,9 @@ typedef struct engine {
      * set_param. */
     clip_t clips[MAX_CLIPS_PER_FOLDER];
     int clip_count;
+    /* Bumped once per build (process_timeline_channel); a clip stamped with
+     * the current value is in use by that build and cannot be evicted. */
+    uint32_t clip_use_serial;
 
     /* Playback */
     int running;
@@ -1214,18 +1219,54 @@ static clip_t* find_clip(engine_t *e, const char *path) {
     return NULL;
 }
 
+/* Mark a cached clip as used by the build in progress, and return its index. */
+static int clip_touch(engine_t *e, int i) {
+    e->clips[i].last_use = e->clip_use_serial;
+    return i;
+}
+
+#define LOAD_CLIP_CACHE_FULL (-100)
+
+/* Parse `path` into the cache and return its index, or a negative value.
+ *
+ * The cache used to only grow: 512 slots for the life of the instance, and
+ * once they were full every clip the session had not met before was skipped
+ * in silence (resolve_clip_index returned -1 without setting an error). A
+ * full cache now reuses its least recently used slot instead -- but never one
+ * the current build has resolved (last_use == clip_use_serial), since this
+ * build's section clips hold those indices until process_timeline_channel
+ * returns. Nothing else keeps an index: the audio thread never reads
+ * e->clips[] or clip_index, and each build resolves every clip afresh.
+ *
+ * The new clip is parsed into a temporary first, so a file that fails to
+ * parse never costs the cache the clip it would have replaced. */
 static int load_clip(engine_t *e, const char *path) {
-    if (e->clip_count >= MAX_CLIPS_PER_FOLDER) return -1;
-    if (find_clip(e, path)) return 0;
-    clip_t *clip = &e->clips[e->clip_count];
-    int rc = parse_clip(clip, path);
-    if (rc != 0) {
-        arr_log("load_clip failed: %s", path);
-        return rc;
+    int slot = e->clip_count;
+    if (slot >= MAX_CLIPS_PER_FOLDER) {
+        slot = -1;
+        for (int i = 0; i < e->clip_count; i++) {
+            if (e->clips[i].last_use == e->clip_use_serial) continue;
+            if (slot < 0 || e->clips[i].last_use < e->clips[slot].last_use) slot = i;
+        }
+        if (slot < 0) return LOAD_CLIP_CACHE_FULL;
     }
-    arr_log("load_clip: %s events=%d end_tick=%u", path, clip->event_count, clip->end_tick);
-    e->clip_count++;
-    return 0;
+    clip_t fresh;
+    memset(&fresh, 0, sizeof(fresh));
+    int rc = parse_clip(&fresh, path);
+    if (rc != 0) {
+        free_clip(&fresh);
+        arr_log("load_clip failed: %s", path);
+        return rc < 0 ? rc : -1;
+    }
+    if (slot < e->clip_count) {
+        arr_log("load_clip: evicting %s", e->clips[slot].path);
+        free_clip(&e->clips[slot]);
+    } else {
+        e->clip_count++;
+    }
+    e->clips[slot] = fresh;
+    arr_log("load_clip: %s events=%d end_tick=%u", path, fresh.event_count, fresh.end_tick);
+    return clip_touch(e, slot);
 }
 
 /* Forward declarations for helpers defined later. */
@@ -1290,9 +1331,9 @@ static int resolve_clip_index(engine_t *e, const char *source_path,
     char full_path[MAX_PATH_LEN];
 
     /* Fast path: if the exact clip (library_root/source_folder/source_path) is
-     * already loaded in the clip cache (which persists across builds, since
-     * the worker never clears e->clips[] between requests), return it
-     * immediately. This avoids repeated
+     * already loaded in the clip cache (which persists across builds; a clip
+     * leaves it only when a full cache reuses its slot -- see load_clip),
+     * return it immediately. This avoids repeated
      * access() filesystem checks for clips referenced many times in a song
      * (e.g. a count-in hihat used in dozens of sections) and for clips already
      * loaded by an earlier song in a setlist. Matching on the FULL expected
@@ -1306,7 +1347,7 @@ static int resolve_clip_index(engine_t *e, const char *source_path,
                         e->library_root, source_folder, source_path);
         if (n > 0 && (size_t)n < sizeof(expected)) {
             for (int i = 0; i < e->clip_count; i++) {
-                if (strcmp(e->clips[i].path, expected) == 0) return i;
+                if (strcmp(e->clips[i].path, expected) == 0) return clip_touch(e, i);
             }
         }
     }
@@ -1323,7 +1364,7 @@ static int resolve_clip_index(engine_t *e, const char *source_path,
         const char *hit = clip_lookup_find(e, leaf);
         if (hit) {
             for (int i = 0; i < e->clip_count; i++) {
-                if (strcmp(e->clips[i].path, hit) == 0) return i;
+                if (strcmp(e->clips[i].path, hit) == 0) return clip_touch(e, i);
             }
         }
     }
@@ -1429,16 +1470,21 @@ static int resolve_clip_index(engine_t *e, const char *source_path,
 found:
     arr_log("resolve_clip_index: source='%s' resolved='%s'", source_path, full_path);
     clip_t *existing = find_clip(e, full_path);
-    if (existing) return (int)(existing - e->clips);
-    if (e->clip_count >= MAX_CLIPS_PER_FOLDER) return -1;
-    if (load_clip(e, full_path) != 0) {
+    if (existing) return clip_touch(e, (int)(existing - e->clips));
+    int idx = load_clip(e, full_path);
+    if (idx < 0) {
         char err[1024];
-        snprintf(err, sizeof(err), "clip load failed: %s", full_path);
+        if (idx == LOAD_CLIP_CACHE_FULL) {
+            snprintf(err, sizeof(err), "clip cache full: this song uses more than %d clip files (%s)",
+                     MAX_CLIPS_PER_FOLDER, full_path);
+        } else {
+            snprintf(err, sizeof(err), "clip load failed: %s", full_path);
+        }
         engine_set_error(e, err);
         arr_log("resolve_clip_index load failed: %.1023s", err);
         return -1;
     }
-    return e->clip_count - 1;
+    return idx;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1895,6 +1941,107 @@ static void queue_ack_all(engine_t *e) {
 /*  resolve to the occurrence under the current object.                         */
 /* -------------------------------------------------------------------------- */
 
+static int json_hex4(const char *s, uint32_t *out) {
+    uint32_t v = 0;
+    for (int i = 0; i < 4; i++) {   /* stops at the first non-hex byte, so never reads past a NUL */
+        char c = s[i];
+        v <<= 4;
+        if (c >= '0' && c <= '9') v |= (uint32_t)(c - '0');
+        else if (c >= 'a' && c <= 'f') v |= (uint32_t)(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') v |= (uint32_t)(c - 'A' + 10);
+        else return 0;
+    }
+    *out = v;
+    return 1;
+}
+
+/* Write `cp` as UTF-8 if it fits whole in `room` bytes; returns bytes written. */
+static int json_put_utf8(char *out, int room, uint32_t cp) {
+    unsigned char b[4];
+    int n;
+    if (cp < 0x80) { b[0] = (unsigned char)cp; n = 1; }
+    else if (cp < 0x800) { b[0] = (unsigned char)(0xC0 | (cp >> 6)); n = 2; }
+    else if (cp < 0x10000) { b[0] = (unsigned char)(0xE0 | (cp >> 12)); n = 3; }
+    else { b[0] = (unsigned char)(0xF0 | (cp >> 18)); n = 4; }
+    for (int i = 1; i < n; i++) b[i] = (unsigned char)(0x80 | ((cp >> (6 * (n - 1 - i))) & 0x3F));
+    if (n > room) return 0;
+    memcpy(out, b, (size_t)n);
+    return n;
+}
+
+/* Decode the JSON string whose opening quote is at `q` into `out`.
+ *
+ * This used to copy the raw bytes up to the first '"' it met, escaped or not.
+ * Every string the UI sends went through JSON.stringify, so a name holding a
+ * quote arrived as `Zeta \"X\"` and was read as `Zeta \`, and a clip file
+ * named `Beat \ one.mid` arrived as `Beat \\ one.mid` -- a path that does not
+ * exist, so the clip never resolved. Every escape is decoded now (\" \\ \/
+ * \b \f \n \r \t, and \uXXXX with surrogate pairs, as UTF-8), and a value too
+ * long for `out` is cut at a character boundary, never inside a UTF-8
+ * sequence. \u0000 is dropped: it cannot live in a C string.
+ *
+ * Returns the decoded length in bytes, so "" still returns 0 and reads as
+ * absent to the callers, as it always has. An unterminated string returns 0
+ * and leaves `out` untouched, also as before. */
+static int json_decode_string(const char *q, char *out, int out_len) {
+    const char *end = q + 1;
+    while (*end && *end != '"') {
+        if (*end == '\\' && end[1]) end++;
+        end++;
+    }
+    if (*end != '"') return 0;
+
+    const char *s = q + 1;
+    int o = 0, room = out_len - 1;
+    while (s < end) {
+        if (*s != '\\') {
+            /* A raw byte: take its whole UTF-8 sequence or stop. */
+            unsigned char c = (unsigned char)*s;
+            int k = 1, seq = c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : c >= 0xC0 ? 2 : 1;
+            while (k < seq && s + k < end && ((unsigned char)s[k] & 0xC0) == 0x80) k++;
+            if (o + k > room) break;
+            memcpy(out + o, s, (size_t)k);
+            o += k;
+            s += k;
+            continue;
+        }
+        uint32_t cp;
+        s++;
+        switch (*s) {
+        case 'b': cp = '\b'; s++; break;
+        case 'f': cp = '\f'; s++; break;
+        case 'n': cp = '\n'; s++; break;
+        case 'r': cp = '\r'; s++; break;
+        case 't': cp = '\t'; s++; break;
+        case 'u':
+            if (!json_hex4(s + 1, &cp)) { cp = 'u'; s++; break; }
+            s += 5;
+            if (cp >= 0xD800 && cp <= 0xDBFF) {
+                uint32_t lo;
+                if (s[0] == '\\' && s[1] == 'u' && json_hex4(s + 2, &lo) && lo >= 0xDC00 && lo <= 0xDFFF) {
+                    cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                    s += 6;
+                } else {
+                    cp = 0xFFFD;
+                }
+            } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+                cp = 0xFFFD;
+            }
+            break;
+        default:   /* \" \\ \/ -- and anything else, taken literally */
+            cp = (unsigned char)*s;
+            s++;
+            break;
+        }
+        if (cp == 0) continue;
+        int n = json_put_utf8(out + o, room - o, cp);
+        if (n == 0) break;
+        o += n;
+    }
+    out[o] = '\0';
+    return o;
+}
+
 static int json_get_string_at(const char *cursor, const char *key, char *out, int out_len) {
     if (!cursor || !key || !out || out_len < 1) return 0;
     char needle[64];
@@ -1906,14 +2053,7 @@ static int json_get_string_at(const char *cursor, const char *key, char *out, in
     colon++;
     while (*colon == ' ' || *colon == '\t') colon++;
     if (*colon == '"') {
-        colon++;
-        const char *end = strchr(colon, '"');
-        if (!end) return 0;
-        int len = (int)(end - colon);
-        if (len >= out_len) len = out_len - 1;
-        memcpy(out, colon, len);
-        out[len] = '\0';
-        return len;
+        return json_decode_string(colon, out, out_len);
     } else if (*colon == '[' || *colon == '{' || *colon == 't' || *colon == 'f' || *colon == 'n' || (*colon >= '0' && *colon <= '9') || *colon == '-') {
         /* capture unquoted/number/bool/null as string */
         const char *end = colon + 1;
@@ -3945,6 +4085,9 @@ static void process_timeline_channel(engine_t *e, timeline_channel_t *ch, int is
     if (!read_request_json(ch, json, sizeof(json))) return; /* retry next wake */
 
     engine_clear_error(e);
+    /* A new build: clips the previous one used become evictable (load_clip),
+     * and every clip this one resolves is protected until it returns. */
+    e->clip_use_serial++;
 
     song_t scratch_song;
     memset(&scratch_song, 0, sizeof(scratch_song));
@@ -4668,7 +4811,7 @@ static void engine_clear_error(engine_t *e) {
 
 /* DSP build version stamp. Keep in sync with UI_BUILD_VERSION in ui.js so the
  * running dsp.so can be confirmed from .dsp_log on module load. */
-static const char *const DSP_BUILD_VERSION = "arranger-dsp-2026-09-28-review";
+static const char *const DSP_BUILD_VERSION = "arranger-dsp-2026-09-28-review2";
 
 static void* arr_create_instance(const char *module_dir, const char *config_json) {
     (void)module_dir;
@@ -4775,6 +4918,8 @@ static void arr_destroy_instance(void *instance) {
     free(e);
 }
 
+static void play_from_top(engine_t *e);
+
 static void arr_on_midi(void *instance, const uint8_t *msg, int len, int source) {
     engine_t *e = instance;
     if (!e || len < 1) return;
@@ -4782,11 +4927,8 @@ static void arr_on_midi(void *instance, const uint8_t *msg, int len, int source)
     uint8_t status = msg[0];
 
     if (status == 0xFA) {
-        e->playhead_tick = 0;
-        e->event_cursor = 0;
-        e->running = 1;
-        e->flash_end_tick = initial_flash_end_tick(e);
-        queue_clear(e);
+        play_from_top(e);
+        dsp_log_enqueue_worker("MIDI START");
         return;
     }
     if (status == 0xFB) {
@@ -4845,9 +4987,10 @@ static void arr_render_block(void *instance, int16_t *out_interleaved_lr, int fr
 /* Activate the most recently published primary build, if any: copies
  * primary_ch.slot[active] into e->live_slot (a bounded copy, never a pointer
  * handoff -- see copy_timeline_slot) and updates the scalars callers read
- * from live_slot's new content. Called at the top of
- * set_param("play"/"play_from_bar"), which JS only issues after confirming
- * state.primary_published_gen advanced past the generation it requested. A
+ * from live_slot's new content. Called at the top of play_from_top
+ * (set_param("play") and MIDI Start) and set_param("play_from_bar"); JS
+ * issues those only after confirming state.primary_published_gen advanced
+ * past the generation it requested. A
  * no-op if there is nothing new to activate (e.g. play_from_bar seeking
  * within an already-active song). event_cursor/playhead_tick are NOT reset
  * here -- that stays each caller's own job (matching their existing
@@ -4864,6 +5007,48 @@ static void activate_primary_if_published(engine_t *e) {
     e->ticks_per_beat = e->live_slot.ticks_per_beat;
     e->ticks_per_bar = e->live_slot.ticks_per_bar;
     copy_trunc(e->active_source, sizeof(e->active_source), e->live_slot.source);
+}
+
+/* Start playback from the top of the newest published build: set_param
+ * ("play"), and Move's own transport Start (MIDI 0xFA, which the host
+ * delivers to an overtake DSP from cable 0 whenever Move's sequencer starts).
+ * The two used to differ -- 0xFA only rewound the playhead and set running:
+ * it never activated a newly built song, so Start on a freshly loaded song
+ * played nothing at all, and after a song had ended it ran on with
+ * stopped_at_end still set (which the UI's end-of-song handling reads). The
+ * bar counters, tick remainder and pending instrument note-offs carried over
+ * too, so bar 1's chord sounded only when the stale counters happened to
+ * register a wrap. */
+static void play_from_top(engine_t *e) {
+    activate_primary_if_published(e);
+    e->playhead_tick = 0;
+    e->event_cursor = 0;
+    e->running = 1;
+    e->stopped_at_end = 0;
+    e->last_playhead_tick = 0;
+    e->tick_remainder = 0.0;
+    e->last_bar = 0;
+    e->last_bc_tick = 0;
+    for (int i = 0; i < MAX_INSTRUMENTS; i++) {
+        e->last_inst_chord_set[i] = 0;
+        e->pending_off_set[i] = 0;
+    }
+    e->flash_end_tick = initial_flash_end_tick(e);
+    queue_clear(e);
+    /* Emit the first bar's chord immediately (update_bar_counter only
+     * fires on a bar *change*, so bar 0 would otherwise be silent). */
+    emit_instruments_at_tick(e, 0);
+    /* A chord picked while stopped (or still pending from just before
+     * a stop) has no "current bar" to defer to -- promote it to live
+     * right away, so it's what plays from bar 0, not bar 1. This also
+     * covers "play" resuming a chord that was already live (e.g. left
+     * over from before a stop/replay): apply_pending_jam_chord is a
+     * no-op when nothing is pending, leaving jam_chord_live as-is. */
+    apply_pending_jam_chord(e);
+    /* Same reasoning for a Jam instrument with Follow Note "Off": bar 0
+     * needs its own once-per-bar attack too, not just bar 1 onward
+     * (update_bar_counter only fires on a bar *change*). */
+    emit_jam_instruments_at_tick(e, 0);
 }
 
 static void arr_set_param(void *instance, const char *key, const char *val) {
@@ -5214,35 +5399,7 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
         return;
     }
     if (strcmp(key, "play") == 0) {
-        activate_primary_if_published(e);
-        e->playhead_tick = 0;
-        e->event_cursor = 0;
-        e->running = 1;
-        e->stopped_at_end = 0;
-        e->last_playhead_tick = 0;
-        e->tick_remainder = 0.0;
-        e->last_bar = 0;
-        e->last_bc_tick = 0;
-        for (int i = 0; i < MAX_INSTRUMENTS; i++) {
-            e->last_inst_chord_set[i] = 0;
-            e->pending_off_set[i] = 0;
-        }
-        e->flash_end_tick = initial_flash_end_tick(e);
-        queue_clear(e);
-        /* Emit the first bar's chord immediately (update_bar_counter only
-         * fires on a bar *change*, so bar 0 would otherwise be silent). */
-        emit_instruments_at_tick(e, 0);
-        /* A chord picked while stopped (or still pending from just before
-         * a stop) has no "current bar" to defer to -- promote it to live
-         * right away, so it's what plays from bar 0, not bar 1. This also
-         * covers "play" resuming a chord that was already live (e.g. left
-         * over from before a stop/replay): apply_pending_jam_chord is a
-         * no-op when nothing is pending, leaving jam_chord_live as-is. */
-        apply_pending_jam_chord(e);
-        /* Same reasoning for a Jam instrument with Follow Note "Off": bar 0
-         * needs its own once-per-bar attack too, not just bar 1 onward
-         * (update_bar_counter only fires on a bar *change*). */
-        emit_jam_instruments_at_tick(e, 0);
+        play_from_top(e);
         dsp_log_enqueue_worker("PLAY tempo=%.1f tpb=%u ts=%d/%d bars=%u",
                      e->tempo_bpm, e->ticks_per_beat,
                      e->time_sig_num, e->time_sig_den,
@@ -5482,12 +5639,14 @@ static int fmt_timeline_info(engine_t *e, char *buf, int buf_len) {
 static int fmt_state(engine_t *e, char *buf, int buf_len) {
     /* Safely emit active_source even if it contains JSON-special chars.
      * Source paths are normally plain UTF-8 filesystem paths, but guard
-     * quotes/backslashes so the JSON stays valid. */
+     * quotes/backslashes so the JSON stays valid, and drop control
+     * characters, which JSON only allows as \u00XX (as the list keys do). */
     char escaped[sizeof(e->active_source) * 2 + 1];
     const char *src = e->active_source;
     int j = 0;
     for (int i = 0; src[i] && j < (int)sizeof(escaped) - 2; i++) {
         char c = src[i];
+        if ((unsigned char)c < 0x20) continue;
         if (c == '\\' || c == '"') {
             escaped[j++] = '\\';
         }
