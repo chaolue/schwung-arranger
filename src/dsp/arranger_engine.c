@@ -2882,27 +2882,14 @@ static int parse_song_json(engine_t *e, const char *json, song_t *song,
                 if (strncmp(key_start, "source\"", 7) == 0) {
                     char rel[MAX_PATH_LEN];
                     if (json_get_string_at(p, "source", rel, sizeof(rel))) {
+                        /* Resolved once the clip's object closes -- see '}'. */
                         copy_trunc(sc->source_path, sizeof(sc->source_path), rel);
-                        /* Resolve now using the song's source_folder; if a
-                         * per-clip source_folder appears later in the JSON, it
-                         * will re-resolve with the correct folder. */
-                        sc->clip_index = resolve_clip_index(e, rel, song->source_folder);
-                        dsp_host_log("load_song: section=%d clip=%d source=%.120s folder=%.120s idx=%d",
-                                     section_idx, clip_idx, rel, song->source_folder, sc->clip_index);
                     }
                     sc->status = 1;
                 } else if (strncmp(key_start, "source_folder\"", 14) == 0) {
                     char folder[MAX_PATH_LEN];
                     if (json_get_string_at(p, "source_folder", folder, sizeof(folder))) {
                         copy_trunc(sc->source_folder, sizeof(sc->source_folder), folder);
-                        /* A per-clip source_folder overrides the song's. The
-                         * source was parsed before this key, so re-resolve the
-                         * clip index with the correct folder. */
-                        if (sc->source_path[0]) {
-                            sc->clip_index = resolve_clip_index(e, sc->source_path, folder);
-                            dsp_host_log("load_song: re-resolve section=%d clip=%d source=%.120s folder=%.120s idx=%d",
-                                         section_idx, clip_idx, sc->source_path, folder, sc->clip_index);
-                        }
                     }
                 } else if (strncmp(key_start, "start_bar\"", 10) == 0) {
                     int v; if (json_get_int_at(p, "start_bar", &v)) sc->start_bar = (uint32_t)v;
@@ -2982,6 +2969,28 @@ static int parse_song_json(engine_t *e, const char *json, song_t *song,
             continue;
         }
         if (c == '}') {
+            /* A clip object is complete: resolve its file now, once, against
+             * its own source_folder if it has one, else the song's.
+             *
+             * This used to resolve on the "source" key and again on
+             * "source_folder" -- but the UI writes "source" first, so every
+             * clip borrowed from another folder was first looked up in the
+             * song's folder, missed, and fell through to a walk of the whole
+             * library (~90 ms each on the Move) before its real folder was
+             * even read. A leaf name that exists in several folders (e.g.
+             * "05 4th Hat.mid") was also matched to the WRONG file by that
+             * walk and parsed into the clip cache for nothing. On a 49-clip
+             * song borrowing from four folders that was ~1.3 s of a 1.6 s
+             * build. */
+            if (depth == 2 && section_idx >= 0 && clip_idx >= 0) {
+                section_clip_t *sc = &song->sections[section_idx].clips[clip_idx];
+                if (sc->source_path[0]) {
+                    const char *folder = sc->source_folder[0] ? sc->source_folder : song->source_folder;
+                    sc->clip_index = resolve_clip_index(e, sc->source_path, folder);
+                    dsp_host_log("load_song: section=%d clip=%d source=%.120s folder=%.120s idx=%d",
+                                 section_idx, clip_idx, sc->source_path, folder, sc->clip_index);
+                }
+            }
             depth--;
             p++;
             continue;
@@ -4811,7 +4820,7 @@ static void engine_clear_error(engine_t *e) {
 
 /* DSP build version stamp. Keep in sync with UI_BUILD_VERSION in ui.js so the
  * running dsp.so can be confirmed from .dsp_log on module load. */
-static const char *const DSP_BUILD_VERSION = "arranger-dsp-2026-09-28-review2";
+static const char *const DSP_BUILD_VERSION = "arranger-dsp-2026-09-29-clipres";
 
 static void* arr_create_instance(const char *module_dir, const char *config_json) {
     (void)module_dir;
