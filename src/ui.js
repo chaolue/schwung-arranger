@@ -8,7 +8,7 @@
  * confirmed from the logs (see init()/playCurrentSong()) instead of guessing
  * whether a new file actually loaded. Keep the DSP dsp_build_version in
  * arranger_engine.c in sync so both sides are verifiable. */
-const UI_BUILD_VERSION = "arranger-ui-2026-09-09g";
+const UI_BUILD_VERSION = "arranger-ui-2026-09-28-review";
 
 import {
     MidiNoteOn, MidiNoteOff, MidiCC,
@@ -238,6 +238,13 @@ let libraryCategoryTree = null;
  * cache instead of re-fetching and re-parsing every folder's clips from the
  * DSP each time. Invalidated when a scan is requested (folder_count was 0). */
 let libraryCacheValid = false;
+/* A rescan requested on resume, waiting to land before the lists reload --
+ * see onResume / pollLibraryRescan. */
+let libraryRescanPending = false;
+let libraryRescanDeadline = 0;
+let lastLibraryRescanPoll = 0;
+const LIBRARY_RESCAN_POLL_MS = 250;
+const LIBRARY_RESCAN_MAX_WAIT_MS = 20000;
 let folderPickerPath = [];
 let folderPickerSelectedIndex = 0;
 /* Stack of the selected index at each ancestor level of the Builder folder
@@ -924,36 +931,79 @@ const CLICK_LOG_PATH = "/data/UserData/UserLibrary/Arranger/.clickflash_log";
 const JAM_LOG_PATH = "/data/UserData/UserLibrary/Arranger/.jam_log";
 const LOG_STEPLED = false;
 
+/* UTF-8 bytes of a string, for os.write (log lines carry clip names). */
+function utf8Bytes(s) {
+    const out = [];
+    for (let i = 0; i < s.length; i++) {
+        let c = s.charCodeAt(i);
+        if (c >= 0xD800 && c <= 0xDBFF && i + 1 < s.length) {
+            const d = s.charCodeAt(i + 1);
+            if (d >= 0xDC00 && d <= 0xDFFF) {
+                c = 0x10000 + ((c - 0xD800) << 10) + (d - 0xDC00);
+                i++;
+            }
+        }
+        if (c < 0x80) out.push(c);
+        else if (c < 0x800) out.push(0xC0 | (c >> 6), 0x80 | (c & 63));
+        else if (c < 0x10000) out.push(0xE0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
+        else out.push(0xF0 | (c >> 18), 0x80 | ((c >> 12) & 63), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
+    }
+    return new Uint8Array(out);
+}
+
+/* Bytes believed to be in each debug log, so appendLogLine can decide when
+ * to trim without a stat per line. Seeded from os.stat on first use. */
+let logFileSizes = {};
+
+/* Append one line to a debug log, keeping roughly the newest `cap` bytes.
+ *
+ * host_append_file is not part of the host's API (no Schwung release has
+ * had it), so each logger used to fall back to reading the WHOLE log and
+ * rewriting it for every line -- up to 500 KB of file I/O per line, on the
+ * UI thread, precisely when debug logging was switched on to measure timing.
+ * This appends with O_APPEND, and only once the file has grown past twice
+ * `cap` does it rewrite it down to the newest `cap` characters. */
+function appendLogLine(path, cap, line) {
+    if (typeof host_append_file === "function") {
+        host_append_file(path, line);
+        return;
+    }
+    try {
+        if (logFileSizes[path] === undefined) {
+            const st = os.stat(path);
+            logFileSizes[path] = (st && st[1] === 0 && st[0]) ? st[0].size : 0;
+        }
+        if (logFileSizes[path] > 2 * cap) {
+            let existing = "";
+            try { existing = host_read_file(path) || ""; } catch (e) {}
+            const kept = existing.length > cap ? existing.slice(existing.length - cap) : existing;
+            host_write_file(path, kept);
+            logFileSizes[path] = kept.length;
+        }
+        const bytes = utf8Bytes(line);
+        const fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644);
+        if (fd < 0) return;
+        let written = 0;
+        while (written < bytes.length) {
+            const n = os.write(fd, bytes.buffer, written, bytes.length - written);
+            if (n <= 0) break;
+            written += n;
+        }
+        os.close(fd);
+        logFileSizes[path] += written;
+    } catch (e) {}
+}
+
 function logJam(msg) {
     if (!dspDebugEnabled) return;
     if (typeof host_write_file !== "function") return;
-    try {
-        const line = new Date().toISOString() + " " + msg + "\n";
-        if (typeof host_append_file === "function") {
-            host_append_file(JAM_LOG_PATH, line);
-            return;
-        }
-        let existing = "";
-        try { if (host_file_exists(JAM_LOG_PATH)) existing = host_read_file(JAM_LOG_PATH); } catch (e) {}
-        const trimmed = existing.length > 500000 ? existing.slice(existing.length - 500000) : existing;
-        host_write_file(JAM_LOG_PATH, trimmed + line);
-    } catch (e) {}
+    appendLogLine(JAM_LOG_PATH, 500000, new Date().toISOString() + " " + msg + "\n");
 }
 
 function logDebug(msg) {
     if (!dspDebugEnabled) return;
     if (typeof host_write_file !== "function") return;
-    try {
-        const line = new Date().toISOString() + " " + msg + "\n";
-        if (typeof host_append_file === "function") {
-            host_append_file(DEBUG_LOG_PATH, line);
-            return;
-        }
-        let existing = "";
-        try { if (host_file_exists(DEBUG_LOG_PATH)) existing = host_read_file(DEBUG_LOG_PATH); } catch (e) {}
-        const trimmed = existing.length > 20000 ? existing.slice(existing.length - 20000) : existing;
-        host_write_file(DEBUG_LOG_PATH, trimmed + line);
-    } catch (e) {}
+    appendLogLine(DEBUG_LOG_PATH, 20000, new Date().toISOString() + " " + msg + "\n");
 }
 
 const TIMING_LOG_PATH = "/data/UserData/UserLibrary/Arranger/.timing_log";
@@ -961,33 +1011,13 @@ const TIMING_LOG_PATH = "/data/UserData/UserLibrary/Arranger/.timing_log";
 function logTiming(msg) {
     if (!dspDebugEnabled) return;
     if (typeof host_write_file !== "function") return;
-    try {
-        const line = new Date().toISOString() + " " + msg + "\n";
-        if (typeof host_append_file === "function") {
-            host_append_file(TIMING_LOG_PATH, line);
-            return;
-        }
-        let existing = "";
-        try { if (host_file_exists(TIMING_LOG_PATH)) existing = host_read_file(TIMING_LOG_PATH); } catch (e) {}
-        const trimmed = existing.length > 500000 ? existing.slice(existing.length - 500000) : existing;
-        host_write_file(TIMING_LOG_PATH, trimmed + line);
-    } catch (e) {}
+    appendLogLine(TIMING_LOG_PATH, 500000, new Date().toISOString() + " " + msg + "\n");
 }
 
 function logClick(msg) {
     if (!dspDebugEnabled) return;
     if (typeof host_write_file !== "function") return;
-    try {
-        const line = new Date().toISOString() + " " + msg + "\n";
-        if (typeof host_append_file === "function") {
-            host_append_file(CLICK_LOG_PATH, line);
-            return;
-        }
-        let existing = "";
-        try { if (host_file_exists(CLICK_LOG_PATH)) existing = host_read_file(CLICK_LOG_PATH); } catch (e) {}
-        const trimmed = existing.length > 20000 ? existing.slice(existing.length - 20000) : existing;
-        host_write_file(CLICK_LOG_PATH, trimmed + line);
-    } catch (e) {}
+    appendLogLine(CLICK_LOG_PATH, 20000, new Date().toISOString() + " " + msg + "\n");
 }
 
 function listFolders(path) {
@@ -1688,17 +1718,52 @@ function setlistPath(name) {
     return SETLISTS_DIR + "/" + safeFileName(name) + ".json";
 }
 
+/* Read one of the DSP's paged list answers ("songs_json", "folders_json",
+ * "clip_leaves_json"): {"count":N,"start":S,"items":[...]}, whole items only.
+ * One read normally returns the whole list -- the per-index keys this
+ * replaces cost one synchronous round trip (~2.9 ms) per name, so 2N+1 for
+ * the Song Bank on every open. Pages on from wherever an answer stopped.
+ * Returns null if the DSP gave no usable answer (the caller falls back to the
+ * per-index keys), else { count, items } with items.length <= count -- short
+ * only if a page made no progress, so the caller can read the rest per index. */
+function readDspList(key) {
+    const items = [];
+    let count = -1;
+    for (let page = 0; page < 64; page++) {
+        const raw = host_module_get_param(page === 0 ? key : key + "_" + items.length);
+        if (!raw) break;
+        let p;
+        try { p = JSON.parse(raw); } catch (e) { break; }
+        if (!p || !Array.isArray(p.items) || typeof p.count !== "number") break;
+        if (count < 0) count = p.count;
+        if (p.count !== count) return null;   /* rescanned between pages */
+        for (const it of p.items) items.push(it);
+        if (items.length >= count || p.items.length === 0) break;
+    }
+    if (count < 0) return null;
+    return { count, items };
+}
+
 function listSongFiles() {
     const out = [];
     if (typeof host_module_get_param !== "function") return out;
     let count = 0;
-    try {
-        const cnt = host_module_get_param("song_count");
-        if (cnt) count = parseInt(cnt, 10);
-    } catch (e) {}
+    let listedItems = [];
+    const listed = readDspList("songs_json");
+    if (listed) {
+        count = listed.count;
+        listedItems = listed.items;
+    } else {
+        try {
+            const cnt = host_module_get_param("song_count");
+            if (cnt) count = parseInt(cnt, 10);
+        } catch (e) {}
+    }
     for (let i = 0; i < count; i++) {
-        const name = host_module_get_param("song_name_" + i);
-        const path = host_module_get_param("song_path_" + i);
+        /* From the list answer where it reached, else by index. */
+        const s = i < listedItems.length ? listedItems[i] : null;
+        const name = s ? s.name : host_module_get_param("song_name_" + i);
+        const path = s ? s.path : host_module_get_param("song_path_" + i);
         if (name && path) out.push({ name, path });
     }
     return out;
@@ -1785,11 +1850,23 @@ function saveCurrentSong() {
     /* Invalidate the DSP's cached song scan so a newly saved song appears in
      * the Song Bank list. Without this, listSongFiles() returns the stale
      * cached scan and a brand-new song is missing until the module reloads. */
-    if (typeof host_module_set_param === "function") {
-        host_module_set_param("scan_library", "1");
-    }
+    requestSongRescan();
     reloadSongBankAndPreserveSelection();
     needsRedraw = true;
+}
+
+/* Ask the DSP to rescan the Song Bank folder only (a song was saved,
+ * duplicated or deleted). "scan_library" also re-walked the whole MIDI
+ * library and re-read every clip, on the worker that builds songs, so a Play
+ * right after a save waited behind it. An engine too old to know
+ * "scan_songs" ignores it -- and the Song Bank would then never update -- so
+ * fall back to the full rescan unless it answers "scan_pending" (added
+ * alongside). */
+function requestSongRescan() {
+    if (typeof host_module_set_param !== "function") return;
+    const knowsScanSongs = typeof host_module_get_param === "function" &&
+        host_module_get_param("scan_pending") !== null;
+    host_module_set_param(knowsScanSongs ? "scan_songs" : "scan_library", "1");
 }
 
 function loadSongFile(path) {
@@ -1875,6 +1952,45 @@ function loadSettings() {
     if (selectedOutputIndex < 0) selectedOutputIndex = 0;
 }
 
+/* Schwung Manager writes this module's settings to CONFIG_PATH. Re-read it
+ * about once a second so a change made in the web UI applies without
+ * reloading the module (docs/MODULES.md, "Reading values at runtime") --
+ * before this, a setting changed there waited for the next module load.
+ * Compared as raw text, so an unchanged file costs one small read. A file
+ * that does not parse (caught mid-write) is left for the next poll rather
+ * than applied, which would fall back to defaults for a second. */
+const CONFIG_POLL_MS = 1000;
+let lastConfigPoll = 0;
+let lastConfigRaw = null;
+
+function readConfigRaw() {
+    try {
+        if (typeof host_file_exists !== "function" || !host_file_exists(CONFIG_PATH)) return null;
+        return host_read_file(CONFIG_PATH);
+    } catch (e) {
+        return null;
+    }
+}
+
+function pollModuleConfig() {
+    const now = Date.now();
+    if (now - lastConfigPoll < CONFIG_POLL_MS) return;
+    lastConfigPoll = now;
+    const raw = readConfigRaw();
+    if (raw === null || raw === lastConfigRaw) return;
+    try {
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== "object") return;
+    } catch (e) {
+        return;
+    }
+    lastConfigRaw = raw;
+    loadSettings();
+    applyOutputSettingsToDsp();
+    needsRedraw = true;
+    logDebug("config.json changed; settings reloaded");
+}
+
 function saveOutputSettings() {
     const values = {
         output: outputTarget,
@@ -1904,6 +2020,8 @@ function saveOutputSettings() {
     } catch (e) {
         logDebug("saveOutputSettings: writeJson(CONFIG_PATH) failed " + e);
     }
+    /* Our own write is not a change to pick up (see pollModuleConfig). */
+    lastConfigRaw = readConfigRaw();
 }
 
 function currentOutputLabel() {
@@ -2023,6 +2141,7 @@ function deleteLogFiles() {
             }
         } catch (e) {}
     }
+    logFileSizes = {};   /* appendLogLine re-reads each size on next use */
 }
 
 function saveSetlist(setlist) {
@@ -2540,6 +2659,12 @@ function stopPreview() {
  * sent from JS — all audio-critical MIDI output lives in the C engine. */
 function drainOutputEvents() {
     if (typeof host_module_get_param !== "function") return;
+    /* With emit_directly on -- which pushOutputRoutingToDsp always sets --
+     * the DSP never queues an event (queue_push is only reached with it
+     * off), so "events" can only ever answer "[]". Each read is a
+     * synchronous round trip of one SPI frame (~2.9 ms), and this ran twice
+     * per tick (here and from updateDspState). */
+    if (dspDirectEmit) return;
     const raw = host_module_get_param("events");
     if (!raw || raw === "[]") return;
     let events = [];
@@ -2566,11 +2691,46 @@ function drainOutputEvents() {
     }
 }
 
+/* Where updateDspState reads each DSP value from on this tick.
+ *
+ * Normally that is ONE read: get_param("ui_poll") answers timeline_info,
+ * state, transport, error and swap_guard_suppressed together. Each
+ * host_module_get_param is a synchronous round trip through the host's param
+ * channel, serviced once per SPI frame (~2.9 ms), and this used to make five
+ * of them every tick (six in Jam, plus two "events" reads) -- roughly 15-20
+ * ms blocked per tick. The host hands pad and button input to the module only
+ * between ticks, so that was added straight onto every press.
+ *
+ * If ui_poll gives no answer (a dsp.so older than this ui.js, or a read that
+ * failed), each value falls back to its own read, exactly as before. A poll
+ * value is already parsed; a per-key value is still a string (dspObject
+ * accepts either). */
+function readDspPoll() {
+    const raw = host_module_get_param("ui_poll");
+    if (raw) {
+        try { return { poll: JSON.parse(raw) }; } catch (e) {}
+    }
+    return { poll: null };
+}
+
+function dspPollValue(src, key) {
+    if (src.poll) {
+        const v = src.poll[key];
+        return v === undefined ? null : v;
+    }
+    return host_module_get_param(key);
+}
+
+function dspObject(v) {
+    return (typeof v === "string") ? JSON.parse(v) : v;
+}
+
 function updateDspState() {
     if (typeof host_module_get_param !== "function") return;
+    let src = readDspPoll();
     try {
-        const info = host_module_get_param("timeline_info");
-        if (info) dspTimelineInfo = JSON.parse(info);
+        const info = dspPollValue(src, "timeline_info");
+        if (info) dspTimelineInfo = dspObject(info);
     } catch (e) { dspTimelineInfo = null; }
     /* Declared outside the try below (not `const st = ...` inside it) so the
      * catch block can safely reference it in its error log. `const` inside a
@@ -2581,10 +2741,14 @@ function updateDspState() {
      * device: a real TypeError below (see next comment) was masked by this
      * scoping bug, surfacing only as "ReferenceError: 'st' is not defined". */
     let st;
+    /* Set when a build-confirmation callback below runs: it writes to the
+     * DSP (play, swap, ...), and the values after it -- transport onwards --
+     * were always read after those writes. A fresh poll keeps that. */
+    let confirmedBuild = false;
     try {
-        st = host_module_get_param("state");
+        st = dspPollValue(src, "state");
         if (st) {
-            lastDspState = JSON.parse(st);
+            lastDspState = dspObject(st);
             /* Log only when the DSP-reported active source changes, so the
              * log isn't flooded every tick. */
             if (jamPlaying && lastDspState.active_source !== jamActiveSource) {
@@ -2606,23 +2770,26 @@ function updateDspState() {
             if (pendingPrimaryConfirm && primaryGen !== pendingPrimaryConfirm.gen) {
                 const cb = pendingPrimaryConfirm.onReady;
                 pendingPrimaryConfirm = null;
+                confirmedBuild = true;
                 cb();
             }
             if (pendingStagingConfirm && stagingGen !== pendingStagingConfirm.gen) {
                 const cb = pendingStagingConfirm.onReady;
                 pendingStagingConfirm = null;
+                confirmedBuild = true;
                 cb();
             }
         }
     } catch (e) {
-        if (jamPlaying) logJam("STATE parse error=" + e + " raw=" + String(st));
+        if (jamPlaying) logJam("STATE parse error=" + e + " raw=" + (typeof st === "string" ? st : JSON.stringify(st)));
         lastDspState = null;
     }
+    if (confirmedBuild && src.poll) src = readDspPoll();
     let tr;
     try {
-        tr = host_module_get_param("transport");
+        tr = dspPollValue(src, "transport");
         if (tr) {
-            lastDspTransport = JSON.parse(tr);
+            lastDspTransport = dspObject(tr);
             /* Mirror the DSP's own jam_chord_pending -> jam_chord_live
              * promotion timing (apply_pending_jam_chord, called from
              * update_bar_counter) so the chord pads' pending/live LED
@@ -2659,11 +2826,11 @@ function updateDspState() {
             }
         }
     } catch (e) {
-        logDebug("updateDspState transport parse error=" + e + " raw=" + String(tr));
+        logDebug("updateDspState transport parse error=" + e + " raw=" + (typeof tr === "string" ? tr : JSON.stringify(tr)));
         lastDspTransport = null;
     }
     try {
-        const err = host_module_get_param("error");
+        const err = dspPollValue(src, "error");
         if (err && err !== lastLoggedDspError) {
             logDebug("dsp_error=" + err);
             lastLoggedDspError = err;
@@ -2674,7 +2841,7 @@ function updateDspState() {
      * jamSwapStaged). */
     if (jamPlaying) {
         try {
-            const suppressed = host_module_get_param("swap_guard_suppressed");
+            const suppressed = dspPollValue(src, "swap_guard_suppressed");
             const n = suppressed ? parseInt(suppressed, 10) : 0;
             if (n !== lastSwapGuardSuppressed) {
                 lastSwapGuardSuppressed = n;
@@ -3010,7 +3177,7 @@ function flushLedQueue() {
         const msg = ledQueue.shift();
         if (msg.length === 4) {
             /* msg = [0x09, MidiNoteOn, note, color] */
-            if (perfClickPlaying && (msg[2] >= MovePad1 && msg[2] < MovePad1 + NUM_PADS)) {
+            if (dspDebugEnabled && perfClickPlaying && (msg[2] >= MovePad1 && msg[2] < MovePad1 + NUM_PADS)) {
                 logDebug("LEDSEND pad=" + (msg[2] - MovePad1) + " color=" + msg[3] +
                     " bar=" + (lastDspTransport ? lastDspTransport.bar : "?") +
                     " beat=" + (lastDspTransport ? lastDspTransport.beat : "?") +
@@ -6415,10 +6582,9 @@ function drawPerformance() {
     }
     /* Log only on change, not every tick (drawPerformance runs every tick
      * while this view is shown). Unconditional logging here was firing ~25x/
-     * sec at idle -- logDebug's fallback path (host_append_file is not part
-     * of the host's filesystem API, so this is always the active path: see
-     * logDebug's own definition) reads the WHOLE log file, truncates to the
-     * last 20000 characters, and rewrites it on every single call. At that
+     * sec at idle -- and logDebug then read the WHOLE log file, truncated it
+     * to the last 20000 characters and rewrote it on every single call (it
+     * appends now, see appendLogLine, but the window is the same size). At that
      * rate the 20KB window was pure idle PERFDISP spam within a few seconds,
      * permanently evicting whatever happened moments earlier -- which is
      * exactly why every attempt to read this log after a reported bug (a
@@ -7309,9 +7475,7 @@ function reloadSongBankAndPreserveSelection() {
  * polling (see the pendingSongBankSync tick handler) until `path`
  * appears/disappears from the DSP's cached song list. */
 function requestSongBankSync(path, shouldExist, selectOnArrive) {
-    if (typeof host_module_set_param === "function") {
-        host_module_set_param("scan_library", "1");
-    }
+    requestSongRescan();
     pendingSongBankSync = { path, shouldExist, selectOnArrive: !!selectOnArrive };
     reloadSongBankAndPreserveSelection();
     needsRedraw = true;
@@ -10400,16 +10564,27 @@ function loadLibraryFolders() {
     libraryFolderCategories = [];
     libraryCategoryTree = makeCategoryTree();
     if (typeof host_module_get_param !== "function") return;
+    /* One "folders_json" read in place of folder_count + folder_name_N +
+     * folder_category_N (2N+1 round trips) -- see readDspList. */
     let count = 0;
-    try {
-        const cnt = host_module_get_param("folder_count");
-        if (cnt) count = parseInt(cnt, 10);
-    } catch (e) {}
+    let listedItems = [];
+    const listed = readDspList("folders_json");
+    if (listed) {
+        count = listed.count;
+        listedItems = listed.items;
+    } else {
+        try {
+            const cnt = host_module_get_param("folder_count");
+            if (cnt) count = parseInt(cnt, 10);
+        } catch (e) {}
+    }
     for (let i = 0; i < count; i++) {
-        const name = host_module_get_param("folder_name_" + i);
+        /* From the list answer where it reached, else by index. */
+        const f = i < listedItems.length ? listedItems[i] : null;
+        const name = f ? f.name : host_module_get_param("folder_name_" + i);
         if (!name) continue;
         libraryFolders.push(name);
-        const cat = host_module_get_param("folder_category_" + i) || "";
+        const cat = (f ? f.category : host_module_get_param("folder_category_" + i)) || "";
         libraryFolderCategories.push(cat);
         addFolderToTree(libraryCategoryTree, cat, i);
     }
@@ -10610,12 +10785,22 @@ function loadFolderClips(folderIndex) {
 function buildFolderClipMap() {
     folderClipMap = {};
     if (typeof host_module_get_param !== "function") return;
+    /* Every folder's clip list from the paged "clip_leaves_json" answer
+     * (usually one read; items[i] is folder i's clip paths) instead of one
+     * folder_clips_json_N round trip per folder, which this paid at every
+     * library load and every resume. A folder the answer did not reach is
+     * read on its own, as before. */
+    const listed = readDspList("clip_leaves_json");
+    const leaves = listed ? listed.items : [];
     for (let i = 0; i < libraryFolders.length; i++) {
         const folder = folderFullPath(i);
-        const clipsJson = host_module_get_param("folder_clips_json_" + i);
-        if (!clipsJson) continue;
+        let clipsJson = null;
+        if (!(i < leaves.length && Array.isArray(leaves[i]))) {
+            clipsJson = host_module_get_param("folder_clips_json_" + i);
+            if (!clipsJson) continue;
+        }
         try {
-            const raw = JSON.parse(clipsJson);
+            const raw = clipsJson ? JSON.parse(clipsJson) : leaves[i];
             for (const c of raw) {
                 const path = (typeof c === "string") ? c : (c.source || c);
                 const leaf = clipDisplayName(path);
@@ -10650,6 +10835,7 @@ globalThis.init = function() {
     }
     loadLibraryFolders();
     songFiles = listSongFiles();
+    lastConfigRaw = readConfigRaw();
     loadSettings();
     applyOutputSettingsToDsp();
     logDebug("init: BUILD=" + UI_BUILD_VERSION + " library_root=" + LIBRARY_ROOT + " folders=" + libraryFolders.length + " songs=" + songFiles.length +
@@ -10841,6 +11027,15 @@ globalThis.tick = function() {
             needsRedraw = true;
         }
     }
+
+    /* Reload the folder/song lists once the rescan requested on resume has
+     * landed (see onResume). */
+    if (libraryRescanPending) {
+        pollLibraryRescan();
+    }
+
+    /* Pick up settings changed in Schwung Manager (see pollModuleConfig). */
+    pollModuleConfig();
 
     /* Retry loading the Song Bank list after a duplicate/delete until the
      * DSP's worker thread finishes rescanning (see requestSongBankSync). */
@@ -11070,19 +11265,53 @@ globalThis.onMidiMessageExternal = function onMidiMessageExternal(data) {
 globalThis.onResume = function onResume() {
     clearAllLEDs();
     resetLedState();
-    if (typeof host_module_get_param === "function") {
-        /* The library may have changed while the module was suspended (files
-         * added/moved on the Move), so invalidate the cache and re-scan. */
-        libraryCacheValid = false;
-        loadLibraryFolders();
-        reloadSongBankAndPreserveSelection();
-    }
-    if (typeof host_module_set_param === "function") {
+    /* The library may have changed while the module was suspended (files
+     * added/moved on the Move), so have the DSP rescan it -- and reload the
+     * folder and song lists once THAT scan has landed (pollLibraryRescan,
+     * from tick). This used to reload first and request the rescan after,
+     * so it re-read the scan from before the suspend: a change showed up one
+     * resume late, and in between the UI's folder list and the DSP's
+     * (index-addressed) one disagreed. Blocking, so the request cannot be
+     * dropped by the fire-and-forget param slot. */
+    if (typeof host_module_set_param_blocking === "function") {
+        host_module_set_param_blocking("library_root", LIBRARY_ROOT, 100);
+    } else if (typeof host_module_set_param === "function") {
         host_module_set_param("library_root", LIBRARY_ROOT);
     }
+    if (typeof host_module_get_param === "function") {
+        libraryRescanPending = true;
+        libraryRescanDeadline = Date.now() + LIBRARY_RESCAN_MAX_WAIT_MS;
+        lastLibraryRescanPoll = 0;
+    }
     needsRedraw = true;
-    logDebug("onResume: folders=" + libraryFolders.length + " songs=" + songFiles.length);
+    logDebug("onResume: rescan requested, folders=" + libraryFolders.length + " songs=" + songFiles.length);
 };
+
+/* Reload the folder and song lists once the rescan requested by onResume
+ * has been published. Checked at most every LIBRARY_RESCAN_POLL_MS -- one
+ * cheap read -- and given up on (reload anyway) after
+ * LIBRARY_RESCAN_MAX_WAIT_MS, or at once if the DSP has no "scan_pending"
+ * answer, so a missing signal can never leave the lists stale for good. */
+function pollLibraryRescan() {
+    const now = Date.now();
+    if (now - lastLibraryRescanPoll < LIBRARY_RESCAN_POLL_MS) return;
+    lastLibraryRescanPoll = now;
+    const pending = host_module_get_param("scan_pending");
+    if (pending === "1" && now < libraryRescanDeadline) return;
+    libraryRescanPending = false;
+    const foldersBefore = libraryFolders.join("\n") + "\n\n" + libraryFolderCategories.join("\n");
+    libraryCacheValid = false;
+    loadLibraryFolders();
+    reloadSongBankAndPreserveSelection();
+    /* Repaint the pads only if the library actually changed; the common
+     * case (nothing changed while suspended) needs no LED traffic. */
+    if (libraryFolders.join("\n") + "\n\n" + libraryFolderCategories.join("\n") !== foldersBefore) {
+        ledDirtyAll = true;
+    }
+    needsRedraw = true;
+    logDebug("rescan landed: folders=" + libraryFolders.length + " songs=" + songFiles.length +
+        " waited=" + (now - (libraryRescanDeadline - LIBRARY_RESCAN_MAX_WAIT_MS)) + "ms");
+}
 
 globalThis.onUnload = function onUnload() {
     stopPlayback();
