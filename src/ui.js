@@ -8,7 +8,7 @@
  * confirmed from the logs (see init()/playCurrentSong()) instead of guessing
  * whether a new file actually loaded. Keep the DSP dsp_build_version in
  * arranger_engine.c in sync so both sides are verifiable. */
-const UI_BUILD_VERSION = "arranger-ui-2026-09-28-review2";
+const UI_BUILD_VERSION = "arranger-ui-2026-09-30-songsave";
 
 import {
     MidiNoteOn, MidiNoteOff, MidiCC,
@@ -372,6 +372,16 @@ let lastLedKey = "";
 let ledDirtyAll = true;
 
 let activeSongFile = null;
+/* The song object that activeSongFile holds. currentSong is not always it:
+ * play-from-section, play-from-cursor and pad previews point currentSong at a
+ * trimmed or one-clip copy while their build is in flight, Performance plays
+ * other songs, and Jam plays one-clip songs. Only this object may be written
+ * to activeSongFile. */
+let activeSongObj = null;
+/* Temp songs sliced from activeSongObj (play from section/cursor), mapped to
+ * the full song they were cut from, so a change the DSP reports for the temp
+ * song can be applied to -- and saved as -- the full one. */
+const tempSongOrigin = new WeakMap();
 let songFiles = [];
 let selectedSongIndex = 0;
 /* Set after a song file is added/removed on disk (duplicate/delete), so the
@@ -808,26 +818,32 @@ function writeJson(path, obj) {
 
 /* Keep a rolling set of the most recent versions of each song, stored in a
  * hidden .backups folder so the DSP song scan and the Song Bank list never
- * see them. Called immediately BEFORE the current save so the last MAX_N
- * saves are preserved ("go back to check after a change"). Purely background;
+ * see them. Called immediately BEFORE a save, and copies the file AS IT IS ON
+ * DISK -- the version the save is about to replace. It used to write the
+ * in-memory song instead, i.e. the new content, so a bad save produced a
+ * backup of the bad version and nothing of the good one. Purely background;
  * has no UI. Failures are swallowed so a full backup dir never breaks a save. */
-function backupCurrentSong() {
-    if (!currentSong || !activeSongFile) return;
+function backupCurrentSong(path, name) {
+    path = path || activeSongFile;
+    if (!path) return;
     if (typeof os.readdir !== "function" || typeof os.remove !== "function") return;
-    const dir = SONGS_BACKUP_DIR + "/" + safeFileName(currentSong.name || "song");
+    let previous = null;
+    try { if (host_file_exists(path)) previous = host_read_file(path); } catch (e) { previous = null; }
+    if (!previous) return;   /* a first save: nothing to preserve */
+    const dir = SONGS_BACKUP_DIR + "/" + safeFileName(name || (currentSong && currentSong.name) || "song");
     try { ensureDir(dir); } catch (e) { return; }
     /* Timestamp down to the second; guard against two saves in the same
      * millisecond by appending a counter if the file already exists. */
     const stamp0 = new Date().toISOString().replace(/[:.]/g, "-");
     let stamp = stamp0;
     let n = 1;
-    let path = dir + "/" + stamp + ".json";
-    while (host_file_exists(path)) {
+    let backupPath = dir + "/" + stamp + ".json";
+    while (host_file_exists(backupPath)) {
         stamp = stamp0 + "-" + (++n);
-        path = dir + "/" + stamp + ".json";
+        backupPath = dir + "/" + stamp + ".json";
     }
     try {
-        host_write_file(path, JSON.stringify(currentSong, null, 2));
+        host_write_file(backupPath, previous);
     } catch (e) { return; }
     /* Trim to the newest MAX_SONG_BACKUPS, in lexicographic order (the
      * timestamped names sort chronologically). */
@@ -1844,17 +1860,27 @@ function saveCurrentSong() {
      * when nothing was modified; bailing here avoids rewriting the file and
      * spawning a duplicate backup each time a song is opened and closed. */
     if (!unsavedChanges) return;
-    currentSong.modified = new Date().toISOString();
-    const path = activeSongFile || songPath(currentSong.name);
+    /* A play-from-section/cursor copy still standing in for the song (its
+     * build never confirmed, so nothing swapped the full song back) saves as
+     * the full song it was cut from -- never as itself. */
+    const song = tempSongOrigin.get(currentSong) || currentSong;
+    if (activeSongFile && activeSongObj && song !== activeSongObj) {
+        logDebug("saveCurrentSong: REFUSED -- current song is not the one loaded from " + activeSongFile +
+            " (sections=" + (song.sections ? song.sections.length : "?") + ")");
+        return;
+    }
+    song.modified = new Date().toISOString();
+    const path = activeSongFile || songPath(song.name);
     activeSongFile = path;
+    activeSongObj = song;
     /* Normalize the song before writing so the saved file reflects the same
      * rounding and per-clip source_folder that the DSP playback uses. The
-     * in-memory currentSong is updated in place so the UI stays consistent. */
-    normalizeSongForSave(currentSong);
+     * in-memory song is updated in place so the UI stays consistent. */
+    normalizeSongForSave(song);
     /* Preserve the previous version in the background backup store before
      * overwriting it, so the last few saves of this song can be inspected. */
-    backupCurrentSong();
-    writeJson(path, currentSong);
+    backupCurrentSong(path, song.name);
+    writeJson(path, song);
     unsavedChanges = false;
     /* Invalidate the DSP's cached song scan so a newly saved song appears in
      * the Song Bank list. Without this, listSongFiles() returns the stale
@@ -1884,6 +1910,7 @@ function loadSongFile(path) {
     if (!obj) { logDebug("loadSongFile: readJson returned null for " + path); return false; }
     activeSongFile = path;
     currentSong = toUiSong(obj);
+    activeSongObj = currentSong;
     /* A freshly loaded song starts with no pending edits (unless the upgrade
      * below changes it). This prevents a stale dirty flag from a previously
      * edited song causing a spurious save when the new song is merely opened
@@ -1894,7 +1921,7 @@ function loadSongFile(path) {
      * Persist the upgrade immediately so the saved file is corrected. */
     if (upgradeSongSourceFolders(currentSong)) {
         normalizeSongForSave(currentSong);
-        backupCurrentSong();
+        backupCurrentSong(path, currentSong.name);
         writeJson(path, currentSong);
         logDebug("loadSongFile: upgraded source_folder paths in " + path);
     }
@@ -2471,6 +2498,7 @@ function playCurrentSong(preloadStaged, onConfirmed) {
     if (!currentSong) { logDebug("playCurrentSong: no currentSong"); return; }
     lastLoggedDspError = null;
     const json = toEngineSongJson(currentSong);
+    const builtSong = currentSong;
     pendingSongJson = json;
     const secCount = currentSong.sections ? currentSong.sections.length : 0;
     const clipCount = currentSong.sections ? currentSong.sections.reduce((a, s) => a + (s.clips ? s.clips.length : 0), 0) : 0;
@@ -2517,7 +2545,7 @@ function playCurrentSong(preloadStaged, onConfirmed) {
                  * stored (i.e. the file moved), persist the corrected
                  * source_folder so the next play resolves directly instead of
                  * re-searching. */
-                persistResolvedClipFolders();
+                persistResolvedClipFolders(builtSong);
             }
             set("loop", dspLoopEnabled ? "1" : "0", t);
             /* Start the click FIRST, then preload the full song into staging,
@@ -2568,8 +2596,18 @@ function playCurrentSong(preloadStaged, onConfirmed) {
  * "resolved_clips" get_param; we write that folder back into the song so the
  * next play resolves directly and the delay disappears. Returns true if any
  * clip was updated. */
-function persistResolvedClipFolders() {
+/* `built` is the song object playCurrentSong sent to the DSP -- not
+ * necessarily the song whose file is open. The folder corrections are applied
+ * to it (so later plays of it resolve directly), and to the open song when
+ * `built` is the open song or a play-from-section/cursor copy cut from it;
+ * only the open song is ever written. This used to fix and save currentSong,
+ * which while a play-from-section build is in flight is the TRIMMED copy --
+ * so starting playback from section 3 saved the song without sections 1 and
+ * 2. A pad preview (a one-clip song) or a Performance-mode song could be
+ * written over the open song's file the same way. */
+function persistResolvedClipFolders(built) {
     if (typeof host_module_get_param !== "function") return false;
+    built = built || currentSong;
     let raw = null;
     try {
         raw = host_module_get_param("resolved_clips");
@@ -2580,30 +2618,40 @@ function persistResolvedClipFolders() {
         list = JSON.parse(raw);
     } catch (e) { return false; }
     if (!Array.isArray(list) || list.length === 0) return false;
-    let changed = false;
-    for (const item of list) {
-        const src = item && item.source;
-        const folder = item && item.folder;
-        if (!src || !folder) continue;
-        for (const sec of currentSong ? currentSong.sections : []) {
-            for (const c of sec.clips || []) {
-                if (c.source === src && c.source_folder !== folder) {
-                    c.source_folder = folder;
-                    changed = true;
+    const applyTo = function (song) {
+        let changed = false;
+        for (const item of list) {
+            const src = item && item.source;
+            const folder = item && item.folder;
+            if (!src || !folder) continue;
+            for (const sec of song && song.sections ? song.sections : []) {
+                for (const c of sec.clips || []) {
+                    if (c.source === src && c.source_folder !== folder) {
+                        c.source_folder = folder;
+                        changed = true;
+                    }
                 }
             }
         }
+        return changed;
+    };
+    const target = built === activeSongObj ? built : tempSongOrigin.get(built);
+    const changedBuilt = built && built !== target ? applyTo(built) : false;
+    if (!target) {
+        logDebug("persistResolvedClipFolders: " + list.length + " folder fix(es) for a song that is not the open file; not saved");
+        return changedBuilt;
     }
+    const changed = applyTo(target);
     if (changed) {
         unsavedChanges = true;
         if (activeSongFile) {
-            normalizeSongForSave(currentSong);
-            backupCurrentSong();
-            writeJson(activeSongFile, currentSong);
+            normalizeSongForSave(target);
+            backupCurrentSong(activeSongFile, target.name);
+            writeJson(activeSongFile, target);
             unsavedChanges = false;
         }
     }
-    return changed;
+    return changed || changedBuilt;
 }
 
 /* Show a display overlay naming the clip that could not be found, so the user
@@ -6972,6 +7020,7 @@ function handleFolderListInput(cc, value) {
                 currentMode = MODE_BUILDER;
                 activeSongFile = newPath;
                 currentSong = newSong(folder);
+                activeSongObj = currentSong;
                 currentSong.name = songName;
                 unsavedChanges = false;
                 currentSectionIndex = 0;
@@ -7241,6 +7290,7 @@ function startNewSong(folderName) {
     currentMode = MODE_BUILDER;
     activeSongFile = null;
     currentSong = newSong(folderName);
+    activeSongObj = currentSong;
     unsavedChanges = false;
     currentSectionIndex = 0;
     currentView = VIEW_BUILDER;
@@ -9727,13 +9777,23 @@ function perfSectionBarRange(sectionIndex) {
     return { startBar, endBar };
 }
 
+/* A previous play-from build that never confirmed leaves currentSong pointing
+ * at its trimmed copy; put the full song back before cutting a new copy, so a
+ * copy is never cut from a copy (currentSectionIndex indexes the full song). */
+function restoreSongFromTempCopy() {
+    const origin = tempSongOrigin.get(currentSong);
+    if (origin) currentSong = origin;
+}
+
 function playFromCurrentSection() {
+    restoreSongFromTempCopy();
     const sec = currentSong ? currentSong.sections[currentSectionIndex] : null;
     if (!sec || !sec.clips || sec.clips.length === 0) return;
     /* Play from the current section through the end of the song. */
     const temp = JSON.parse(JSON.stringify(currentSong));
     temp.sections = JSON.parse(JSON.stringify(currentSong.sections.slice(currentSectionIndex)));
     reindexInstrumentsForSectionSlice(temp, currentSectionIndex);
+    tempSongOrigin.set(temp, currentSong);
     let barOffset = 0;
     for (let i = 0; i < currentSectionIndex; i++) {
         barOffset += sectionBars(currentSong.sections[i]);
@@ -9801,6 +9861,7 @@ function previewClip(clip, barOffset) {
 }
 
 function previewClipAtCursor() {
+    restoreSongFromTempCopy();
     const sec = currentSong ? currentSong.sections[currentSectionIndex] : null;
     if (!sec || builderCursor < 0 || builderCursor >= sec.clips.length) {
         playFromCurrentSection();
@@ -9811,6 +9872,14 @@ function previewClipAtCursor() {
      * preserving their original trims. */
     const fromCursorClips = sec.clips.slice(builderCursor).map(c => ({
         source: c.source,
+        /* The clip's own folder. Leaving it out made the DSP look for a clip
+         * borrowed from another folder in the song's folder, find it by
+         * searching the whole library (possibly a same-named file from the
+         * wrong folder), and report a "folder correction" -- which is what
+         * then got saved over the song. */
+        source_folder: c.source_folder,
+        type: c.type,
+        advanced: c.advanced,
         name: c.name,
         start_bar: c.start_bar,
         start_beat: c.start_beat !== undefined ? c.start_beat : 0,
@@ -9832,6 +9901,7 @@ function previewClipAtCursor() {
     reindexInstrumentsForSectionSlice(temp, currentSectionIndex);
     temp.sections[0].id = "play-from-cursor-" + Date.now();
     temp.sections[0].clips = fromCursorClips;
+    tempSongOrigin.set(temp, currentSong);
     /* Step-LED flash should still appear on the clip's actual step in the
      * original full section/song layout, not step 1 of the temporary section. */
     let barOffset = 0;
