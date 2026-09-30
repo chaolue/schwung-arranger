@@ -8,7 +8,7 @@
  * confirmed from the logs (see init()/playCurrentSong()) instead of guessing
  * whether a new file actually loaded. Keep the DSP dsp_build_version in
  * arranger_engine.c in sync so both sides are verifiable. */
-const UI_BUILD_VERSION = "arranger-ui-2026-09-30-songsave";
+const UI_BUILD_VERSION = "arranger-ui-2026-09-30-restore";
 
 import {
     MidiNoteOn, MidiNoteOff, MidiCC,
@@ -89,7 +89,7 @@ const SONGS_DIR = "/data/UserData/UserLibrary/Arranger/Songs";
  * dot-entries) and the Song Bank list never see them. Max backups kept per
  * song is MAX_SONG_BACKUPS. */
 const SONGS_BACKUP_DIR = SONGS_DIR + "/.backups";
-const MAX_SONG_BACKUPS = 5;
+const MAX_SONG_BACKUPS = 10;
 const SETLISTS_DIR = "/data/UserData/UserLibrary/Arranger/Setlists";
 const SETTINGS_PATH = "/data/UserData/UserLibrary/Arranger/settings.json";
 /* Per-module settings persisted by Schwung Manager (the web UI) via
@@ -120,6 +120,7 @@ const VIEW_OPTIONS = "options";
 const VIEW_OPTIONS_DRUMS = "options_drums";
 const VIEW_OPTIONS_INST = "options_inst";
 const VIEW_SONG_SETTINGS = "song_settings";
+const VIEW_SONG_BACKUPS = "song_backups";
 const VIEW_SETLIST_BANK = "setlist_bank";
 const VIEW_SETLIST_EDIT = "setlist_edit";
 const VIEW_SETLIST_PICK = "setlist_pick";
@@ -769,7 +770,7 @@ const PAD_PREVIEW_DELAY_MS = 250; /* delay before pad tap triggers insert previe
  * redraw periodically so the shared marquee scroller animates long Song /
  * Setlist / clip names that overflow the row width. */
 const SCROLLABLE_MENU_VIEWS = new Set([
-    VIEW_ROOT, VIEW_FOLDER_LIST, VIEW_BUILDER, VIEW_TRIM, VIEW_SONG_SETTINGS,
+    VIEW_ROOT, VIEW_FOLDER_LIST, VIEW_BUILDER, VIEW_TRIM, VIEW_SONG_SETTINGS, VIEW_SONG_BACKUPS,
     VIEW_SONG_BANK, VIEW_OPTIONS, VIEW_OPTIONS_DRUMS, VIEW_OPTIONS_INST,
     VIEW_SETLIST_BANK, VIEW_SETLIST_EDIT,
     VIEW_SETLIST_PICK, VIEW_SETLIST_CLICK, VIEW_PERF_SETLIST, VIEW_PERFORMANCE,
@@ -830,7 +831,19 @@ function backupCurrentSong(path, name) {
     let previous = null;
     try { if (host_file_exists(path)) previous = host_read_file(path); } catch (e) { previous = null; }
     if (!previous) return;   /* a first save: nothing to preserve */
-    const dir = SONGS_BACKUP_DIR + "/" + safeFileName(name || (currentSong && currentSong.name) || "song");
+    writeSongBackup(name || (currentSong && currentSong.name) || "song", previous);
+}
+
+/* This song's backup folder. */
+function songBackupDir(name) {
+    return SONGS_BACKUP_DIR + "/" + safeFileName(name || "song");
+}
+
+/* Write `text` as a new timestamped backup of song `name`, then trim the
+ * folder to the newest MAX_SONG_BACKUPS. */
+function writeSongBackup(name, text) {
+    if (typeof os.readdir !== "function" || typeof os.remove !== "function") return;
+    const dir = songBackupDir(name);
     try { ensureDir(dir); } catch (e) { return; }
     /* Timestamp down to the second; guard against two saves in the same
      * millisecond by appending a counter if the file already exists. */
@@ -843,7 +856,7 @@ function backupCurrentSong(path, name) {
         backupPath = dir + "/" + stamp + ".json";
     }
     try {
-        host_write_file(backupPath, previous);
+        host_write_file(backupPath, text);
     } catch (e) { return; }
     /* Trim to the newest MAX_SONG_BACKUPS, in lexicographic order (the
      * timestamped names sort chronologically). */
@@ -3466,6 +3479,7 @@ function updateButtonLEDs() {
                 active.set(MoveMainButton, WhiteLedBright);
                 break;
             case VIEW_SONG_SETTINGS:
+            case VIEW_SONG_BACKUPS:
                 active.set(MoveBack, WhiteLedBright);
                 active.set(MoveMainButton, WhiteLedBright);
                 break;
@@ -6227,6 +6241,7 @@ function openSongSettings() {
     songSettingsPendingNum = currentSong.time_sig_num || 4;
     songSettingsPendingDen = currentSong.time_sig_den || 4;
     songSettingsPendingKey = currentSong.key || DEFAULT_KEY;
+    songSettingsBackupCount = listSongBackups(currentSong.name).length;
     currentView = VIEW_SONG_SETTINGS;
     menuStack.push({ title: "Settings", selectedIndex: 0 });
     needsRedraw = true;
@@ -6245,7 +6260,8 @@ function drawSongSettings() {
         { key: "bpm", label: "Tempo", value: String(songSettingsPendingBpm) },
         { key: "num", label: "Time Signature", value: songSettingsPendingNum + "/" + songSettingsPendingDen },
         { key: "key", label: "Key", value: songSettingsPendingKey },
-        { key: "lock", label: "Lock Song", value: songIsLocked() ? "On" : "Off" }
+        { key: "lock", label: "Lock Song", value: songIsLocked() ? "On" : "Off" },
+        { key: "restore", label: "Restore Backup", value: String(songSettingsBackupCount) }
     ];
     drawMenuList({
         labelX: 3,
@@ -6323,10 +6339,16 @@ function handleSongSettingsInput(cc, value) {
                 songSettingsPendingKey = KEYS[next];
             }
         } else {
-            songSettingsFocus = Math.max(0, Math.min(4, songSettingsFocus + delta));
+            songSettingsFocus = Math.max(0, Math.min(SONG_SETTINGS_RESTORE_ROW, songSettingsFocus + delta));
         }
         needsRedraw = true;
     } else if (cc === MoveMainButton && value > 0) {
+        if (songSettingsFocus === SONG_SETTINGS_RESTORE_ROW) {
+            /* A locked song cannot be edited, and a restore replaces it. */
+            if (!locked) openSongBackups();
+            needsRedraw = true;
+            return;
+        }
         if (songSettingsFocus === 4) {
             /* Lock Song row: toggle the lock. Toggling is always allowed
              * (so a locked song can be unlocked here). */
@@ -6366,6 +6388,151 @@ function handleSongSettingsInput(cc, value) {
             commitSongSettings();
             saveCurrentSong();
         }
+    }
+}
+
+/* ── Song Settings > Restore Backup ────────────────────────────────────── */
+
+const SONG_SETTINGS_RESTORE_ROW = 5;
+let songSettingsBackupCount = 0;
+let songBackupList = [];      /* [{ file, path, label, sections }] newest first */
+let songBackupSelected = 0;
+
+/* This song's backups, newest first. Backup files are named by their UTC
+ * time (2026-09-30T10-03-47-882Z.json, with "-2" etc. appended for a second
+ * one in the same millisecond); shown in the Move's local time. */
+function listSongBackups(name) {
+    if (typeof os.readdir !== "function") return [];
+    const dir = songBackupDir(name);
+    let names = [];
+    try {
+        const raw = os.readdir(dir);
+        const list = Array.isArray(raw) ? (Array.isArray(raw[0]) ? raw[0] : raw) : [];
+        names = list.filter(nm => typeof nm === "string" && nm.endsWith(".json"));
+    } catch (e) { return []; }
+    names.sort().reverse();
+    const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const pad = n => (n < 10 ? "0" : "") + n;
+    return names.map(file => {
+        const m = file.match(/^(\d{4})-(\d\d)-(\d\d)T(\d\d)-(\d\d)-(\d\d)/);
+        let label = file.replace(/\.json$/, "");
+        if (m) {
+            const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]));
+            label = d.getDate() + " " + MONTHS[d.getMonth()] + " " + pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds());
+        }
+        return { file, path: dir + "/" + file, label, sections: null };
+    });
+}
+
+function openSongBackups() {
+    if (!currentSong || !activeSongFile) return;
+    songBackupList = listSongBackups(currentSong.name);
+    songBackupSelected = 0;
+    currentView = VIEW_SONG_BACKUPS;
+    menuStack.push({ title: "Restore Backup", selectedIndex: 0 });
+    needsRedraw = true;
+}
+
+function closeSongBackups() {
+    menuStack.pop();
+    currentView = VIEW_SONG_SETTINGS;
+    songSettingsBackupCount = listSongBackups(currentSong ? currentSong.name : "").length;
+    needsRedraw = true;
+}
+
+/* Section count of a backup, read once when its row is first drawn: the
+ * quickest way to tell a good version from a damaged one. */
+function songBackupSections(entry) {
+    if (entry.sections === null) {
+        const obj = readJson(entry.path);
+        entry.sections = (obj && Array.isArray(obj.sections)) ? obj.sections.length : -1;
+    }
+    return entry.sections;
+}
+
+function drawSongBackups() {
+    drawMenuHeader("Restore Backup", "");
+    if (songBackupList.length === 0) {
+        print(4, LIST_TOP_Y, "No backups yet", 1);
+        return;
+    }
+    drawMenuList({
+        labelX: 3,
+        items: songBackupList,
+        selectedIndex: songBackupSelected,
+        getLabel: (item) => item.label,
+        getValue: (item) => {
+            const n = songBackupSections(item);
+            return n < 0 ? "?" : n + " sec";
+        },
+        valueAlignRight: true,
+        labelGap: 2,
+        listArea: { topY: LIST_TOP_Y, bottomY: LIST_INDICATOR_BOTTOM_Y }
+    });
+}
+
+/* Make the chosen backup the song. The state being replaced -- including any
+ * edit not yet saved -- is first kept as a new backup of its own, so a
+ * restore can itself be undone from this same list. */
+function restoreSongBackup(entry) {
+    if (!currentSong || !activeSongFile) return;
+    let text = null;
+    try { text = host_read_file(entry.path); } catch (e) { text = null; }
+    let obj = null;
+    try { obj = text ? JSON.parse(text) : null; } catch (e) { obj = null; }
+    if (!obj || !Array.isArray(obj.sections)) {
+        showOverlay("Restore failed", "unreadable backup", 180);
+        logDebug("restoreSongBackup: unreadable " + entry.path);
+        return;
+    }
+    const path = activeSongFile;
+    const name = currentSong.name;
+    /* Read before writing: the new backup below trims the folder to
+     * MAX_SONG_BACKUPS, which could remove the oldest -- the chosen one. */
+    const current = tempSongOrigin.get(currentSong) || currentSong;
+    normalizeSongForSave(current);
+    writeSongBackup(name, JSON.stringify(current, null, 2));
+    host_write_file(path, text);
+    logDebug("restoreSongBackup: " + entry.file + " -> " + path + " (sections=" + obj.sections.length + ")");
+    if (!loadSongFile(path)) return;
+    if (!currentSong.sections || currentSong.sections.length === 0) {
+        currentSong.sections = [newSection("Section 1")];
+        unsavedChanges = true;
+    }
+    /* Back to the builder, as if the song had just been opened. */
+    builderPage = 0;
+    builderCursor = 0;
+    loadFolderClips(folderIndexForPath(currentSong.source_folder));
+    pendingFolderClipLoadName = (folderClips.length === 0) ? currentSong.source_folder : null;
+    requestSongRescan();
+    menuStack.pop();   /* Restore Backup */
+    menuStack.pop();   /* Settings */
+    currentView = VIEW_BUILDER;
+    stepLedsDirty = true;
+    ledDirtyAll = true;
+    needsRedraw = true;
+    showOverlay("Backup restored", entry.label, 180);
+}
+
+function handleSongBackupsInput(cc, value) {
+    if (cc === MoveMainKnob) {
+        const delta = decodeDelta(value);
+        if (songBackupList.length > 0) {
+            songBackupSelected = Math.max(0, Math.min(songBackupList.length - 1, songBackupSelected + delta));
+        }
+        needsRedraw = true;
+    } else if (cc === MoveMainButton && value > 0) {
+        const entry = songBackupList[songBackupSelected];
+        if (!entry) return;
+        const n = songBackupSections(entry);
+        openConfirm({
+            title: "Restore Backup?",
+            name: entry.label + (n >= 0 ? " (" + n + " sec)" : ""),
+            onConfirm: () => restoreSongBackup(entry),
+            onCancel: () => { needsRedraw = true; }
+        });
+    } else if (cc === MoveBack && value > 0) {
+        closeSongBackups();
     }
 }
 
@@ -11212,6 +11379,7 @@ globalThis.tick = function() {
                 case VIEW_BUILDER: drawBuilder(); break;
                 case VIEW_TRIM: drawTrim(); break;
                 case VIEW_SONG_SETTINGS: drawSongSettings(); break;
+                case VIEW_SONG_BACKUPS: drawSongBackups(); break;
                 case VIEW_SONG_BANK: drawSongBank(); break;
                 case VIEW_OPTIONS: drawOptions(); break;
                 case VIEW_OPTIONS_DRUMS: drawOptionsDrums(); break;
@@ -11292,6 +11460,7 @@ function routeCcInput(rawData, cc, value) {
         case VIEW_BUILDER: handleBuilderInput(cc, value); break;
         case VIEW_TRIM: handleTrimInput(cc, value); break;
         case VIEW_SONG_SETTINGS: handleSongSettingsInput(cc, value); break;
+        case VIEW_SONG_BACKUPS: handleSongBackupsInput(cc, value); break;
         case VIEW_SONG_BANK: handleSongBankInput(cc, value); break;
         case VIEW_OPTIONS: handleOptionsInput(cc, value); break;
         case VIEW_OPTIONS_DRUMS: handleOptionsDrumsInput(cc, value); break;
@@ -11326,14 +11495,27 @@ globalThis.onMidiMessageInternal = function(data) {
         if (cc === MoveBack) {
             /* See backHoldActive's declaration. */
             if (value > 0) {
+                if (isTextEntryActive()) {
+                    /* The keyboard cancels on press, and a hold must not
+                     * suspend out of it -- no hold tracking here. */
+                    routeCcInput(data, cc, value);
+                    return;
+                }
                 backHoldActive = true;
                 backHoldStartTime = Date.now();
                 backHoldSuspendFired = false;
                 backHoldPressValue = value;
                 backHoldStatusByte = data[0];
             } else {
+                /* Only a release whose press this module saw stands for a
+                 * tap. The host shares text_entry.mjs with us, so while our
+                 * keyboard is open the HOST takes the Back press, cancels the
+                 * keyboard and never forwards it: all we get is the release.
+                 * Replaying that release as a press sent a second Back to
+                 * whatever screen was under the keyboard. */
+                const sawPress = backHoldActive;
                 backHoldActive = false;
-                if (!backHoldSuspendFired) {
+                if (sawPress && !backHoldSuspendFired) {
                     routeCcInput([backHoldStatusByte, cc, backHoldPressValue], cc, backHoldPressValue);
                 }
             }

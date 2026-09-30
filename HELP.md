@@ -246,7 +246,8 @@ The top line shows the clip's **source folder** (read-only), so you can see whic
 
 ### Song Settings
 
-Edit song name, tempo, time signature, key, and the song lock.
+Open with **Menu** in Song Builder. Edit song name, tempo, time signature,
+key and the song lock, or restore an earlier version of the song.
 
 | Control | Action |
 |---------|--------|
@@ -261,6 +262,23 @@ Edit song name, tempo, time signature, key, and the song lock.
 | Time Signature | Beats per bar / beat unit |
 | Key | The song's key — changing it transposes every existing chord to the same relative harmony in the new key |
 | Lock Song | When On, the song cannot be renamed, deleted, or edited |
+| Restore Backup | Opens the list of saved versions of this song (the value is how many there are) |
+
+#### Restore Backup
+
+Select **Restore Backup** and press the jog wheel. Every save keeps the
+version it replaces, and the last 10 are listed here, newest first, with
+the date and time they were replaced and their section count. Select one and
+confirm **Yes** to make it the song: the version you had until then —
+including any change not yet saved — is kept as a backup of its own, so a
+restore can be undone from the same list. Not available while the song is
+locked.
+
+| Control | Action |
+|---------|--------|
+| Jog wheel | Scroll backups |
+| Jog click | Restore the selected backup (asks to confirm) |
+| Back | Return to Song Settings |
 
 **Button LED hints:** Back and Main are lit.
 
