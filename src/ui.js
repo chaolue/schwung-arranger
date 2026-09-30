@@ -8,7 +8,7 @@
  * confirmed from the logs (see init()/playCurrentSong()) instead of guessing
  * whether a new file actually loaded. Keep the DSP dsp_build_version in
  * arranger_engine.c in sync so both sides are verifiable. */
-const UI_BUILD_VERSION = "arranger-ui-2026-09-30-restore";
+const UI_BUILD_VERSION = "arranger-ui-2026-10-01-padpreview";
 
 import {
     MidiNoteOn, MidiNoteOff, MidiCC,
@@ -10020,11 +10020,17 @@ function previewClip(clip, barOffset) {
     const savedLoop = dspLoopEnabled;
     dspLoopEnabled = false;
     previewBarOffset = (typeof barOffset === "number") ? barOffset : 0;
-    /* Restore from onConfirmed -- see playFromCurrentSection above. */
+    /* The loop mode is read when the build confirms, so it is restored then.
+     * The song goes back NOW, as jamPlayClip does: playCurrentSong has built
+     * its JSON (and remembered the preview song for the folder check) before
+     * it returns. Leaving the one-section preview song in currentSong until
+     * the confirmation made the builder draw sections[currentSectionIndex]
+     * of it -- "No section." for any section but the first, for the whole
+     * build -- and a build that never confirmed left it there for good. */
     playCurrentSong(false, function () {
         dspLoopEnabled = savedLoop;
-        currentSong = saved;
     });
+    currentSong = saved;
 }
 
 function previewClipAtCursor() {
