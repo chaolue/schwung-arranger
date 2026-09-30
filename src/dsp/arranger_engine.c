@@ -840,6 +840,12 @@ typedef struct engine {
      * are consumed when a scan STARTS) and publishing its result, so
      * get_param("scan_pending") can say "not landed yet" throughout. */
     _Atomic(int) scan_busy;
+    /* The same, per list, so get_param("scan_state") can tell the UI WHICH
+     * list is still loading -- the Song Bank need not wait on the MIDI
+     * library -- and how far the library walk has got. */
+    _Atomic(int) songs_busy;
+    _Atomic(int) folders_busy;
+    _Atomic(int) folders_found;
 
     /* Worker thread. All file I/O, allocation, and long builds run here on
      * SCHED_OTHER; the audio thread only posts to worker_wake and reads
@@ -3894,6 +3900,7 @@ static void scan_library_recursive(engine_t *e, const char *dir,
             folder_entry_t *f = &folders[*count];
             if (scan_song_folder_into(f, child_path, ent->d_name, category) == 0) {
                 (*count)++;
+                atomic_store_explicit(&e->folders_found, *count, memory_order_relaxed);
             }
         } else if (dir_contains_mid_recursive(child_path)) {
             /* Intermediate category with deeper song folders: keep recursing. */
@@ -3922,6 +3929,7 @@ static void scan_library_into(engine_t *e, folder_entry_t *folders, int *out_cou
             folder_entry_t *f = &folders[count];
             if (scan_song_folder_into(f, full_path, ent->d_name, "") == 0) {
                 count++;
+                atomic_store_explicit(&e->folders_found, count, memory_order_relaxed);
             }
         } else if (dir_contains_mid_recursive(full_path)) {
             scan_library_recursive(e, full_path, folders, &count);
@@ -4191,17 +4199,33 @@ static void arranger_worker_iterate(engine_t *e) {
     process_timeline_channel(e, &e->primary_ch, 1);
     process_timeline_channel(e, &e->staging_ch, 0);
 
-    /* Folder scan. Each request is consumed BEFORE scanning (an exchange,
-     * not a store of 0 once the scan is done): a request that arrives while
-     * a scan is running -- a song saved while the library is still being
-     * walked -- then survives to the next wake, instead of being wiped by
-     * the scan it arrived too late to be part of. scan_busy covers the gap
-     * between taking a request and publishing its result (set BEFORE the
-     * exchange, so a reader that sees the flag cleared also sees busy). */
+    /* Each request is consumed BEFORE scanning (an exchange, not a store of
+     * 0 once the scan is done): a request that arrives while a scan is
+     * running -- a song saved while the library is still being walked --
+     * then survives to the next wake, instead of being wiped by the scan it
+     * arrived too late to be part of. The busy flags cover the gap between
+     * taking a request and publishing its result (set BEFORE the exchange,
+     * so a reader that sees the flag cleared also sees busy).
+     *
+     * Songs first. Reading the song files takes moments; walking a large
+     * MIDI library -- every clip opened for its bar count -- can take many
+     * seconds, and the Song Bank used to sit empty behind it. */
     atomic_store_explicit(&e->scan_busy, 1, memory_order_release);
+    atomic_store_explicit(&e->songs_busy, 1, memory_order_release);
+    if (atomic_exchange_explicit(&e->song_dirty, 0, memory_order_acq_rel)) {
+        int active = atomic_load_explicit(&e->song_active, memory_order_acquire);
+        int target = 1 - active;
+        e->song_count[target] = 0;
+        scan_songs_into(e, e->songs[target], &e->song_count[target]);
+        atomic_store_explicit(&e->song_active, target, memory_order_release);
+    }
+    atomic_store_explicit(&e->songs_busy, 0, memory_order_release);
+
+    atomic_store_explicit(&e->folders_busy, 1, memory_order_release);
     if (atomic_exchange_explicit(&e->folder_dirty, 0, memory_order_acq_rel)) {
         int active = atomic_load_explicit(&e->folder_active, memory_order_acquire);
         int target = 1 - active;
+        atomic_store_explicit(&e->folders_found, 0, memory_order_relaxed);
         /* Free the previous contents of the target slot (worker-side). */
         free_folder_slot(e->folders[target], e->folder_count[target]);
         e->folder_count[target] = 0;
@@ -4212,15 +4236,7 @@ static void arranger_worker_iterate(engine_t *e) {
          * next fallback lookup rebuild it from this one. Worker-owned. */
         clip_lookup_free(e);
     }
-
-    /* Song scan. */
-    if (atomic_exchange_explicit(&e->song_dirty, 0, memory_order_acq_rel)) {
-        int active = atomic_load_explicit(&e->song_active, memory_order_acquire);
-        int target = 1 - active;
-        e->song_count[target] = 0;
-        scan_songs_into(e, e->songs[target], &e->song_count[target]);
-        atomic_store_explicit(&e->song_active, target, memory_order_release);
-    }
+    atomic_store_explicit(&e->folders_busy, 0, memory_order_release);
     atomic_store_explicit(&e->scan_busy, 0, memory_order_release);
 }
 
@@ -4820,7 +4836,7 @@ static void engine_clear_error(engine_t *e) {
 
 /* DSP build version stamp. Keep in sync with UI_BUILD_VERSION in ui.js so the
  * running dsp.so can be confirmed from .dsp_log on module load. */
-static const char *const DSP_BUILD_VERSION = "arranger-dsp-2026-09-29-clipres";
+static const char *const DSP_BUILD_VERSION = "arranger-dsp-2026-10-01-loading";
 
 static void* arr_create_instance(const char *module_dir, const char *config_json) {
     (void)module_dir;
@@ -5910,6 +5926,19 @@ static int arr_get_param(void *instance, const char *key, char *buf, int buf_len
     }
     if (strcmp(key, "library_root") == 0) {
         return snprintf(buf, buf_len, "%s", e->library_root_requested);
+    }
+    if (strcmp(key, "scan_state") == 0) {
+        /* Which list is still loading, for the UI's "Loading..." -- the
+         * dirty flags read before the busy ones, as for scan_pending.
+         * folders_found counts the library folders the walk in progress has
+         * found so far (0 when none is running). */
+        int songs = atomic_load_explicit(&e->song_dirty, memory_order_acquire) ||
+                    atomic_load_explicit(&e->songs_busy, memory_order_acquire);
+        int folders = atomic_load_explicit(&e->folder_dirty, memory_order_acquire) ||
+                      atomic_load_explicit(&e->folders_busy, memory_order_acquire);
+        int found = atomic_load_explicit(&e->folders_found, memory_order_relaxed);
+        return snprintf(buf, buf_len, "{\"songs\":%d,\"folders\":%d,\"folders_found\":%d}",
+                        songs, folders, folders ? found : 0);
     }
     if (strcmp(key, "scan_pending") == 0) {
         /* "1" from a library_root / scan_library / scan_songs request until

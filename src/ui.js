@@ -8,7 +8,7 @@
  * confirmed from the logs (see init()/playCurrentSong()) instead of guessing
  * whether a new file actually loaded. Keep the DSP dsp_build_version in
  * arranger_engine.c in sync so both sides are verifiable. */
-const UI_BUILD_VERSION = "arranger-ui-2026-10-01-padpreview";
+const UI_BUILD_VERSION = "arranger-ui-2026-10-01-loading";
 
 import {
     MidiNoteOn, MidiNoteOff, MidiCC,
@@ -558,6 +558,19 @@ let pendingJamFolderClipLoadIndex = -1;
  * folder list arrives, so opening Folder List / Jam Folder on a fresh boot
  * (or right after a scan invalidation) doesn't leave the list empty forever. */
 let pendingLibraryFoldersReload = false;
+/* What the DSP's worker is still scanning, so a list that has not arrived yet
+ * says "Loading..." instead of looking empty: { songs, folders, found } from
+ * get_param("scan_state") (found = library folders the walk has reached so
+ * far), or null when the engine cannot say. Polled while a screen that shows
+ * one of these lists (or clips waiting on the folder scan) is up; when a list
+ * finishes loading it is reloaded at once. */
+let scanState = null;
+let lastScanStatePoll = 0;
+const SCAN_STATE_POLL_MS = 250;
+/* A folder scan finished and found no MIDI folders: say so, and stop asking
+ * for rescans of an empty library. */
+let libraryKnownEmpty = false;
+let lastLoadingPhase = -1;
 let lastTransportBar = 0;     /* last bar number seen from DSP transport */
 let maxBeatThisBar = 0;       /* highest transport beat seen in current bar */
 let transportBeatsPerBar = 0; /* observed transport beats in last complete bar */
@@ -5148,6 +5161,10 @@ function drawFolderList() {
     const pathStr = folderPickerPath.map(shortSongName).join("/");
     drawMenuHeader("Source Folder", pathStr);
     const items = node ? getTreeDisplayItems(node) : [];
+    if (items.length === 0 && libraryFolders.length === 0) {
+        drawLibraryFoldersPlaceholder();
+        return;
+    }
     drawMenuList({
         items,
         selectedIndex: folderPickerSelectedIndex,
@@ -5172,7 +5189,11 @@ function drawBuilder() {
      * value once actually playing) is only needed here. */
     const displayIdx = builderPlayingFromTemp ? 0 : (playbackState === "playing" ? playingIdx : currentSectionIndex);
     const sec = currentSong ? currentSong.sections[displayIdx] : null;
-    drawMenuHeader(scrollHeader("Drums: " + (currentSong ? shortSongName(currentSong.name) : ""), songIsLocked() ? 27 : 28), songIsLocked() ? "*" : "");
+    /* The clip pads are waiting on the folder scan (a song opened before
+     * the library has loaded): "..." until they arrive. */
+    const clipsLoading = !!pendingFolderClipLoadName;
+    drawMenuHeader(scrollHeader("Drums: " + (currentSong ? shortSongName(currentSong.name) : ""), (songIsLocked() || clipsLoading) ? 27 : 28),
+        clipsLoading ? "..." : (songIsLocked() ? "*" : ""));
     if (!sec) {
         print(2, LIST_TOP_Y, "No section.", 1);
         drawOverlay();
@@ -6537,8 +6558,13 @@ function handleSongBackupsInput(cc, value) {
 }
 
 function drawSongBank() {
-    drawMenuHeader("Song Bank", "");
+    /* Still scanning with songs already listed: they are the previous scan's,
+     * so say a refresh is on its way. */
+    const loading = listLoading("songs");
+    drawMenuHeader("Song Bank", loading && songFiles.length > 0 ? "..." : "");
     const items = [{ label: "+ New Song" }].concat(songFiles.map(f => ({ label: shortSongName(f.name || f) })));
+    /* Display only: selection is bounded by songFiles, so it cannot land here. */
+    if (loading && songFiles.length === 0) items.push({ label: loadingText("songs") });
     /* Mark locked songs with "*" in the value column. */
     const lockMap = new Map();
     for (const f of songFiles) {
@@ -6689,6 +6715,10 @@ function drawSetlistEdit() {
 function drawSetlistPick() {
     drawMenuHeader(scrollHeader("Add Song: " + (currentSetlist ? shortSongName(currentSetlist.name) : ""), 24), "");
     const items = songFiles.map(f => ({ label: shortSongName(f.name || f) }));
+    if (items.length === 0) {
+        print(4, LIST_TOP_Y, listLoading("songs") ? loadingText("songs") : "No songs yet", 1);
+        return;
+    }
     drawMenuList({
         labelX: 3,
         items,
@@ -6975,6 +7005,10 @@ function drawJamFolder() {
     const pathStr = jamFolderPickerPath.map(shortSongName).join("/");
     drawMenuHeader("Jam Folder", pathStr);
     const items = node ? getTreeDisplayItems(node) : [];
+    if (items.length === 0 && libraryFolders.length === 0) {
+        drawLibraryFoldersPlaceholder();
+        return;
+    }
     drawMenuList({
         items,
         selectedIndex: jamFolderPickerSelectedIndex,
@@ -6997,7 +7031,7 @@ function drawJam() {
     const maxName = jamPlaying ? 26 : 28;
     let header = shortFolder;
     if (header.length > maxName) header = jamHeaderScroller.getScrolledText(header, maxName);
-    drawMenuHeader("Jam: " + header, jamPlaying ? "*" : "");
+    drawMenuHeader("Jam: " + header, jamPlaying ? "*" : (pendingJamFolderClipLoadIndex >= 0 ? "..." : ""));
 
     const grooveCols = 4;
     const fillCols = 4;
@@ -10822,6 +10856,81 @@ function perfTick() {
 
 
 
+function readScanState() {
+    if (typeof host_module_get_param !== "function") return null;
+    const raw = host_module_get_param("scan_state");
+    if (raw) {
+        try {
+            const st = JSON.parse(raw);
+            return { songs: !!st.songs, folders: !!st.folders, found: st.folders_found | 0 };
+        } catch (e) {}
+    }
+    /* An older engine: one flag for both lists. */
+    const pending = host_module_get_param("scan_pending");
+    if (pending === null || pending === undefined) return null;
+    return { songs: pending === "1", folders: pending === "1", found: 0 };
+}
+
+/* True while the engine is still scanning `which` ("songs" / "folders"). */
+function listLoading(which) {
+    return !!(scanState && scanState[which]);
+}
+
+function pollScanState() {
+    const now = Date.now();
+    if (now - lastScanStatePoll < SCAN_STATE_POLL_MS) return;
+    lastScanStatePoll = now;
+    const prev = scanState;
+    scanState = readScanState();
+    if (!scanState) return;
+    if (prev && prev.songs && !scanState.songs) {
+        reloadSongBankAndPreserveSelection();
+        needsRedraw = true;
+    }
+    if (prev && prev.folders && !scanState.folders) {
+        libraryCacheValid = false;
+        loadLibraryFolders();
+        libraryKnownEmpty = libraryFolders.length === 0;
+        if (libraryKnownEmpty) pendingLibraryFoldersReload = false;
+        ledDirtyAll = true;
+        needsRedraw = true;
+    }
+    /* The walk's running count changes the "Loading" line. */
+    if (prev && scanState.folders && prev.found !== scanState.found) needsRedraw = true;
+    if (!prev || prev.songs !== scanState.songs || prev.folders !== scanState.folders) needsRedraw = true;
+}
+
+/* Whether the screen now showing depends on a list the engine may still be
+ * scanning (so the scan state is worth a poll). */
+function screenWaitsOnScan() {
+    if (pendingSongBankSync) return false;   /* reloads the Song Bank itself, every tick */
+    switch (currentView) {
+        case VIEW_SONG_BANK: case VIEW_SETLIST_PICK:
+        case VIEW_FOLDER_LIST: case VIEW_JAM_FOLDER:
+            return true;
+    }
+    return pendingLibraryFoldersReload || !!pendingFolderClipLoadName || pendingJamFolderClipLoadIndex >= 0 ||
+        (scanState !== null && (scanState.songs || scanState.folders));
+}
+
+/* "Loading" plus 1-3 cycling dots, for a list or clips still on their way. */
+function loadingText(what) {
+    const dots = ".".repeat(1 + Math.floor(Date.now() / 400) % 3);
+    return "Loading " + what + dots;
+}
+
+/* Drawn in place of an empty list of library folders: "Loading library..."
+ * and, once the walk has found some, how many so far. */
+function drawLibraryFoldersPlaceholder() {
+    if (listLoading("folders")) {
+        const n = scanState ? scanState.found : 0;
+        print(4, LIST_TOP_Y, loadingText("library"), 1);
+        if (n > 0) print(4, LIST_TOP_Y + 10, n + (n === 1 ? " folder" : " folders") + " found", 1);
+    } else if (libraryKnownEmpty) {
+        print(4, LIST_TOP_Y, "No MIDI folders found", 1);
+    }
+}
+
 function loadLibraryFolders() {
     /* Reuse the cached folder list + clip map when the DSP scan is stable.
      * Re-fetching and re-parsing every folder's clips on each picker open is
@@ -10856,9 +10965,13 @@ function loadLibraryFolders() {
         addFolderToTree(libraryCategoryTree, cat, i);
     }
     if (libraryFolders.length === 0) {
-        host_module_set_param("scan_library", "1");
-        pendingLibraryFoldersReload = true;
+        /* Ask for a scan only if none is on its way: this runs every tick
+         * while a screen waits for folders, and each request queued ANOTHER
+         * full walk of the library behind the one in progress. */
+        if (!listLoading("folders") && !libraryKnownEmpty) host_module_set_param("scan_library", "1");
+        pendingLibraryFoldersReload = !libraryKnownEmpty;
     } else {
+        libraryKnownEmpty = false;
         /* Build the clip->folder map once folders are known, so existing songs
          * can backfill a clip's source_folder on load/save. */
         buildFolderClipMap();
@@ -11246,11 +11359,22 @@ globalThis.tick = function() {
         logJam("CHORD-HOLD overlay -> " + jamHoldName);
     }
 
+    /* What is still loading -- see scanState. */
+    if (screenWaitsOnScan()) pollScanState();
+    /* The "Loading..." dots animate. */
+    if (listLoading("songs") || listLoading("folders")) {
+        const phase = Math.floor(Date.now() / 400);
+        if (phase !== lastLoadingPhase) { lastLoadingPhase = phase; needsRedraw = true; }
+    }
+
     /* Retry loading the builder's clip pads if they weren't ready yet (e.g.
      * a song opened on a fresh boot before the DSP folder scan finished).
      * Ensure libraryFolders is populated, re-resolve the folder by name, then
      * load the clips; once they arrive, force a pad repaint. */
-    if (pendingFolderClipLoadName) {
+    /* All three wait for a folder scan in progress to finish (pollScanState
+     * reloads the folders the moment it does) rather than re-reading lists
+     * the engine has not published yet, every tick. */
+    if (pendingFolderClipLoadName && !listLoading("folders")) {
         if (libraryFolders.length === 0) {
             loadLibraryFolders();
         }
@@ -11269,7 +11393,7 @@ globalThis.tick = function() {
     /* Retry loading the Jam folder's clips if they weren't ready yet (e.g. a
      * Jam folder entered on a fresh boot before the DSP folder scan finished).
      * Re-load the clips each tick until they arrive, then repaint the pads. */
-    if (pendingJamFolderClipLoadIndex >= 0) {
+    if (pendingJamFolderClipLoadIndex >= 0 && !listLoading("folders")) {
         if (libraryFolders.length === 0) {
             loadLibraryFolders();
         }
@@ -11286,7 +11410,7 @@ globalThis.tick = function() {
      * caught up when loadLibraryFolders() first ran (folder_count was 0).
      * Re-poll each tick until the folders arrive, then repaint so the Folder
      * List / Jam Folder picker isn't left empty. */
-    if (pendingLibraryFoldersReload && libraryFolders.length === 0) {
+    if (pendingLibraryFoldersReload && libraryFolders.length === 0 && !listLoading("folders")) {
         loadLibraryFolders();
         if (libraryFolders.length > 0) {
             pendingLibraryFoldersReload = false;
