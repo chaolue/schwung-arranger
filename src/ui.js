@@ -515,6 +515,7 @@ function endChainView() {
     stepLedsDirty = true;
     needsRedraw = true;
     chainViewRepaintTicks = 2;
+    knobLedRepaintTicks = KNOB_LED_REPAINT_TICKS;
     /* The editor can change a chain's channel, synth or a mapped value. */
     if (currentView === VIEW_OPTIONS_CHAINS) refreshChainInfo();
     if (currentView === VIEW_PERFORMANCE) refreshPerfKnobs();
@@ -4368,7 +4369,10 @@ function flushLedQueue() {
              * so a dropped write would never be retried. Leave it queued. */
             if (move_midi_internal_send(msg) === false) break;
         } else {
-            setButtonLED(msg[0], msg[1]);
+            /* Knob lights are forced: the cache in input_filter is shared
+             * with Schwung's own screens, which paint them too (see
+             * KNOB_LED_CCS). */
+            setButtonLED(msg[0], msg[1], KNOB_LED_CCS.indexOf(msg[0]) >= 0);
         }
         ledQueue.delete(key);
         n++;
@@ -4440,6 +4444,26 @@ function clearPadLEDs() {
 
 function clearStepLEDs() {
     for (let i = 0; i < NUM_STEPS; i++) stepColor(i, Black, true);
+}
+
+/* The lights under the eight knobs (CC 71-78). Arranger does not use them,
+ * but Schwung's parameter grid lights them while a chain view is up, and on
+ * leaving asks the shim to restore Move's own -- which the shim only does
+ * outside overtake, i.e. never while Arranger runs. So Arranger turns them
+ * off whenever it has the surface, and leaves them to the editor during a
+ * chain view. KNOB_LED_REPAINT_TICKS covers the editor drawing one last frame
+ * after the session ends (shadow_ui reconciles before Arranger's tick). */
+const KNOB_LED_CCS = [71, 72, 73, 74, 75, 76, 77, 78];
+const KNOB_LED_REPAINT_TICKS = 3;
+let knobLedRepaintTicks = 0;
+
+function updateKnobLEDs() {
+    if (chainViewActive()) return;
+    if (knobLedRepaintTicks > 0) {
+        knobLedRepaintTicks--;
+        for (const cc of KNOB_LED_CCS) lastButtonState.delete(cc);
+    }
+    for (const cc of KNOB_LED_CCS) setButtonHint(cc, Black);
 }
 
 const ALL_BUTTON_CCS = [
@@ -4732,6 +4756,7 @@ function updateButtonLEDs() {
             setButtonHint(cc, Black);
         }
     }
+    updateKnobLEDs();
 }
 
 /* ── LED drawing ─────────────────────────────────────────────────────── */
@@ -13036,6 +13061,7 @@ globalThis.onResume = function onResume() {
     longPressHolds.clear();
     if (chainViewActive()) endChainView();
     knobTouched.fill(false);
+    knobLedRepaintTicks = KNOB_LED_REPAINT_TICKS;  /* Schwung's screens may have lit them */
     if (currentView === VIEW_PERFORMANCE && currentSetlist) {
         /* The Move Set (and with it the chains) may have changed while away. */
         refreshPerfKnobs();
