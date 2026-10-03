@@ -12545,6 +12545,12 @@ globalThis.tick = function() {
                 " ledDirtyAll=" + ledDirtyAll + " needsRedraw=" + needsRedraw +
                 " byUpdateLEDs=" + ledQueuePushByUpdateLEDs + " byStepRefresh=" + ledQueuePushByStepRefresh +
                 " byButtonLEDs=" + ledQueuePushByButtonLEDs);
+            /* Schwung's transport as chain modules see it (see host_clock in
+             * arranger_engine.c): for tempo-synced effects that sound wrong. */
+            if (typeof host_module_get_param === "function") {
+                const hc = host_module_get_param("host_clock");
+                if (hc) logDebug("HOSTCLOCK " + hc);
+            }
             lastLedQueueSampleTick = nowLQ;
             lastLedQueueSampleLen = ledQueue.size;
             ledQueuePushByUpdateLEDs = 0;
