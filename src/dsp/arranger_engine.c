@@ -727,6 +727,7 @@ typedef struct engine {
     int clock_running;         /* a Start has gone out and no Stop since */
     int clock_restart;         /* play_from_top: re-anchor with a fresh Start */
     double clock_phase;        /* fraction of a clock tick accumulated */
+    uint32_t clock_ticks_sent; /* 0xF8s sent since load (diagnostics) */
 
     /* Live Perform/Jam mute for the drum timeline (Row1 track button in the
      * UI). Gates note-ON emission only in drain_events_up_to/
@@ -5039,6 +5040,7 @@ static void clock_tick(engine_t *e, int frames, int sample_rate) {
          * after 0xFA as beat 0, so beat 0 is the start of the song. */
         send_clock_byte(0xFA);
         send_clock_byte(0xF8);
+        e->clock_ticks_sent++;
         e->clock_running = 1;
         e->clock_restart = 0;
         e->clock_phase = 0.0;
@@ -5049,6 +5051,7 @@ static void clock_tick(engine_t *e, int frames, int sample_rate) {
     int n = 0;
     while (e->clock_phase >= 1.0 && n < 8) {
         send_clock_byte(0xF8);
+        e->clock_ticks_sent++;
         e->clock_phase -= 1.0;
         n++;
     }
@@ -5985,6 +5988,18 @@ static int arr_get_param(void *instance, const char *key, char *buf, int buf_len
     }
     if (strcmp(key, "send_clock") == 0) {
         return snprintf(buf, buf_len, "%d", e->send_clock);
+    }
+    if (strcmp(key, "host_clock") == 0) {
+        /* What Schwung's transport says right now -- the same get_bpm /
+         * get_beat_position every chain module calls -- next to what this
+         * engine is sending, for diagnosing tempo-synced modules. */
+        float hb = (g_host && g_host->get_bpm) ? g_host->get_bpm() : -1.0f;
+        double beat = (g_host && g_host->get_beat_position) ? g_host->get_beat_position() : -2.0;
+        int cs = (g_host && g_host->get_clock_status) ? g_host->get_clock_status() : -1;
+        return snprintf(buf, buf_len,
+                        "{\"host_bpm\":%.2f,\"host_beat\":%.3f,\"clock_status\":%d,"
+                        "\"song_bpm\":%.2f,\"running\":%d,\"sending\":%d,\"ticks_sent\":%u}",
+                        hb, beat, cs, e->tempo_bpm, e->running, e->clock_running, e->clock_ticks_sent);
     }
     if (strcmp(key, "drum_enabled") == 0) {
         return snprintf(buf, buf_len, "%d", e->drum_enabled);
