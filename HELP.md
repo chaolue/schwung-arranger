@@ -571,7 +571,7 @@ opened as a sub-screen from here.
 
 | Control | Action |
 |---------|--------|
-| Jog wheel (browse mode) | Move between Drums, Inst 1, Inst 2, Chains, Click Channel, Swap Guard, DSP Debug |
+| Jog wheel (browse mode) | Move between Drums, Inst 1, Inst 2, Chains, Click Channel, Swap Guard, Schwung Clock, DSP Debug |
 | Jog click (on Drums / Inst 1 / Inst 2 / Chains) | Open that sub-screen |
 | Jog wheel (edit mode, other fields) | Adjust the value |
 | Jog click (other fields) | Toggle edit / browse mode |
@@ -586,6 +586,7 @@ opened as a sub-screen from here.
 | Chains | Schwung's 4 chains: each one's MIDI channel, and a way into its editor (opens a sub-screen — see below) |
 | Click Channel | MIDI channel (1–16) used for the count-in click. **Default** follows the Drums output channel |
 | Swap Guard | Mid-clip swap guard window (0–100%). Removed at the outgoing side of a clip boundary to avoid overlaps; on the incoming side (e.g. a fill swapping back into a partially-played groove), any note that fell inside this window is replayed right at the resume point instead of being lost |
+| Schwung Clock | **On** (default): while the Arranger plays, it sends MIDI clock to Schwung at the song's tempo, so clock-synced Schwung modules and effects (synced LFOs, tempo delays, arpeggiators) follow the song and start on its first beat. Move's own clock takes over whenever Move's sequencer is playing. Move's own tempo is not changed |
 | DSP Debug | Toggles the DSP debug log (`.dsp_log`) on/off |
 
 Settings are saved to file and restored when the module restarts.

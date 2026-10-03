@@ -96,6 +96,13 @@
             "type": "bool",
             "default": false,
             "help": "Withholds the drum track's own note-off messages, for drum playback modules that don't ring out and cut sounds short otherwise."
+        },
+        {
+            "key": "send_clock",
+            "label": "Schwung Clock",
+            "type": "bool",
+            "default": true,
+            "help": "Sends MIDI clock to Schwung while the Arranger plays, so clock-synced modules and effects (LFOs, delays, arpeggiators) follow the song tempo. Move's own clock takes over while Move's sequencer is playing."
         }
     ]
 }

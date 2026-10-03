@@ -36,6 +36,9 @@ and perform live — all from Move's pads, step buttons and jog wheel.
   chain (synth, MIDI FX or audio FX) or of Master FX, per setlist with per-song overrides;
   each song restores its own knob values, and the Arranger warns when the
   loaded Move Set is not the one the setlist was used with.
+- **Schwung clock** — while playing, the Arranger sends MIDI clock to
+  Schwung at the song's tempo, so clock-synced modules and effects stay in
+  time with it (Options > Schwung Clock).
 - **Automatic backups** — the last 10 saved versions of each song are kept
   automatically, and any of them can be restored from Song Settings >
   Restore Backup.

@@ -249,7 +249,13 @@
         "Chains: set a",
         "Schwung chain's MIDI",
         "channel; Edit Chain",
-        "opens it."
+        "opens it.",
+        "",
+        "Schwung Clock: sends",
+        "the song tempo to",
+        "Schwung, so synced",
+        "LFOs and delays",
+        "keep time."
       ]
     }
   ]
