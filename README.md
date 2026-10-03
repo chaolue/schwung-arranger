@@ -27,6 +27,11 @@ and perform live — all from Move's pads, step buttons and jog wheel.
 - **Output routing** — send MIDI to External, Move tracks, or the Schwung
   synth chain, independently for drums and each instrument track, each on a
   configurable channel.
+- **Schwung chains alongside** — hold Track 1–4 to edit Schwung's Chain 1–4
+  (or hold Menu for Master FX) while the song keeps playing: the editor takes
+  the screen, jog, knobs and Back, and the Arranger keeps the pads, steps,
+  transport and track buttons. Options > Chains sets which MIDI channel each
+  chain listens on.
 - **Automatic backups** — the last 10 saved versions of each song are kept
   automatically, and any of them can be restored from Song Settings >
   Restore Backup.
@@ -37,7 +42,8 @@ and perform live — all from Move's pads, step buttons and jog wheel.
 ## Prerequisites
 
 - [Schwung](https://github.com/charlesvestal/schwung) installed on your
-  Ableton Move.
+  Ableton Move. Editing chains alongside the Arranger uses Schwung's co-run,
+  which needs Schwung 1.6.2 or newer.
 - A library of GM-style MIDI drum clips organised into folders
   (e.g. `Grooves/`, `Fills/`). Song folders may be laid out with part
   subfolders (`Grooves/`, `Fills/`, `Clap/`, `Snare/`, `Stick/`). The default
