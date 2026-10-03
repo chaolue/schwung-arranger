@@ -129,6 +129,31 @@
       ]
     },
     {
+      "title": "Perform Knobs",
+      "lines": [
+        "Map knobs in Setlist",
+        "Edit > (knobs).",
+        "",
+        "A song can override",
+        "a knob, or turn it",
+        "Off: Song Settings >",
+        "Knobs.",
+        "",
+        "Each knob controls a",
+        "Schwung chain param.",
+        "Values are restored",
+        "per song; a turn in",
+        "Perform saves it for",
+        "the current song.",
+        "",
+        "Touch: show value.",
+        "",
+        "Warns if the loaded",
+        "Move Set is not the",
+        "setlist's."
+      ]
+    },
+    {
       "title": "Jam Mode",
       "children": [
         {
