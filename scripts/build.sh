@@ -37,16 +37,21 @@ cp src/module.json dist/arranger/module.json
 cp build/dsp.so dist/arranger/dsp.so
 chmod +x dist/arranger/dsp.so
 
+# Every file below is part of the module, so a missing one fails the build
+# (set -e) instead of shipping a tarball without it. These used to end in
+# `|| true`, which would have released a module with no UI at all, as
+# successfully as a complete one.
+
 # UI ships as-is; host copies it at load time.
-cp src/ui.js dist/arranger/ui.js || true
+cp src/ui.js dist/arranger/ui.js
 
 # Per-module settings schema for the Schwung Manager web UI (host >= 0.9.8).
-cp src/settings-schema.json dist/arranger/settings-schema.json || true
+cp src/settings-schema.json dist/arranger/settings-schema.json
 
 # On-device help (Global Settings -> System -> Help -> Modules).
-[ -f src/help.json ] && cp src/help.json dist/arranger/help.json || true
+cp src/help.json dist/arranger/help.json
 
-[ -f LICENSE ] && cp LICENSE dist/arranger/LICENSE || true
+cp LICENSE dist/arranger/LICENSE
 
 cd dist
 tar -czvf arranger-module.tar.gz arranger/

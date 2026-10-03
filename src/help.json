@@ -77,6 +77,31 @@
             "Note Gap: cuts note",
             "before the next."
           ]
+        },
+        {
+          "title": "Song Settings",
+          "lines": [
+            "Menu: open Song",
+            "Settings.",
+            "",
+            "Name, Tempo, Time",
+            "Signature, Key and",
+            "Lock Song.",
+            "",
+            "Restore Backup:",
+            "pick a saved version",
+            "(newest first, with",
+            "its section count).",
+            "",
+            "The version replaced",
+            "is kept as a backup,",
+            "so a restore can be",
+            "undone. The last 10",
+            "versions are kept.",
+            "",
+            "Not available while",
+            "the song is locked."
+          ]
         }
       ]
     },

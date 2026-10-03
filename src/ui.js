@@ -8,7 +8,7 @@
  * confirmed from the logs (see init()/playCurrentSong()) instead of guessing
  * whether a new file actually loaded. Keep the DSP dsp_build_version in
  * arranger_engine.c in sync so both sides are verifiable. */
-const UI_BUILD_VERSION = "arranger-ui-2026-09-09g";
+const UI_BUILD_VERSION = "arranger-ui-2026-10-01-loading";
 
 import {
     MidiNoteOn, MidiNoteOff, MidiCC,
@@ -89,7 +89,7 @@ const SONGS_DIR = "/data/UserData/UserLibrary/Arranger/Songs";
  * dot-entries) and the Song Bank list never see them. Max backups kept per
  * song is MAX_SONG_BACKUPS. */
 const SONGS_BACKUP_DIR = SONGS_DIR + "/.backups";
-const MAX_SONG_BACKUPS = 5;
+const MAX_SONG_BACKUPS = 10;
 const SETLISTS_DIR = "/data/UserData/UserLibrary/Arranger/Setlists";
 const SETTINGS_PATH = "/data/UserData/UserLibrary/Arranger/settings.json";
 /* Per-module settings persisted by Schwung Manager (the web UI) via
@@ -120,6 +120,7 @@ const VIEW_OPTIONS = "options";
 const VIEW_OPTIONS_DRUMS = "options_drums";
 const VIEW_OPTIONS_INST = "options_inst";
 const VIEW_SONG_SETTINGS = "song_settings";
+const VIEW_SONG_BACKUPS = "song_backups";
 const VIEW_SETLIST_BANK = "setlist_bank";
 const VIEW_SETLIST_EDIT = "setlist_edit";
 const VIEW_SETLIST_PICK = "setlist_pick";
@@ -238,6 +239,13 @@ let libraryCategoryTree = null;
  * cache instead of re-fetching and re-parsing every folder's clips from the
  * DSP each time. Invalidated when a scan is requested (folder_count was 0). */
 let libraryCacheValid = false;
+/* A rescan requested on resume, waiting to land before the lists reload --
+ * see onResume / pollLibraryRescan. */
+let libraryRescanPending = false;
+let libraryRescanDeadline = 0;
+let lastLibraryRescanPoll = 0;
+const LIBRARY_RESCAN_POLL_MS = 250;
+const LIBRARY_RESCAN_MAX_WAIT_MS = 20000;
 let folderPickerPath = [];
 let folderPickerSelectedIndex = 0;
 /* Stack of the selected index at each ancestor level of the Builder folder
@@ -346,7 +354,16 @@ let backHoldPressValue = 0;
 let backHoldStatusByte = 0xB0;
 const BACK_SUSPEND_HOLD_MS = 500;
 let needsRedraw = true;
-let ledQueue = [];
+/* Pending LED writes, keyed by LED: the note for a pad or step, 128 + the CC
+ * for a button. A Map rather than a FIFO array: queueing an LED that is
+ * already waiting replaces its colour where it stands, so each LED goes out
+ * once, with its newest colour, at the place it first queued. The FIFO sent
+ * every intermediate colour in order, so a burst (a playhead crossing the
+ * steps, a grid redraw) built a backlog that replayed stale colours for
+ * several ticks -- and held some LEDs' current colour back behind them. The
+ * queue can now hold at most one entry per LED. */
+let ledQueue = new Map();
+let ledQueueWrites = 0;   /* every queued write, coalesced or not (LEDQ diagnostics) */
 const LEDS_PER_TICK = 8;
 let lastPadState = new Uint8Array(NUM_PADS);
 let lastStepState = new Uint8Array(NUM_STEPS);
@@ -356,6 +373,16 @@ let lastLedKey = "";
 let ledDirtyAll = true;
 
 let activeSongFile = null;
+/* The song object that activeSongFile holds. currentSong is not always it:
+ * play-from-section, play-from-cursor and pad previews point currentSong at a
+ * trimmed or one-clip copy while their build is in flight, Performance plays
+ * other songs, and Jam plays one-clip songs. Only this object may be written
+ * to activeSongFile. */
+let activeSongObj = null;
+/* Temp songs sliced from activeSongObj (play from section/cursor), mapped to
+ * the full song they were cut from, so a change the DSP reports for the temp
+ * song can be applied to -- and saved as -- the full one. */
+const tempSongOrigin = new WeakMap();
 let songFiles = [];
 let selectedSongIndex = 0;
 /* Set after a song file is added/removed on disk (duplicate/delete), so the
@@ -531,6 +558,19 @@ let pendingJamFolderClipLoadIndex = -1;
  * folder list arrives, so opening Folder List / Jam Folder on a fresh boot
  * (or right after a scan invalidation) doesn't leave the list empty forever. */
 let pendingLibraryFoldersReload = false;
+/* What the DSP's worker is still scanning, so a list that has not arrived yet
+ * says "Loading..." instead of looking empty: { songs, folders, found } from
+ * get_param("scan_state") (found = library folders the walk has reached so
+ * far), or null when the engine cannot say. Polled while a screen that shows
+ * one of these lists (or clips waiting on the folder scan) is up; when a list
+ * finishes loading it is reloaded at once. */
+let scanState = null;
+let lastScanStatePoll = 0;
+const SCAN_STATE_POLL_MS = 250;
+/* A folder scan finished and found no MIDI folders: say so, and stop asking
+ * for rescans of an empty library. */
+let libraryKnownEmpty = false;
+let lastLoadingPhase = -1;
 let lastTransportBar = 0;     /* last bar number seen from DSP transport */
 let maxBeatThisBar = 0;       /* highest transport beat seen in current bar */
 let transportBeatsPerBar = 0; /* observed transport beats in last complete bar */
@@ -743,7 +783,7 @@ const PAD_PREVIEW_DELAY_MS = 250; /* delay before pad tap triggers insert previe
  * redraw periodically so the shared marquee scroller animates long Song /
  * Setlist / clip names that overflow the row width. */
 const SCROLLABLE_MENU_VIEWS = new Set([
-    VIEW_ROOT, VIEW_FOLDER_LIST, VIEW_BUILDER, VIEW_TRIM, VIEW_SONG_SETTINGS,
+    VIEW_ROOT, VIEW_FOLDER_LIST, VIEW_BUILDER, VIEW_TRIM, VIEW_SONG_SETTINGS, VIEW_SONG_BACKUPS,
     VIEW_SONG_BANK, VIEW_OPTIONS, VIEW_OPTIONS_DRUMS, VIEW_OPTIONS_INST,
     VIEW_SETLIST_BANK, VIEW_SETLIST_EDIT,
     VIEW_SETLIST_PICK, VIEW_SETLIST_CLICK, VIEW_PERF_SETLIST, VIEW_PERFORMANCE,
@@ -752,7 +792,7 @@ const SCROLLABLE_MENU_VIEWS = new Set([
 const MENU_SCROLL_TICK_MS = 30; /* ~25fps redraw for marquee animation (halves the ~2s scroll-start delay) */
 let lastMenuScrollTick = 0;
 let lastLedQueueSampleTick = 0;    /* throttle for the LED-queue backlog diagnostic */
-let lastLedQueueSampleLen = -1;    /* previous sampled ledQueue.length, to log the growth rate */
+let lastLedQueueSampleLen = -1;    /* previous sampled ledQueue.size, to log the growth rate */
 /* Per-mechanism push accumulators for the same diagnostic -- reset each time
  * the periodic sample above logs, so the log shows a breakdown of which of
  * updateLEDs()/the per-tick step refresh/updateButtonLEDs() actually grew
@@ -792,26 +832,44 @@ function writeJson(path, obj) {
 
 /* Keep a rolling set of the most recent versions of each song, stored in a
  * hidden .backups folder so the DSP song scan and the Song Bank list never
- * see them. Called immediately BEFORE the current save so the last MAX_N
- * saves are preserved ("go back to check after a change"). Purely background;
+ * see them. Called immediately BEFORE a save, and copies the file AS IT IS ON
+ * DISK -- the version the save is about to replace. It used to write the
+ * in-memory song instead, i.e. the new content, so a bad save produced a
+ * backup of the bad version and nothing of the good one. Purely background;
  * has no UI. Failures are swallowed so a full backup dir never breaks a save. */
-function backupCurrentSong() {
-    if (!currentSong || !activeSongFile) return;
+function backupCurrentSong(path, name) {
+    path = path || activeSongFile;
+    if (!path) return;
     if (typeof os.readdir !== "function" || typeof os.remove !== "function") return;
-    const dir = SONGS_BACKUP_DIR + "/" + safeFileName(currentSong.name || "song");
+    let previous = null;
+    try { if (host_file_exists(path)) previous = host_read_file(path); } catch (e) { previous = null; }
+    if (!previous) return;   /* a first save: nothing to preserve */
+    writeSongBackup(name || (currentSong && currentSong.name) || "song", previous);
+}
+
+/* This song's backup folder. */
+function songBackupDir(name) {
+    return SONGS_BACKUP_DIR + "/" + safeFileName(name || "song");
+}
+
+/* Write `text` as a new timestamped backup of song `name`, then trim the
+ * folder to the newest MAX_SONG_BACKUPS. */
+function writeSongBackup(name, text) {
+    if (typeof os.readdir !== "function" || typeof os.remove !== "function") return;
+    const dir = songBackupDir(name);
     try { ensureDir(dir); } catch (e) { return; }
     /* Timestamp down to the second; guard against two saves in the same
      * millisecond by appending a counter if the file already exists. */
     const stamp0 = new Date().toISOString().replace(/[:.]/g, "-");
     let stamp = stamp0;
     let n = 1;
-    let path = dir + "/" + stamp + ".json";
-    while (host_file_exists(path)) {
+    let backupPath = dir + "/" + stamp + ".json";
+    while (host_file_exists(backupPath)) {
         stamp = stamp0 + "-" + (++n);
-        path = dir + "/" + stamp + ".json";
+        backupPath = dir + "/" + stamp + ".json";
     }
     try {
-        host_write_file(path, JSON.stringify(currentSong, null, 2));
+        host_write_file(backupPath, text);
     } catch (e) { return; }
     /* Trim to the newest MAX_SONG_BACKUPS, in lexicographic order (the
      * timestamped names sort chronologically). */
@@ -924,36 +982,79 @@ const CLICK_LOG_PATH = "/data/UserData/UserLibrary/Arranger/.clickflash_log";
 const JAM_LOG_PATH = "/data/UserData/UserLibrary/Arranger/.jam_log";
 const LOG_STEPLED = false;
 
+/* UTF-8 bytes of a string, for os.write (log lines carry clip names). */
+function utf8Bytes(s) {
+    const out = [];
+    for (let i = 0; i < s.length; i++) {
+        let c = s.charCodeAt(i);
+        if (c >= 0xD800 && c <= 0xDBFF && i + 1 < s.length) {
+            const d = s.charCodeAt(i + 1);
+            if (d >= 0xDC00 && d <= 0xDFFF) {
+                c = 0x10000 + ((c - 0xD800) << 10) + (d - 0xDC00);
+                i++;
+            }
+        }
+        if (c < 0x80) out.push(c);
+        else if (c < 0x800) out.push(0xC0 | (c >> 6), 0x80 | (c & 63));
+        else if (c < 0x10000) out.push(0xE0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
+        else out.push(0xF0 | (c >> 18), 0x80 | ((c >> 12) & 63), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
+    }
+    return new Uint8Array(out);
+}
+
+/* Bytes believed to be in each debug log, so appendLogLine can decide when
+ * to trim without a stat per line. Seeded from os.stat on first use. */
+let logFileSizes = {};
+
+/* Append one line to a debug log, keeping roughly the newest `cap` bytes.
+ *
+ * host_append_file is not part of the host's API (no Schwung release has
+ * had it), so each logger used to fall back to reading the WHOLE log and
+ * rewriting it for every line -- up to 500 KB of file I/O per line, on the
+ * UI thread, precisely when debug logging was switched on to measure timing.
+ * This appends with O_APPEND, and only once the file has grown past twice
+ * `cap` does it rewrite it down to the newest `cap` characters. */
+function appendLogLine(path, cap, line) {
+    if (typeof host_append_file === "function") {
+        host_append_file(path, line);
+        return;
+    }
+    try {
+        if (logFileSizes[path] === undefined) {
+            const st = os.stat(path);
+            logFileSizes[path] = (st && st[1] === 0 && st[0]) ? st[0].size : 0;
+        }
+        if (logFileSizes[path] > 2 * cap) {
+            let existing = "";
+            try { existing = host_read_file(path) || ""; } catch (e) {}
+            const kept = existing.length > cap ? existing.slice(existing.length - cap) : existing;
+            host_write_file(path, kept);
+            logFileSizes[path] = kept.length;
+        }
+        const bytes = utf8Bytes(line);
+        const fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644);
+        if (fd < 0) return;
+        let written = 0;
+        while (written < bytes.length) {
+            const n = os.write(fd, bytes.buffer, written, bytes.length - written);
+            if (n <= 0) break;
+            written += n;
+        }
+        os.close(fd);
+        logFileSizes[path] += written;
+    } catch (e) {}
+}
+
 function logJam(msg) {
     if (!dspDebugEnabled) return;
     if (typeof host_write_file !== "function") return;
-    try {
-        const line = new Date().toISOString() + " " + msg + "\n";
-        if (typeof host_append_file === "function") {
-            host_append_file(JAM_LOG_PATH, line);
-            return;
-        }
-        let existing = "";
-        try { if (host_file_exists(JAM_LOG_PATH)) existing = host_read_file(JAM_LOG_PATH); } catch (e) {}
-        const trimmed = existing.length > 500000 ? existing.slice(existing.length - 500000) : existing;
-        host_write_file(JAM_LOG_PATH, trimmed + line);
-    } catch (e) {}
+    appendLogLine(JAM_LOG_PATH, 500000, new Date().toISOString() + " " + msg + "\n");
 }
 
 function logDebug(msg) {
     if (!dspDebugEnabled) return;
     if (typeof host_write_file !== "function") return;
-    try {
-        const line = new Date().toISOString() + " " + msg + "\n";
-        if (typeof host_append_file === "function") {
-            host_append_file(DEBUG_LOG_PATH, line);
-            return;
-        }
-        let existing = "";
-        try { if (host_file_exists(DEBUG_LOG_PATH)) existing = host_read_file(DEBUG_LOG_PATH); } catch (e) {}
-        const trimmed = existing.length > 20000 ? existing.slice(existing.length - 20000) : existing;
-        host_write_file(DEBUG_LOG_PATH, trimmed + line);
-    } catch (e) {}
+    appendLogLine(DEBUG_LOG_PATH, 20000, new Date().toISOString() + " " + msg + "\n");
 }
 
 const TIMING_LOG_PATH = "/data/UserData/UserLibrary/Arranger/.timing_log";
@@ -961,33 +1062,13 @@ const TIMING_LOG_PATH = "/data/UserData/UserLibrary/Arranger/.timing_log";
 function logTiming(msg) {
     if (!dspDebugEnabled) return;
     if (typeof host_write_file !== "function") return;
-    try {
-        const line = new Date().toISOString() + " " + msg + "\n";
-        if (typeof host_append_file === "function") {
-            host_append_file(TIMING_LOG_PATH, line);
-            return;
-        }
-        let existing = "";
-        try { if (host_file_exists(TIMING_LOG_PATH)) existing = host_read_file(TIMING_LOG_PATH); } catch (e) {}
-        const trimmed = existing.length > 500000 ? existing.slice(existing.length - 500000) : existing;
-        host_write_file(TIMING_LOG_PATH, trimmed + line);
-    } catch (e) {}
+    appendLogLine(TIMING_LOG_PATH, 500000, new Date().toISOString() + " " + msg + "\n");
 }
 
 function logClick(msg) {
     if (!dspDebugEnabled) return;
     if (typeof host_write_file !== "function") return;
-    try {
-        const line = new Date().toISOString() + " " + msg + "\n";
-        if (typeof host_append_file === "function") {
-            host_append_file(CLICK_LOG_PATH, line);
-            return;
-        }
-        let existing = "";
-        try { if (host_file_exists(CLICK_LOG_PATH)) existing = host_read_file(CLICK_LOG_PATH); } catch (e) {}
-        const trimmed = existing.length > 20000 ? existing.slice(existing.length - 20000) : existing;
-        host_write_file(CLICK_LOG_PATH, trimmed + line);
-    } catch (e) {}
+    appendLogLine(CLICK_LOG_PATH, 20000, new Date().toISOString() + " " + msg + "\n");
 }
 
 function listFolders(path) {
@@ -1688,17 +1769,52 @@ function setlistPath(name) {
     return SETLISTS_DIR + "/" + safeFileName(name) + ".json";
 }
 
+/* Read one of the DSP's paged list answers ("songs_json", "folders_json",
+ * "clip_leaves_json"): {"count":N,"start":S,"items":[...]}, whole items only.
+ * One read normally returns the whole list -- the per-index keys this
+ * replaces cost one synchronous round trip (~2.9 ms) per name, so 2N+1 for
+ * the Song Bank on every open. Pages on from wherever an answer stopped.
+ * Returns null if the DSP gave no usable answer (the caller falls back to the
+ * per-index keys), else { count, items } with items.length <= count -- short
+ * only if a page made no progress, so the caller can read the rest per index. */
+function readDspList(key) {
+    const items = [];
+    let count = -1;
+    for (let page = 0; page < 64; page++) {
+        const raw = host_module_get_param(page === 0 ? key : key + "_" + items.length);
+        if (!raw) break;
+        let p;
+        try { p = JSON.parse(raw); } catch (e) { break; }
+        if (!p || !Array.isArray(p.items) || typeof p.count !== "number") break;
+        if (count < 0) count = p.count;
+        if (p.count !== count) return null;   /* rescanned between pages */
+        for (const it of p.items) items.push(it);
+        if (items.length >= count || p.items.length === 0) break;
+    }
+    if (count < 0) return null;
+    return { count, items };
+}
+
 function listSongFiles() {
     const out = [];
     if (typeof host_module_get_param !== "function") return out;
     let count = 0;
-    try {
-        const cnt = host_module_get_param("song_count");
-        if (cnt) count = parseInt(cnt, 10);
-    } catch (e) {}
+    let listedItems = [];
+    const listed = readDspList("songs_json");
+    if (listed) {
+        count = listed.count;
+        listedItems = listed.items;
+    } else {
+        try {
+            const cnt = host_module_get_param("song_count");
+            if (cnt) count = parseInt(cnt, 10);
+        } catch (e) {}
+    }
     for (let i = 0; i < count; i++) {
-        const name = host_module_get_param("song_name_" + i);
-        const path = host_module_get_param("song_path_" + i);
+        /* From the list answer where it reached, else by index. */
+        const s = i < listedItems.length ? listedItems[i] : null;
+        const name = s ? s.name : host_module_get_param("song_name_" + i);
+        const path = s ? s.path : host_module_get_param("song_path_" + i);
         if (name && path) out.push({ name, path });
     }
     return out;
@@ -1770,26 +1886,48 @@ function saveCurrentSong() {
      * when nothing was modified; bailing here avoids rewriting the file and
      * spawning a duplicate backup each time a song is opened and closed. */
     if (!unsavedChanges) return;
-    currentSong.modified = new Date().toISOString();
-    const path = activeSongFile || songPath(currentSong.name);
+    /* A play-from-section/cursor copy still standing in for the song (its
+     * build never confirmed, so nothing swapped the full song back) saves as
+     * the full song it was cut from -- never as itself. */
+    const song = tempSongOrigin.get(currentSong) || currentSong;
+    if (activeSongFile && activeSongObj && song !== activeSongObj) {
+        logDebug("saveCurrentSong: REFUSED -- current song is not the one loaded from " + activeSongFile +
+            " (sections=" + (song.sections ? song.sections.length : "?") + ")");
+        return;
+    }
+    song.modified = new Date().toISOString();
+    const path = activeSongFile || songPath(song.name);
     activeSongFile = path;
+    activeSongObj = song;
     /* Normalize the song before writing so the saved file reflects the same
      * rounding and per-clip source_folder that the DSP playback uses. The
-     * in-memory currentSong is updated in place so the UI stays consistent. */
-    normalizeSongForSave(currentSong);
+     * in-memory song is updated in place so the UI stays consistent. */
+    normalizeSongForSave(song);
     /* Preserve the previous version in the background backup store before
      * overwriting it, so the last few saves of this song can be inspected. */
-    backupCurrentSong();
-    writeJson(path, currentSong);
+    backupCurrentSong(path, song.name);
+    writeJson(path, song);
     unsavedChanges = false;
     /* Invalidate the DSP's cached song scan so a newly saved song appears in
      * the Song Bank list. Without this, listSongFiles() returns the stale
      * cached scan and a brand-new song is missing until the module reloads. */
-    if (typeof host_module_set_param === "function") {
-        host_module_set_param("scan_library", "1");
-    }
+    requestSongRescan();
     reloadSongBankAndPreserveSelection();
     needsRedraw = true;
+}
+
+/* Ask the DSP to rescan the Song Bank folder only (a song was saved,
+ * duplicated or deleted). "scan_library" also re-walked the whole MIDI
+ * library and re-read every clip, on the worker that builds songs, so a Play
+ * right after a save waited behind it. An engine too old to know
+ * "scan_songs" ignores it -- and the Song Bank would then never update -- so
+ * fall back to the full rescan unless it answers "scan_pending" (added
+ * alongside). */
+function requestSongRescan() {
+    if (typeof host_module_set_param !== "function") return;
+    const knowsScanSongs = typeof host_module_get_param === "function" &&
+        host_module_get_param("scan_pending") !== null;
+    host_module_set_param(knowsScanSongs ? "scan_songs" : "scan_library", "1");
 }
 
 function loadSongFile(path) {
@@ -1798,6 +1936,7 @@ function loadSongFile(path) {
     if (!obj) { logDebug("loadSongFile: readJson returned null for " + path); return false; }
     activeSongFile = path;
     currentSong = toUiSong(obj);
+    activeSongObj = currentSong;
     /* A freshly loaded song starts with no pending edits (unless the upgrade
      * below changes it). This prevents a stale dirty flag from a previously
      * edited song causing a spurious save when the new song is merely opened
@@ -1808,7 +1947,7 @@ function loadSongFile(path) {
      * Persist the upgrade immediately so the saved file is corrected. */
     if (upgradeSongSourceFolders(currentSong)) {
         normalizeSongForSave(currentSong);
-        backupCurrentSong();
+        backupCurrentSong(path, currentSong.name);
         writeJson(path, currentSong);
         logDebug("loadSongFile: upgraded source_folder paths in " + path);
     }
@@ -1875,6 +2014,45 @@ function loadSettings() {
     if (selectedOutputIndex < 0) selectedOutputIndex = 0;
 }
 
+/* Schwung Manager writes this module's settings to CONFIG_PATH. Re-read it
+ * about once a second so a change made in the web UI applies without
+ * reloading the module (docs/MODULES.md, "Reading values at runtime") --
+ * before this, a setting changed there waited for the next module load.
+ * Compared as raw text, so an unchanged file costs one small read. A file
+ * that does not parse (caught mid-write) is left for the next poll rather
+ * than applied, which would fall back to defaults for a second. */
+const CONFIG_POLL_MS = 1000;
+let lastConfigPoll = 0;
+let lastConfigRaw = null;
+
+function readConfigRaw() {
+    try {
+        if (typeof host_file_exists !== "function" || !host_file_exists(CONFIG_PATH)) return null;
+        return host_read_file(CONFIG_PATH);
+    } catch (e) {
+        return null;
+    }
+}
+
+function pollModuleConfig() {
+    const now = Date.now();
+    if (now - lastConfigPoll < CONFIG_POLL_MS) return;
+    lastConfigPoll = now;
+    const raw = readConfigRaw();
+    if (raw === null || raw === lastConfigRaw) return;
+    try {
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== "object") return;
+    } catch (e) {
+        return;
+    }
+    lastConfigRaw = raw;
+    loadSettings();
+    applyOutputSettingsToDsp();
+    needsRedraw = true;
+    logDebug("config.json changed; settings reloaded");
+}
+
 function saveOutputSettings() {
     const values = {
         output: outputTarget,
@@ -1904,6 +2082,8 @@ function saveOutputSettings() {
     } catch (e) {
         logDebug("saveOutputSettings: writeJson(CONFIG_PATH) failed " + e);
     }
+    /* Our own write is not a change to pick up (see pollModuleConfig). */
+    lastConfigRaw = readConfigRaw();
 }
 
 function currentOutputLabel() {
@@ -2023,6 +2203,7 @@ function deleteLogFiles() {
             }
         } catch (e) {}
     }
+    logFileSizes = {};   /* appendLogLine re-reads each size on next use */
 }
 
 function saveSetlist(setlist) {
@@ -2343,6 +2524,7 @@ function playCurrentSong(preloadStaged, onConfirmed) {
     if (!currentSong) { logDebug("playCurrentSong: no currentSong"); return; }
     lastLoggedDspError = null;
     const json = toEngineSongJson(currentSong);
+    const builtSong = currentSong;
     pendingSongJson = json;
     const secCount = currentSong.sections ? currentSong.sections.length : 0;
     const clipCount = currentSong.sections ? currentSong.sections.reduce((a, s) => a + (s.clips ? s.clips.length : 0), 0) : 0;
@@ -2389,7 +2571,7 @@ function playCurrentSong(preloadStaged, onConfirmed) {
                  * stored (i.e. the file moved), persist the corrected
                  * source_folder so the next play resolves directly instead of
                  * re-searching. */
-                persistResolvedClipFolders();
+                persistResolvedClipFolders(builtSong);
             }
             set("loop", dspLoopEnabled ? "1" : "0", t);
             /* Start the click FIRST, then preload the full song into staging,
@@ -2440,8 +2622,18 @@ function playCurrentSong(preloadStaged, onConfirmed) {
  * "resolved_clips" get_param; we write that folder back into the song so the
  * next play resolves directly and the delay disappears. Returns true if any
  * clip was updated. */
-function persistResolvedClipFolders() {
+/* `built` is the song object playCurrentSong sent to the DSP -- not
+ * necessarily the song whose file is open. The folder corrections are applied
+ * to it (so later plays of it resolve directly), and to the open song when
+ * `built` is the open song or a play-from-section/cursor copy cut from it;
+ * only the open song is ever written. This used to fix and save currentSong,
+ * which while a play-from-section build is in flight is the TRIMMED copy --
+ * so starting playback from section 3 saved the song without sections 1 and
+ * 2. A pad preview (a one-clip song) or a Performance-mode song could be
+ * written over the open song's file the same way. */
+function persistResolvedClipFolders(built) {
     if (typeof host_module_get_param !== "function") return false;
+    built = built || currentSong;
     let raw = null;
     try {
         raw = host_module_get_param("resolved_clips");
@@ -2452,30 +2644,40 @@ function persistResolvedClipFolders() {
         list = JSON.parse(raw);
     } catch (e) { return false; }
     if (!Array.isArray(list) || list.length === 0) return false;
-    let changed = false;
-    for (const item of list) {
-        const src = item && item.source;
-        const folder = item && item.folder;
-        if (!src || !folder) continue;
-        for (const sec of currentSong ? currentSong.sections : []) {
-            for (const c of sec.clips || []) {
-                if (c.source === src && c.source_folder !== folder) {
-                    c.source_folder = folder;
-                    changed = true;
+    const applyTo = function (song) {
+        let changed = false;
+        for (const item of list) {
+            const src = item && item.source;
+            const folder = item && item.folder;
+            if (!src || !folder) continue;
+            for (const sec of song && song.sections ? song.sections : []) {
+                for (const c of sec.clips || []) {
+                    if (c.source === src && c.source_folder !== folder) {
+                        c.source_folder = folder;
+                        changed = true;
+                    }
                 }
             }
         }
+        return changed;
+    };
+    const target = built === activeSongObj ? built : tempSongOrigin.get(built);
+    const changedBuilt = built && built !== target ? applyTo(built) : false;
+    if (!target) {
+        logDebug("persistResolvedClipFolders: " + list.length + " folder fix(es) for a song that is not the open file; not saved");
+        return changedBuilt;
     }
+    const changed = applyTo(target);
     if (changed) {
         unsavedChanges = true;
         if (activeSongFile) {
-            normalizeSongForSave(currentSong);
-            backupCurrentSong();
-            writeJson(activeSongFile, currentSong);
+            normalizeSongForSave(target);
+            backupCurrentSong(activeSongFile, target.name);
+            writeJson(activeSongFile, target);
             unsavedChanges = false;
         }
     }
-    return changed;
+    return changed || changedBuilt;
 }
 
 /* Show a display overlay naming the clip that could not be found, so the user
@@ -2540,6 +2742,12 @@ function stopPreview() {
  * sent from JS — all audio-critical MIDI output lives in the C engine. */
 function drainOutputEvents() {
     if (typeof host_module_get_param !== "function") return;
+    /* With emit_directly on -- which pushOutputRoutingToDsp always sets --
+     * the DSP never queues an event (queue_push is only reached with it
+     * off), so "events" can only ever answer "[]". Each read is a
+     * synchronous round trip of one SPI frame (~2.9 ms), and this ran twice
+     * per tick (here and from updateDspState). */
+    if (dspDirectEmit) return;
     const raw = host_module_get_param("events");
     if (!raw || raw === "[]") return;
     let events = [];
@@ -2566,11 +2774,46 @@ function drainOutputEvents() {
     }
 }
 
+/* Where updateDspState reads each DSP value from on this tick.
+ *
+ * Normally that is ONE read: get_param("ui_poll") answers timeline_info,
+ * state, transport, error and swap_guard_suppressed together. Each
+ * host_module_get_param is a synchronous round trip through the host's param
+ * channel, serviced once per SPI frame (~2.9 ms), and this used to make five
+ * of them every tick (six in Jam, plus two "events" reads) -- roughly 15-20
+ * ms blocked per tick. The host hands pad and button input to the module only
+ * between ticks, so that was added straight onto every press.
+ *
+ * If ui_poll gives no answer (a dsp.so older than this ui.js, or a read that
+ * failed), each value falls back to its own read, exactly as before. A poll
+ * value is already parsed; a per-key value is still a string (dspObject
+ * accepts either). */
+function readDspPoll() {
+    const raw = host_module_get_param("ui_poll");
+    if (raw) {
+        try { return { poll: JSON.parse(raw) }; } catch (e) {}
+    }
+    return { poll: null };
+}
+
+function dspPollValue(src, key) {
+    if (src.poll) {
+        const v = src.poll[key];
+        return v === undefined ? null : v;
+    }
+    return host_module_get_param(key);
+}
+
+function dspObject(v) {
+    return (typeof v === "string") ? JSON.parse(v) : v;
+}
+
 function updateDspState() {
     if (typeof host_module_get_param !== "function") return;
+    let src = readDspPoll();
     try {
-        const info = host_module_get_param("timeline_info");
-        if (info) dspTimelineInfo = JSON.parse(info);
+        const info = dspPollValue(src, "timeline_info");
+        if (info) dspTimelineInfo = dspObject(info);
     } catch (e) { dspTimelineInfo = null; }
     /* Declared outside the try below (not `const st = ...` inside it) so the
      * catch block can safely reference it in its error log. `const` inside a
@@ -2581,10 +2824,14 @@ function updateDspState() {
      * device: a real TypeError below (see next comment) was masked by this
      * scoping bug, surfacing only as "ReferenceError: 'st' is not defined". */
     let st;
+    /* Set when a build-confirmation callback below runs: it writes to the
+     * DSP (play, swap, ...), and the values after it -- transport onwards --
+     * were always read after those writes. A fresh poll keeps that. */
+    let confirmedBuild = false;
     try {
-        st = host_module_get_param("state");
+        st = dspPollValue(src, "state");
         if (st) {
-            lastDspState = JSON.parse(st);
+            lastDspState = dspObject(st);
             /* Log only when the DSP-reported active source changes, so the
              * log isn't flooded every tick. */
             if (jamPlaying && lastDspState.active_source !== jamActiveSource) {
@@ -2606,23 +2853,26 @@ function updateDspState() {
             if (pendingPrimaryConfirm && primaryGen !== pendingPrimaryConfirm.gen) {
                 const cb = pendingPrimaryConfirm.onReady;
                 pendingPrimaryConfirm = null;
+                confirmedBuild = true;
                 cb();
             }
             if (pendingStagingConfirm && stagingGen !== pendingStagingConfirm.gen) {
                 const cb = pendingStagingConfirm.onReady;
                 pendingStagingConfirm = null;
+                confirmedBuild = true;
                 cb();
             }
         }
     } catch (e) {
-        if (jamPlaying) logJam("STATE parse error=" + e + " raw=" + String(st));
+        if (jamPlaying) logJam("STATE parse error=" + e + " raw=" + (typeof st === "string" ? st : JSON.stringify(st)));
         lastDspState = null;
     }
+    if (confirmedBuild && src.poll) src = readDspPoll();
     let tr;
     try {
-        tr = host_module_get_param("transport");
+        tr = dspPollValue(src, "transport");
         if (tr) {
-            lastDspTransport = JSON.parse(tr);
+            lastDspTransport = dspObject(tr);
             /* Mirror the DSP's own jam_chord_pending -> jam_chord_live
              * promotion timing (apply_pending_jam_chord, called from
              * update_bar_counter) so the chord pads' pending/live LED
@@ -2659,11 +2909,11 @@ function updateDspState() {
             }
         }
     } catch (e) {
-        logDebug("updateDspState transport parse error=" + e + " raw=" + String(tr));
+        logDebug("updateDspState transport parse error=" + e + " raw=" + (typeof tr === "string" ? tr : JSON.stringify(tr)));
         lastDspTransport = null;
     }
     try {
-        const err = host_module_get_param("error");
+        const err = dspPollValue(src, "error");
         if (err && err !== lastLoggedDspError) {
             logDebug("dsp_error=" + err);
             lastLoggedDspError = err;
@@ -2674,7 +2924,7 @@ function updateDspState() {
      * jamSwapStaged). */
     if (jamPlaying) {
         try {
-            const suppressed = host_module_get_param("swap_guard_suppressed");
+            const suppressed = dspPollValue(src, "swap_guard_suppressed");
             const n = suppressed ? parseInt(suppressed, 10) : 0;
             if (n !== lastSwapGuardSuppressed) {
                 lastSwapGuardSuppressed = n;
@@ -3006,22 +3256,31 @@ function updateDspState() {
 
 function flushLedQueue() {
     let n = 0;
-    while (ledQueue.length > 0 && n < LEDS_PER_TICK) {
-        const msg = ledQueue.shift();
+    for (const [key, msg] of ledQueue) {
+        if (n >= LEDS_PER_TICK) break;
         if (msg.length === 4) {
             /* msg = [0x09, MidiNoteOn, note, color] */
-            if (perfClickPlaying && (msg[2] >= MovePad1 && msg[2] < MovePad1 + NUM_PADS)) {
+            if (dspDebugEnabled && perfClickPlaying && (msg[2] >= MovePad1 && msg[2] < MovePad1 + NUM_PADS)) {
                 logDebug("LEDSEND pad=" + (msg[2] - MovePad1) + " color=" + msg[3] +
                     " bar=" + (lastDspTransport ? lastDspTransport.bar : "?") +
                     " beat=" + (lastDspTransport ? lastDspTransport.beat : "?") +
                     " t=" + Date.now());
             }
-            move_midi_internal_send(msg);
+            /* The host refuses a write (false) when its MIDI-out buffer is
+             * full; padColor/stepColor already recorded this colour as sent,
+             * so a dropped write would never be retried. Leave it queued. */
+            if (move_midi_internal_send(msg) === false) break;
         } else {
             setButtonLED(msg[0], msg[1]);
         }
+        ledQueue.delete(key);
         n++;
     }
+}
+
+function queueLed(key, msg) {
+    ledQueue.set(key, msg);
+    ledQueueWrites++;
 }
 
 /* Send all 32 pads to the host immediately, bypassing the per-tick throttle.
@@ -3034,22 +3293,24 @@ function flushPadGridImmediate() {
     for (let p = 0; p < NUM_PADS; p++) {
         const note = MovePad1 + p;
         const msg = [0x09, MidiNoteOn, note, lastPadState[p]];
-        move_midi_internal_send(msg);
+        /* Sent: a queued write for this pad is now redundant (it can only
+         * hold the same colour, or an older one). Refused: keep it queued. */
+        if (move_midi_internal_send(msg) !== false) ledQueue.delete(note);
     }
 }
 
 function queuePadLED(padIndex, color) {
     const note = MovePad1 + padIndex;
-    ledQueue.push([0x09, MidiNoteOn, note, color]);
+    queueLed(note, [0x09, MidiNoteOn, note, color]);
 }
 
 function queueStepLED(stepIndex, color) {
     const note = MoveStep1 + stepIndex;
-    ledQueue.push([0x09, MidiNoteOn, note, color]);
+    queueLed(note, [0x09, MidiNoteOn, note, color]);
 }
 
 function queueButtonLED(cc, color) {
-    ledQueue.push([cc, color]);
+    queueLed(128 + cc, [cc, color]);
 }
 
 function padColor(padIndex, color, force = false) {
@@ -3231,6 +3492,7 @@ function updateButtonLEDs() {
                 active.set(MoveMainButton, WhiteLedBright);
                 break;
             case VIEW_SONG_SETTINGS:
+            case VIEW_SONG_BACKUPS:
                 active.set(MoveBack, WhiteLedBright);
                 active.set(MoveMainButton, WhiteLedBright);
                 break;
@@ -3316,7 +3578,7 @@ function updateButtonLEDs() {
                         perfLastUpDownScrollRow = perfScrollRow;
                         /* Send directly, bypassing the throttled ledQueue. A
                          * queued button message can be wiped by the next
-                         * ledDirtyAll's ledQueue.length=0 (which fires on bar
+                         * ledDirtyAll's ledQueue.clear() (which fires on bar
                          * boundaries during playback) before it flushes,
                          * leaving the up/down LEDs stuck in their old state
                          * after an auto-scroll. */
@@ -3324,6 +3586,10 @@ function updateButtonLEDs() {
                         setButtonLED(MoveDown, downLit ? WhiteLedBright : Black);
                         lastButtonState.set(MoveUp, upLit ? WhiteLedBright : Black);
                         lastButtonState.set(MoveDown, downLit ? WhiteLedBright : Black);
+                        /* ...and drop any write still queued for them, which
+                         * would otherwise land after this one and undo it. */
+                        ledQueue.delete(128 + MoveUp);
+                        ledQueue.delete(128 + MoveDown);
                     }
                 }
                 active.set(MovePlay, perfPlaying ? PureRed : PureGreen);
@@ -4437,11 +4703,11 @@ function drawJamStepLEDs(force) {
             /* Diagnostic: confirm the colour fill loop actually QUEUES a
              * message per step, rather than trusting that the computed
              * inputs above (already confirmed correct) reach the hardware.
-             * Logs the queue-length delta and, on the first draw of a new
+             * Logs how many LED writes this queued and, on the first draw of a new
              * preview (or whenever the queued count looks wrong), every
              * per-step color decision and whether stepColor's dedup
              * (lastStepState) suppressed it. */
-            const qBefore = ledQueue.length;
+            const qBefore = ledQueueWrites;
             const perStep = [];
             for (let s = 0; s < NUM_STEPS; s++) {
                 let want;
@@ -4457,7 +4723,7 @@ function drawJamStepLEDs(force) {
                 const queued = lastStepState[s] !== before || force;
                 perStep.push(s + ":want=" + want + ":prev=" + before + ":" + (queued ? "QUEUED" : "skip"));
             }
-            const qAfter = ledQueue.length;
+            const qAfter = ledQueueWrites;
             const qKey = pKey + "|qDelta=" + (qAfter - qBefore);
             if (qKey !== lastJamPreviewQueueKey) {
                 lastJamPreviewQueueKey = qKey;
@@ -4621,12 +4887,12 @@ function updateLEDs() {
          * (and recovers on its own), but the static-colour steps only ever
          * got sent once, and if that single send landed in a backlog that
          * got wiped, nothing ever corrected it again. */
-        if (ledQueue.length > 0) {
+        if (ledQueue.size > 0) {
             lastStepState.fill(255);
             lastPadState.fill(255);
             lastButtonState.clear();
         }
-        ledQueue.length = 0;
+        ledQueue.clear();
         switch (currentView) {
             case VIEW_BUILDER: drawBuilderLEDs(); break;
             case VIEW_PERFORMANCE:
@@ -4655,7 +4921,7 @@ function updateLEDs() {
         ledDirtyAll = false;
     }
     /* Clear step LEDs after the queue has been reset, otherwise the black
-     * messages queued by clearStepLEDs get wiped by ledQueue.length = 0. */
+     * messages queued by clearStepLEDs get wiped by ledQueue.clear(). */
     if (leavingStepView) {
         clearStepLEDs();
     }
@@ -4895,6 +5161,10 @@ function drawFolderList() {
     const pathStr = folderPickerPath.map(shortSongName).join("/");
     drawMenuHeader("Source Folder", pathStr);
     const items = node ? getTreeDisplayItems(node) : [];
+    if (items.length === 0 && libraryFolders.length === 0) {
+        drawLibraryFoldersPlaceholder();
+        return;
+    }
     drawMenuList({
         items,
         selectedIndex: folderPickerSelectedIndex,
@@ -4919,7 +5189,11 @@ function drawBuilder() {
      * value once actually playing) is only needed here. */
     const displayIdx = builderPlayingFromTemp ? 0 : (playbackState === "playing" ? playingIdx : currentSectionIndex);
     const sec = currentSong ? currentSong.sections[displayIdx] : null;
-    drawMenuHeader(scrollHeader("Drums: " + (currentSong ? shortSongName(currentSong.name) : ""), songIsLocked() ? 27 : 28), songIsLocked() ? "*" : "");
+    /* The clip pads are waiting on the folder scan (a song opened before
+     * the library has loaded): "..." until they arrive. */
+    const clipsLoading = !!pendingFolderClipLoadName;
+    drawMenuHeader(scrollHeader("Drums: " + (currentSong ? shortSongName(currentSong.name) : ""), (songIsLocked() || clipsLoading) ? 27 : 28),
+        clipsLoading ? "..." : (songIsLocked() ? "*" : ""));
     if (!sec) {
         print(2, LIST_TOP_Y, "No section.", 1);
         drawOverlay();
@@ -5988,6 +6262,7 @@ function openSongSettings() {
     songSettingsPendingNum = currentSong.time_sig_num || 4;
     songSettingsPendingDen = currentSong.time_sig_den || 4;
     songSettingsPendingKey = currentSong.key || DEFAULT_KEY;
+    songSettingsBackupCount = listSongBackups(currentSong.name).length;
     currentView = VIEW_SONG_SETTINGS;
     menuStack.push({ title: "Settings", selectedIndex: 0 });
     needsRedraw = true;
@@ -6006,7 +6281,8 @@ function drawSongSettings() {
         { key: "bpm", label: "Tempo", value: String(songSettingsPendingBpm) },
         { key: "num", label: "Time Signature", value: songSettingsPendingNum + "/" + songSettingsPendingDen },
         { key: "key", label: "Key", value: songSettingsPendingKey },
-        { key: "lock", label: "Lock Song", value: songIsLocked() ? "On" : "Off" }
+        { key: "lock", label: "Lock Song", value: songIsLocked() ? "On" : "Off" },
+        { key: "restore", label: "Restore Backup", value: String(songSettingsBackupCount) }
     ];
     drawMenuList({
         labelX: 3,
@@ -6084,10 +6360,16 @@ function handleSongSettingsInput(cc, value) {
                 songSettingsPendingKey = KEYS[next];
             }
         } else {
-            songSettingsFocus = Math.max(0, Math.min(4, songSettingsFocus + delta));
+            songSettingsFocus = Math.max(0, Math.min(SONG_SETTINGS_RESTORE_ROW, songSettingsFocus + delta));
         }
         needsRedraw = true;
     } else if (cc === MoveMainButton && value > 0) {
+        if (songSettingsFocus === SONG_SETTINGS_RESTORE_ROW) {
+            /* A locked song cannot be edited, and a restore replaces it. */
+            if (!locked) openSongBackups();
+            needsRedraw = true;
+            return;
+        }
         if (songSettingsFocus === 4) {
             /* Lock Song row: toggle the lock. Toggling is always allowed
              * (so a locked song can be unlocked here). */
@@ -6130,9 +6412,159 @@ function handleSongSettingsInput(cc, value) {
     }
 }
 
+/* ── Song Settings > Restore Backup ────────────────────────────────────── */
+
+const SONG_SETTINGS_RESTORE_ROW = 5;
+let songSettingsBackupCount = 0;
+let songBackupList = [];      /* [{ file, path, label, sections }] newest first */
+let songBackupSelected = 0;
+
+/* This song's backups, newest first. Backup files are named by their UTC
+ * time (2026-09-30T10-03-47-882Z.json, with "-2" etc. appended for a second
+ * one in the same millisecond); shown in the Move's local time. */
+function listSongBackups(name) {
+    if (typeof os.readdir !== "function") return [];
+    const dir = songBackupDir(name);
+    let names = [];
+    try {
+        const raw = os.readdir(dir);
+        const list = Array.isArray(raw) ? (Array.isArray(raw[0]) ? raw[0] : raw) : [];
+        names = list.filter(nm => typeof nm === "string" && nm.endsWith(".json"));
+    } catch (e) { return []; }
+    names.sort().reverse();
+    const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const pad = n => (n < 10 ? "0" : "") + n;
+    return names.map(file => {
+        const m = file.match(/^(\d{4})-(\d\d)-(\d\d)T(\d\d)-(\d\d)-(\d\d)/);
+        let label = file.replace(/\.json$/, "");
+        if (m) {
+            const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]));
+            label = d.getDate() + " " + MONTHS[d.getMonth()] + " " + pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds());
+        }
+        return { file, path: dir + "/" + file, label, sections: null };
+    });
+}
+
+function openSongBackups() {
+    if (!currentSong || !activeSongFile) return;
+    songBackupList = listSongBackups(currentSong.name);
+    songBackupSelected = 0;
+    currentView = VIEW_SONG_BACKUPS;
+    menuStack.push({ title: "Restore Backup", selectedIndex: 0 });
+    needsRedraw = true;
+}
+
+function closeSongBackups() {
+    menuStack.pop();
+    currentView = VIEW_SONG_SETTINGS;
+    songSettingsBackupCount = listSongBackups(currentSong ? currentSong.name : "").length;
+    needsRedraw = true;
+}
+
+/* Section count of a backup, read once when its row is first drawn: the
+ * quickest way to tell a good version from a damaged one. */
+function songBackupSections(entry) {
+    if (entry.sections === null) {
+        const obj = readJson(entry.path);
+        entry.sections = (obj && Array.isArray(obj.sections)) ? obj.sections.length : -1;
+    }
+    return entry.sections;
+}
+
+function drawSongBackups() {
+    drawMenuHeader("Restore Backup", "");
+    if (songBackupList.length === 0) {
+        print(4, LIST_TOP_Y, "No backups yet", 1);
+        return;
+    }
+    drawMenuList({
+        labelX: 3,
+        items: songBackupList,
+        selectedIndex: songBackupSelected,
+        getLabel: (item) => item.label,
+        getValue: (item) => {
+            const n = songBackupSections(item);
+            return n < 0 ? "?" : n + " sec";
+        },
+        valueAlignRight: true,
+        labelGap: 2,
+        listArea: { topY: LIST_TOP_Y, bottomY: LIST_INDICATOR_BOTTOM_Y }
+    });
+}
+
+/* Make the chosen backup the song. The state being replaced -- including any
+ * edit not yet saved -- is first kept as a new backup of its own, so a
+ * restore can itself be undone from this same list. */
+function restoreSongBackup(entry) {
+    if (!currentSong || !activeSongFile) return;
+    let text = null;
+    try { text = host_read_file(entry.path); } catch (e) { text = null; }
+    let obj = null;
+    try { obj = text ? JSON.parse(text) : null; } catch (e) { obj = null; }
+    if (!obj || !Array.isArray(obj.sections)) {
+        showOverlay("Restore failed", "unreadable backup", 180);
+        logDebug("restoreSongBackup: unreadable " + entry.path);
+        return;
+    }
+    const path = activeSongFile;
+    const name = currentSong.name;
+    /* Read before writing: the new backup below trims the folder to
+     * MAX_SONG_BACKUPS, which could remove the oldest -- the chosen one. */
+    const current = tempSongOrigin.get(currentSong) || currentSong;
+    normalizeSongForSave(current);
+    writeSongBackup(name, JSON.stringify(current, null, 2));
+    host_write_file(path, text);
+    logDebug("restoreSongBackup: " + entry.file + " -> " + path + " (sections=" + obj.sections.length + ")");
+    if (!loadSongFile(path)) return;
+    if (!currentSong.sections || currentSong.sections.length === 0) {
+        currentSong.sections = [newSection("Section 1")];
+        unsavedChanges = true;
+    }
+    /* Back to the builder, as if the song had just been opened. */
+    builderPage = 0;
+    builderCursor = 0;
+    loadFolderClips(folderIndexForPath(currentSong.source_folder));
+    pendingFolderClipLoadName = (folderClips.length === 0) ? currentSong.source_folder : null;
+    requestSongRescan();
+    menuStack.pop();   /* Restore Backup */
+    menuStack.pop();   /* Settings */
+    currentView = VIEW_BUILDER;
+    stepLedsDirty = true;
+    ledDirtyAll = true;
+    needsRedraw = true;
+    showOverlay("Backup restored", entry.label, 180);
+}
+
+function handleSongBackupsInput(cc, value) {
+    if (cc === MoveMainKnob) {
+        const delta = decodeDelta(value);
+        if (songBackupList.length > 0) {
+            songBackupSelected = Math.max(0, Math.min(songBackupList.length - 1, songBackupSelected + delta));
+        }
+        needsRedraw = true;
+    } else if (cc === MoveMainButton && value > 0) {
+        const entry = songBackupList[songBackupSelected];
+        if (!entry) return;
+        const n = songBackupSections(entry);
+        openConfirm({
+            title: "Restore Backup?",
+            name: entry.label + (n >= 0 ? " (" + n + " sec)" : ""),
+            onConfirm: () => restoreSongBackup(entry),
+            onCancel: () => { needsRedraw = true; }
+        });
+    } else if (cc === MoveBack && value > 0) {
+        closeSongBackups();
+    }
+}
+
 function drawSongBank() {
-    drawMenuHeader("Song Bank", "");
+    /* Still scanning with songs already listed: they are the previous scan's,
+     * so say a refresh is on its way. */
+    const loading = listLoading("songs");
+    drawMenuHeader("Song Bank", loading && songFiles.length > 0 ? "..." : "");
     const items = [{ label: "+ New Song" }].concat(songFiles.map(f => ({ label: shortSongName(f.name || f) })));
+    /* Display only: selection is bounded by songFiles, so it cannot land here. */
+    if (loading && songFiles.length === 0) items.push({ label: loadingText("songs") });
     /* Mark locked songs with "*" in the value column. */
     const lockMap = new Map();
     for (const f of songFiles) {
@@ -6283,6 +6715,10 @@ function drawSetlistEdit() {
 function drawSetlistPick() {
     drawMenuHeader(scrollHeader("Add Song: " + (currentSetlist ? shortSongName(currentSetlist.name) : ""), 24), "");
     const items = songFiles.map(f => ({ label: shortSongName(f.name || f) }));
+    if (items.length === 0) {
+        print(4, LIST_TOP_Y, listLoading("songs") ? loadingText("songs") : "No songs yet", 1);
+        return;
+    }
     drawMenuList({
         labelX: 3,
         items,
@@ -6415,10 +6851,9 @@ function drawPerformance() {
     }
     /* Log only on change, not every tick (drawPerformance runs every tick
      * while this view is shown). Unconditional logging here was firing ~25x/
-     * sec at idle -- logDebug's fallback path (host_append_file is not part
-     * of the host's filesystem API, so this is always the active path: see
-     * logDebug's own definition) reads the WHOLE log file, truncates to the
-     * last 20000 characters, and rewrites it on every single call. At that
+     * sec at idle -- and logDebug then read the WHOLE log file, truncated it
+     * to the last 20000 characters and rewrote it on every single call (it
+     * appends now, see appendLogLine, but the window is the same size). At that
      * rate the 20KB window was pure idle PERFDISP spam within a few seconds,
      * permanently evicting whatever happened moments earlier -- which is
      * exactly why every attempt to read this log after a reported bug (a
@@ -6570,6 +7005,10 @@ function drawJamFolder() {
     const pathStr = jamFolderPickerPath.map(shortSongName).join("/");
     drawMenuHeader("Jam Folder", pathStr);
     const items = node ? getTreeDisplayItems(node) : [];
+    if (items.length === 0 && libraryFolders.length === 0) {
+        drawLibraryFoldersPlaceholder();
+        return;
+    }
     drawMenuList({
         items,
         selectedIndex: jamFolderPickerSelectedIndex,
@@ -6592,7 +7031,7 @@ function drawJam() {
     const maxName = jamPlaying ? 26 : 28;
     let header = shortFolder;
     if (header.length > maxName) header = jamHeaderScroller.getScrolledText(header, maxName);
-    drawMenuHeader("Jam: " + header, jamPlaying ? "*" : "");
+    drawMenuHeader("Jam: " + header, jamPlaying ? "*" : (pendingJamFolderClipLoadIndex >= 0 ? "..." : ""));
 
     const grooveCols = 4;
     const fillCols = 4;
@@ -6782,6 +7221,7 @@ function handleFolderListInput(cc, value) {
                 currentMode = MODE_BUILDER;
                 activeSongFile = newPath;
                 currentSong = newSong(folder);
+                activeSongObj = currentSong;
                 currentSong.name = songName;
                 unsavedChanges = false;
                 currentSectionIndex = 0;
@@ -7051,6 +7491,7 @@ function startNewSong(folderName) {
     currentMode = MODE_BUILDER;
     activeSongFile = null;
     currentSong = newSong(folderName);
+    activeSongObj = currentSong;
     unsavedChanges = false;
     currentSectionIndex = 0;
     currentView = VIEW_BUILDER;
@@ -7309,9 +7750,7 @@ function reloadSongBankAndPreserveSelection() {
  * polling (see the pendingSongBankSync tick handler) until `path`
  * appears/disappears from the DSP's cached song list. */
 function requestSongBankSync(path, shouldExist, selectOnArrive) {
-    if (typeof host_module_set_param === "function") {
-        host_module_set_param("scan_library", "1");
-    }
+    requestSongRescan();
     pendingSongBankSync = { path, shouldExist, selectOnArrive: !!selectOnArrive };
     reloadSongBankAndPreserveSelection();
     needsRedraw = true;
@@ -9539,13 +9978,23 @@ function perfSectionBarRange(sectionIndex) {
     return { startBar, endBar };
 }
 
+/* A previous play-from build that never confirmed leaves currentSong pointing
+ * at its trimmed copy; put the full song back before cutting a new copy, so a
+ * copy is never cut from a copy (currentSectionIndex indexes the full song). */
+function restoreSongFromTempCopy() {
+    const origin = tempSongOrigin.get(currentSong);
+    if (origin) currentSong = origin;
+}
+
 function playFromCurrentSection() {
+    restoreSongFromTempCopy();
     const sec = currentSong ? currentSong.sections[currentSectionIndex] : null;
     if (!sec || !sec.clips || sec.clips.length === 0) return;
     /* Play from the current section through the end of the song. */
     const temp = JSON.parse(JSON.stringify(currentSong));
     temp.sections = JSON.parse(JSON.stringify(currentSong.sections.slice(currentSectionIndex)));
     reindexInstrumentsForSectionSlice(temp, currentSectionIndex);
+    tempSongOrigin.set(temp, currentSong);
     let barOffset = 0;
     for (let i = 0; i < currentSectionIndex; i++) {
         barOffset += sectionBars(currentSong.sections[i]);
@@ -9605,14 +10054,21 @@ function previewClip(clip, barOffset) {
     const savedLoop = dspLoopEnabled;
     dspLoopEnabled = false;
     previewBarOffset = (typeof barOffset === "number") ? barOffset : 0;
-    /* Restore from onConfirmed -- see playFromCurrentSection above. */
+    /* The loop mode is read when the build confirms, so it is restored then.
+     * The song goes back NOW, as jamPlayClip does: playCurrentSong has built
+     * its JSON (and remembered the preview song for the folder check) before
+     * it returns. Leaving the one-section preview song in currentSong until
+     * the confirmation made the builder draw sections[currentSectionIndex]
+     * of it -- "No section." for any section but the first, for the whole
+     * build -- and a build that never confirmed left it there for good. */
     playCurrentSong(false, function () {
         dspLoopEnabled = savedLoop;
-        currentSong = saved;
     });
+    currentSong = saved;
 }
 
 function previewClipAtCursor() {
+    restoreSongFromTempCopy();
     const sec = currentSong ? currentSong.sections[currentSectionIndex] : null;
     if (!sec || builderCursor < 0 || builderCursor >= sec.clips.length) {
         playFromCurrentSection();
@@ -9623,6 +10079,14 @@ function previewClipAtCursor() {
      * preserving their original trims. */
     const fromCursorClips = sec.clips.slice(builderCursor).map(c => ({
         source: c.source,
+        /* The clip's own folder. Leaving it out made the DSP look for a clip
+         * borrowed from another folder in the song's folder, find it by
+         * searching the whole library (possibly a same-named file from the
+         * wrong folder), and report a "folder correction" -- which is what
+         * then got saved over the song. */
+        source_folder: c.source_folder,
+        type: c.type,
+        advanced: c.advanced,
         name: c.name,
         start_bar: c.start_bar,
         start_beat: c.start_beat !== undefined ? c.start_beat : 0,
@@ -9644,6 +10108,7 @@ function previewClipAtCursor() {
     reindexInstrumentsForSectionSlice(temp, currentSectionIndex);
     temp.sections[0].id = "play-from-cursor-" + Date.now();
     temp.sections[0].clips = fromCursorClips;
+    tempSongOrigin.set(temp, currentSong);
     /* Step-LED flash should still appear on the clip's actual step in the
      * original full section/song layout, not step 1 of the temporary section. */
     let barOffset = 0;
@@ -9836,7 +10301,7 @@ function perfPlayCurrent() {
         /* Force a full step-LED redraw so the count-in click's steps (blue)
          * replace any steps left lit by the previous song's last section.
          * Do NOT clearStepLEDs() first — those black messages get wiped by
-         * ledQueue.length=0 in updateLEDs, leaving the old section's steps
+         * ledQueue.clear() in updateLEDs, leaving the old section's steps
          * physically lit. Instead rely on stepRedrawAll + a forced click
          * draw to overwrite every step. Also force a pad repaint so the new
          * song's sections are coloured and other songs are greyed. */
@@ -10391,6 +10856,81 @@ function perfTick() {
 
 
 
+function readScanState() {
+    if (typeof host_module_get_param !== "function") return null;
+    const raw = host_module_get_param("scan_state");
+    if (raw) {
+        try {
+            const st = JSON.parse(raw);
+            return { songs: !!st.songs, folders: !!st.folders, found: st.folders_found | 0 };
+        } catch (e) {}
+    }
+    /* An older engine: one flag for both lists. */
+    const pending = host_module_get_param("scan_pending");
+    if (pending === null || pending === undefined) return null;
+    return { songs: pending === "1", folders: pending === "1", found: 0 };
+}
+
+/* True while the engine is still scanning `which` ("songs" / "folders"). */
+function listLoading(which) {
+    return !!(scanState && scanState[which]);
+}
+
+function pollScanState() {
+    const now = Date.now();
+    if (now - lastScanStatePoll < SCAN_STATE_POLL_MS) return;
+    lastScanStatePoll = now;
+    const prev = scanState;
+    scanState = readScanState();
+    if (!scanState) return;
+    if (prev && prev.songs && !scanState.songs) {
+        reloadSongBankAndPreserveSelection();
+        needsRedraw = true;
+    }
+    if (prev && prev.folders && !scanState.folders) {
+        libraryCacheValid = false;
+        loadLibraryFolders();
+        libraryKnownEmpty = libraryFolders.length === 0;
+        if (libraryKnownEmpty) pendingLibraryFoldersReload = false;
+        ledDirtyAll = true;
+        needsRedraw = true;
+    }
+    /* The walk's running count changes the "Loading" line. */
+    if (prev && scanState.folders && prev.found !== scanState.found) needsRedraw = true;
+    if (!prev || prev.songs !== scanState.songs || prev.folders !== scanState.folders) needsRedraw = true;
+}
+
+/* Whether the screen now showing depends on a list the engine may still be
+ * scanning (so the scan state is worth a poll). */
+function screenWaitsOnScan() {
+    if (pendingSongBankSync) return false;   /* reloads the Song Bank itself, every tick */
+    switch (currentView) {
+        case VIEW_SONG_BANK: case VIEW_SETLIST_PICK:
+        case VIEW_FOLDER_LIST: case VIEW_JAM_FOLDER:
+            return true;
+    }
+    return pendingLibraryFoldersReload || !!pendingFolderClipLoadName || pendingJamFolderClipLoadIndex >= 0 ||
+        (scanState !== null && (scanState.songs || scanState.folders));
+}
+
+/* "Loading" plus 1-3 cycling dots, for a list or clips still on their way. */
+function loadingText(what) {
+    const dots = ".".repeat(1 + Math.floor(Date.now() / 400) % 3);
+    return "Loading " + what + dots;
+}
+
+/* Drawn in place of an empty list of library folders: "Loading library..."
+ * and, once the walk has found some, how many so far. */
+function drawLibraryFoldersPlaceholder() {
+    if (listLoading("folders")) {
+        const n = scanState ? scanState.found : 0;
+        print(4, LIST_TOP_Y, loadingText("library"), 1);
+        if (n > 0) print(4, LIST_TOP_Y + 10, n + (n === 1 ? " folder" : " folders") + " found", 1);
+    } else if (libraryKnownEmpty) {
+        print(4, LIST_TOP_Y, "No MIDI folders found", 1);
+    }
+}
+
 function loadLibraryFolders() {
     /* Reuse the cached folder list + clip map when the DSP scan is stable.
      * Re-fetching and re-parsing every folder's clips on each picker open is
@@ -10400,23 +10940,38 @@ function loadLibraryFolders() {
     libraryFolderCategories = [];
     libraryCategoryTree = makeCategoryTree();
     if (typeof host_module_get_param !== "function") return;
+    /* One "folders_json" read in place of folder_count + folder_name_N +
+     * folder_category_N (2N+1 round trips) -- see readDspList. */
     let count = 0;
-    try {
-        const cnt = host_module_get_param("folder_count");
-        if (cnt) count = parseInt(cnt, 10);
-    } catch (e) {}
+    let listedItems = [];
+    const listed = readDspList("folders_json");
+    if (listed) {
+        count = listed.count;
+        listedItems = listed.items;
+    } else {
+        try {
+            const cnt = host_module_get_param("folder_count");
+            if (cnt) count = parseInt(cnt, 10);
+        } catch (e) {}
+    }
     for (let i = 0; i < count; i++) {
-        const name = host_module_get_param("folder_name_" + i);
+        /* From the list answer where it reached, else by index. */
+        const f = i < listedItems.length ? listedItems[i] : null;
+        const name = f ? f.name : host_module_get_param("folder_name_" + i);
         if (!name) continue;
         libraryFolders.push(name);
-        const cat = host_module_get_param("folder_category_" + i) || "";
+        const cat = (f ? f.category : host_module_get_param("folder_category_" + i)) || "";
         libraryFolderCategories.push(cat);
         addFolderToTree(libraryCategoryTree, cat, i);
     }
     if (libraryFolders.length === 0) {
-        host_module_set_param("scan_library", "1");
-        pendingLibraryFoldersReload = true;
+        /* Ask for a scan only if none is on its way: this runs every tick
+         * while a screen waits for folders, and each request queued ANOTHER
+         * full walk of the library behind the one in progress. */
+        if (!listLoading("folders") && !libraryKnownEmpty) host_module_set_param("scan_library", "1");
+        pendingLibraryFoldersReload = !libraryKnownEmpty;
     } else {
+        libraryKnownEmpty = false;
         /* Build the clip->folder map once folders are known, so existing songs
          * can backfill a clip's source_folder on load/save. */
         buildFolderClipMap();
@@ -10610,12 +11165,22 @@ function loadFolderClips(folderIndex) {
 function buildFolderClipMap() {
     folderClipMap = {};
     if (typeof host_module_get_param !== "function") return;
+    /* Every folder's clip list from the paged "clip_leaves_json" answer
+     * (usually one read; items[i] is folder i's clip paths) instead of one
+     * folder_clips_json_N round trip per folder, which this paid at every
+     * library load and every resume. A folder the answer did not reach is
+     * read on its own, as before. */
+    const listed = readDspList("clip_leaves_json");
+    const leaves = listed ? listed.items : [];
     for (let i = 0; i < libraryFolders.length; i++) {
         const folder = folderFullPath(i);
-        const clipsJson = host_module_get_param("folder_clips_json_" + i);
-        if (!clipsJson) continue;
+        let clipsJson = null;
+        if (!(i < leaves.length && Array.isArray(leaves[i]))) {
+            clipsJson = host_module_get_param("folder_clips_json_" + i);
+            if (!clipsJson) continue;
+        }
         try {
-            const raw = JSON.parse(clipsJson);
+            const raw = clipsJson ? JSON.parse(clipsJson) : leaves[i];
             for (const c of raw) {
                 const path = (typeof c === "string") ? c : (c.source || c);
                 const leaf = clipDisplayName(path);
@@ -10650,6 +11215,7 @@ globalThis.init = function() {
     }
     loadLibraryFolders();
     songFiles = listSongFiles();
+    lastConfigRaw = readConfigRaw();
     loadSettings();
     applyOutputSettingsToDsp();
     logDebug("init: BUILD=" + UI_BUILD_VERSION + " library_root=" + LIBRARY_ROOT + " folders=" + libraryFolders.length + " songs=" + songFiles.length +
@@ -10669,7 +11235,7 @@ globalThis.tick = function() {
         }
     }
 
-    /* Diagnostic for the LED-queue backlog report: sample ledQueue.length
+    /* Diagnostic for the LED-queue backlog report: sample ledQueue.size
      * every ~2s (any view, any activity -- the backlog was already large at
      * the START of a preview session, so it isn't obviously jam-specific)
      * and log the growth since the last sample, so the actual growth rate
@@ -10679,14 +11245,14 @@ globalThis.tick = function() {
     {
         const nowLQ = Date.now();
         if (nowLQ - lastLedQueueSampleTick >= 2000) {
-            const growth = lastLedQueueSampleLen < 0 ? 0 : (ledQueue.length - lastLedQueueSampleLen);
-            logDebug("LEDQ len=" + ledQueue.length + " growth=" + growth + " view=" + currentView +
+            const growth = lastLedQueueSampleLen < 0 ? 0 : (ledQueue.size - lastLedQueueSampleLen);
+            logDebug("LEDQ len=" + ledQueue.size + " growth=" + growth + " view=" + currentView +
                 " jamPlaying=" + (typeof jamPlaying !== "undefined" ? jamPlaying : "?") +
                 " ledDirtyAll=" + ledDirtyAll + " needsRedraw=" + needsRedraw +
                 " byUpdateLEDs=" + ledQueuePushByUpdateLEDs + " byStepRefresh=" + ledQueuePushByStepRefresh +
                 " byButtonLEDs=" + ledQueuePushByButtonLEDs);
             lastLedQueueSampleTick = nowLQ;
-            lastLedQueueSampleLen = ledQueue.length;
+            lastLedQueueSampleLen = ledQueue.size;
             ledQueuePushByUpdateLEDs = 0;
             ledQueuePushByStepRefresh = 0;
             ledQueuePushByButtonLEDs = 0;
@@ -10793,11 +11359,22 @@ globalThis.tick = function() {
         logJam("CHORD-HOLD overlay -> " + jamHoldName);
     }
 
+    /* What is still loading -- see scanState. */
+    if (screenWaitsOnScan()) pollScanState();
+    /* The "Loading..." dots animate. */
+    if (listLoading("songs") || listLoading("folders")) {
+        const phase = Math.floor(Date.now() / 400);
+        if (phase !== lastLoadingPhase) { lastLoadingPhase = phase; needsRedraw = true; }
+    }
+
     /* Retry loading the builder's clip pads if they weren't ready yet (e.g.
      * a song opened on a fresh boot before the DSP folder scan finished).
      * Ensure libraryFolders is populated, re-resolve the folder by name, then
      * load the clips; once they arrive, force a pad repaint. */
-    if (pendingFolderClipLoadName) {
+    /* All three wait for a folder scan in progress to finish (pollScanState
+     * reloads the folders the moment it does) rather than re-reading lists
+     * the engine has not published yet, every tick. */
+    if (pendingFolderClipLoadName && !listLoading("folders")) {
         if (libraryFolders.length === 0) {
             loadLibraryFolders();
         }
@@ -10816,7 +11393,7 @@ globalThis.tick = function() {
     /* Retry loading the Jam folder's clips if they weren't ready yet (e.g. a
      * Jam folder entered on a fresh boot before the DSP folder scan finished).
      * Re-load the clips each tick until they arrive, then repaint the pads. */
-    if (pendingJamFolderClipLoadIndex >= 0) {
+    if (pendingJamFolderClipLoadIndex >= 0 && !listLoading("folders")) {
         if (libraryFolders.length === 0) {
             loadLibraryFolders();
         }
@@ -10833,7 +11410,7 @@ globalThis.tick = function() {
      * caught up when loadLibraryFolders() first ran (folder_count was 0).
      * Re-poll each tick until the folders arrive, then repaint so the Folder
      * List / Jam Folder picker isn't left empty. */
-    if (pendingLibraryFoldersReload && libraryFolders.length === 0) {
+    if (pendingLibraryFoldersReload && libraryFolders.length === 0 && !listLoading("folders")) {
         loadLibraryFolders();
         if (libraryFolders.length > 0) {
             pendingLibraryFoldersReload = false;
@@ -10841,6 +11418,15 @@ globalThis.tick = function() {
             needsRedraw = true;
         }
     }
+
+    /* Reload the folder/song lists once the rescan requested on resume has
+     * landed (see onResume). */
+    if (libraryRescanPending) {
+        pollLibraryRescan();
+    }
+
+    /* Pick up settings changed in Schwung Manager (see pollModuleConfig). */
+    pollModuleConfig();
 
     /* Retry loading the Song Bank list after a duplicate/delete until the
      * DSP's worker thread finishes rescanning (see requestSongBankSync). */
@@ -10899,9 +11485,9 @@ globalThis.tick = function() {
     }
 
     if (needsRedraw) {
-        const lq0 = ledQueue.length;
+        const lq0 = ledQueueWrites;
         updateLEDs();
-        ledQueuePushByUpdateLEDs += Math.max(0, ledQueue.length - lq0);
+        ledQueuePushByUpdateLEDs += Math.max(0, ledQueueWrites - lq0);
     }
     /* Clear the pad-preview-stop suppression flag once the section steps have
      * been repainted, so it doesn't leak into later redraws. */
@@ -10923,6 +11509,7 @@ globalThis.tick = function() {
                 case VIEW_BUILDER: drawBuilder(); break;
                 case VIEW_TRIM: drawTrim(); break;
                 case VIEW_SONG_SETTINGS: drawSongSettings(); break;
+                case VIEW_SONG_BACKUPS: drawSongBackups(); break;
                 case VIEW_SONG_BANK: drawSongBank(); break;
                 case VIEW_OPTIONS: drawOptions(); break;
                 case VIEW_OPTIONS_DRUMS: drawOptionsDrums(); break;
@@ -10951,7 +11538,7 @@ globalThis.tick = function() {
      * it. In performance view, click bars are only shown when no section is
      * selected while stopped, or during an active count-in. */
     {
-        const lq1 = ledQueue.length;
+        const lq1 = ledQueueWrites;
         if (currentView === VIEW_BUILDER || currentView === VIEW_PERFORMANCE || currentView === VIEW_CHORD_PICK) {
             if (currentView === VIEW_PERFORMANCE && perfClickBars > 0 &&
                 (perfClickPlaying || (!perfPlaying && perfSelectedSection < 0))) {
@@ -10964,7 +11551,7 @@ globalThis.tick = function() {
         } else if (currentView === VIEW_JAM) {
             drawJamStepLEDs(false);
         }
-        ledQueuePushByStepRefresh += Math.max(0, ledQueue.length - lq1);
+        ledQueuePushByStepRefresh += Math.max(0, ledQueueWrites - lq1);
     }
     /* Beat flash is shown on the STEP LEDs only (drawBuilderStepLEDs /
      * drawClickStepLEDs above). The performance pads must NOT flash on the
@@ -10973,9 +11560,9 @@ globalThis.tick = function() {
      * current section's last bar. Pads are drawn statically by
      * drawPerformanceLEDs (queued = white, last-bar imminent = red). */
     {
-        const lq2 = ledQueue.length;
+        const lq2 = ledQueueWrites;
         updateButtonLEDs();
-        ledQueuePushByButtonLEDs += Math.max(0, ledQueue.length - lq2);
+        ledQueuePushByButtonLEDs += Math.max(0, ledQueueWrites - lq2);
     }
     flushLedQueue();
 };
@@ -11003,6 +11590,7 @@ function routeCcInput(rawData, cc, value) {
         case VIEW_BUILDER: handleBuilderInput(cc, value); break;
         case VIEW_TRIM: handleTrimInput(cc, value); break;
         case VIEW_SONG_SETTINGS: handleSongSettingsInput(cc, value); break;
+        case VIEW_SONG_BACKUPS: handleSongBackupsInput(cc, value); break;
         case VIEW_SONG_BANK: handleSongBankInput(cc, value); break;
         case VIEW_OPTIONS: handleOptionsInput(cc, value); break;
         case VIEW_OPTIONS_DRUMS: handleOptionsDrumsInput(cc, value); break;
@@ -11037,14 +11625,27 @@ globalThis.onMidiMessageInternal = function(data) {
         if (cc === MoveBack) {
             /* See backHoldActive's declaration. */
             if (value > 0) {
+                if (isTextEntryActive()) {
+                    /* The keyboard cancels on press, and a hold must not
+                     * suspend out of it -- no hold tracking here. */
+                    routeCcInput(data, cc, value);
+                    return;
+                }
                 backHoldActive = true;
                 backHoldStartTime = Date.now();
                 backHoldSuspendFired = false;
                 backHoldPressValue = value;
                 backHoldStatusByte = data[0];
             } else {
+                /* Only a release whose press this module saw stands for a
+                 * tap. The host shares text_entry.mjs with us, so while our
+                 * keyboard is open the HOST takes the Back press, cancels the
+                 * keyboard and never forwards it: all we get is the release.
+                 * Replaying that release as a press sent a second Back to
+                 * whatever screen was under the keyboard. */
+                const sawPress = backHoldActive;
                 backHoldActive = false;
-                if (!backHoldSuspendFired) {
+                if (sawPress && !backHoldSuspendFired) {
                     routeCcInput([backHoldStatusByte, cc, backHoldPressValue], cc, backHoldPressValue);
                 }
             }
@@ -11070,19 +11671,53 @@ globalThis.onMidiMessageExternal = function onMidiMessageExternal(data) {
 globalThis.onResume = function onResume() {
     clearAllLEDs();
     resetLedState();
-    if (typeof host_module_get_param === "function") {
-        /* The library may have changed while the module was suspended (files
-         * added/moved on the Move), so invalidate the cache and re-scan. */
-        libraryCacheValid = false;
-        loadLibraryFolders();
-        reloadSongBankAndPreserveSelection();
-    }
-    if (typeof host_module_set_param === "function") {
+    /* The library may have changed while the module was suspended (files
+     * added/moved on the Move), so have the DSP rescan it -- and reload the
+     * folder and song lists once THAT scan has landed (pollLibraryRescan,
+     * from tick). This used to reload first and request the rescan after,
+     * so it re-read the scan from before the suspend: a change showed up one
+     * resume late, and in between the UI's folder list and the DSP's
+     * (index-addressed) one disagreed. Blocking, so the request cannot be
+     * dropped by the fire-and-forget param slot. */
+    if (typeof host_module_set_param_blocking === "function") {
+        host_module_set_param_blocking("library_root", LIBRARY_ROOT, 100);
+    } else if (typeof host_module_set_param === "function") {
         host_module_set_param("library_root", LIBRARY_ROOT);
     }
+    if (typeof host_module_get_param === "function") {
+        libraryRescanPending = true;
+        libraryRescanDeadline = Date.now() + LIBRARY_RESCAN_MAX_WAIT_MS;
+        lastLibraryRescanPoll = 0;
+    }
     needsRedraw = true;
-    logDebug("onResume: folders=" + libraryFolders.length + " songs=" + songFiles.length);
+    logDebug("onResume: rescan requested, folders=" + libraryFolders.length + " songs=" + songFiles.length);
 };
+
+/* Reload the folder and song lists once the rescan requested by onResume
+ * has been published. Checked at most every LIBRARY_RESCAN_POLL_MS -- one
+ * cheap read -- and given up on (reload anyway) after
+ * LIBRARY_RESCAN_MAX_WAIT_MS, or at once if the DSP has no "scan_pending"
+ * answer, so a missing signal can never leave the lists stale for good. */
+function pollLibraryRescan() {
+    const now = Date.now();
+    if (now - lastLibraryRescanPoll < LIBRARY_RESCAN_POLL_MS) return;
+    lastLibraryRescanPoll = now;
+    const pending = host_module_get_param("scan_pending");
+    if (pending === "1" && now < libraryRescanDeadline) return;
+    libraryRescanPending = false;
+    const foldersBefore = libraryFolders.join("\n") + "\n\n" + libraryFolderCategories.join("\n");
+    libraryCacheValid = false;
+    loadLibraryFolders();
+    reloadSongBankAndPreserveSelection();
+    /* Repaint the pads only if the library actually changed; the common
+     * case (nothing changed while suspended) needs no LED traffic. */
+    if (libraryFolders.join("\n") + "\n\n" + libraryFolderCategories.join("\n") !== foldersBefore) {
+        ledDirtyAll = true;
+    }
+    needsRedraw = true;
+    logDebug("rescan landed: folders=" + libraryFolders.length + " songs=" + songFiles.length +
+        " waited=" + (now - (libraryRescanDeadline - LIBRARY_RESCAN_MAX_WAIT_MS)) + "ms");
+}
 
 globalThis.onUnload = function onUnload() {
     stopPlayback();

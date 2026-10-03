@@ -27,8 +27,9 @@ and perform live — all from Move's pads, step buttons and jog wheel.
 - **Output routing** — send MIDI to External, Move tracks, or the Schwung
   synth chain, independently for drums and each instrument track, each on a
   configurable channel.
-- **Automatic backups** — the last few saved versions of each song are kept
-  automatically, so a change can be undone by hand if needed.
+- **Automatic backups** — the last 10 saved versions of each song are kept
+  automatically, and any of them can be restored from Song Settings >
+  Restore Backup.
 - **Overtake module** — runs on Move's hardware surface (pads, steps, jog
   wheel, buttons), and can be suspended in the background (hold Back) so
   playback keeps running while you use the rest of Move.
