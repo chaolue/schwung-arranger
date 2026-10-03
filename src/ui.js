@@ -1536,7 +1536,7 @@ let instrumentBarFocus = 0;
 let instrumentBarEditing = false;
 
 let selectedOutputIndex = 0;
-let optionsFocus = 0;      /* 0 = Drums, 1 = Instrument 1, 2 = Instrument 2, 3 = Chains, 4 = Click channel, 5 = Swap guard, 6 = DSP debug */
+let optionsFocus = 0;      /* 0 = Drums, 1 = Instrument 1, 2 = Instrument 2, 3 = Chains, 4 = Click channel, 5 = Swap guard, 6 = Schwung clock, 7 = DSP debug */
 let optionsEditing = false;
 /* Focus/edit state within the Drums or Instrument 1/2 submenu (both are a
  * 2-item Output/Channel list). optionsInstIndex selects which instrument
@@ -1561,6 +1561,10 @@ let dspDebugEnabled = false;   /* runtime toggle for the DSP debug log (.dsp_log
  * instead of letting it ring. Off by default -- see arranger_engine.c's
  * drop_note_offs field for the DSP-side behavior. */
 let dropNoteOffs = false;
+/* Options > Schwung Clock: the DSP sends MIDI clock to Schwung while playing,
+ * so clock-synced chain modules (LFOs, delays, arps) follow the song tempo.
+ * See send_clock in arranger_engine.c. On by default. */
+let sendClock = true;
 
 let setlistFiles = [];
 let selectedSetlistIndex = 0;
@@ -3065,6 +3069,8 @@ function loadSettings() {
     if (typeof dd === "boolean") dspDebugEnabled = dd;
     const dno = pick("drop_note_offs", "boolean");
     if (typeof dno === "boolean") dropNoteOffs = dno;
+    const sck = pick("send_clock", "boolean");
+    if (typeof sck === "boolean") sendClock = sck;
     const i1o = pick("inst1_output", "string");
     if (typeof i1o === "string") inst1Output = i1o;
     const i1c = pick("inst1_channel", "number");
@@ -3142,6 +3148,7 @@ function saveOutputSettings() {
         swap_guard_fraction: swapGuardFraction,
         dsp_debug: dspDebugEnabled,
         drop_note_offs: dropNoteOffs,
+        send_clock: sendClock,
         inst1_output: inst1Output,
         inst1_channel: inst1Channel,
         inst2_output: inst2Output,
@@ -3233,6 +3240,7 @@ function applyOutputSettingsToDsp() {
     pushSwapGuardToDsp();
     pushDspDebugToDsp();
     pushDropNoteOffsToDsp();
+    pushSendClockToDsp();
 }
 
 /* Push the mid-clip swap guard fraction to the DSP. */
@@ -3263,6 +3271,16 @@ function pushDropNoteOffsToDsp() {
     const set = block ? host_module_set_param_blocking : host_module_set_param;
     const t = block ? 100 : undefined;
     set("drop_note_offs", dropNoteOffs ? "1" : "0", t);
+}
+
+/* Push the Options "Schwung Clock" toggle to the DSP. */
+function pushSendClockToDsp() {
+    if (typeof host_module_set_param !== "function" &&
+        typeof host_module_set_param_blocking !== "function") return;
+    const block = typeof host_module_set_param_blocking === "function";
+    const set = block ? host_module_set_param_blocking : host_module_set_param;
+    const t = block ? 100 : undefined;
+    set("send_clock", sendClock ? "1" : "0", t);
 }
 
 /* Delete the module's log files. Called when debug logging is turned off so
@@ -7678,6 +7696,7 @@ function drawOptions() {
         { key: "chains", label: "Chains", value: "Chain " + (optionsChainIndex + 1) },
         { key: "clickchan", label: "Click Channel", value: clickChannel === 0 ? "Default" : String(clickChannel) },
         { key: "swapguard", label: "Swap Guard", value: Math.round(swapGuardFraction * 100) + "%" },
+        { key: "clock", label: "Schwung Clock", value: sendClock ? "On" : "Off" },
         { key: "dspdebug", label: "DSP Debug", value: dspDebugEnabled ? "On" : "Off" }
     ];
     drawMenuList({
@@ -8969,7 +8988,8 @@ function duplicateSelectedSong() {
 
 function handleOptionsInput(cc, value) {
     /* Rows 0-3 (Drums, Instrument 1, Instrument 2, Chains) navigate into a
-     * submenu; rows 4-6 (Click Channel, Swap Guard, DSP Debug) edit in place. */
+     * submenu; rows 4-7 (Click Channel, Swap Guard, Schwung Clock, DSP Debug)
+     * edit in place. */
     if (cc === MoveMainKnob) {
         const delta = decodeDelta(value);
         if (optionsEditing) {
@@ -8990,6 +9010,11 @@ function handleOptionsInput(cc, value) {
                     pushSwapGuardToDsp();
                 }
             } else if (optionsFocus === 6) {
+                /* Toggle the MIDI clock to Schwung. */
+                sendClock = !sendClock;
+                saveOutputSettings();
+                pushSendClockToDsp();
+            } else if (optionsFocus === 7) {
                 /* Toggle the DSP debug log. */
                 dspDebugEnabled = !dspDebugEnabled;
                 saveOutputSettings();
@@ -9001,7 +9026,7 @@ function handleOptionsInput(cc, value) {
                 }
             }
         } else {
-            const newIdx = Math.max(0, Math.min(6, optionsFocus + delta));
+            const newIdx = Math.max(0, Math.min(7, optionsFocus + delta));
             if (newIdx !== optionsFocus) {
                 optionsFocus = newIdx;
             }

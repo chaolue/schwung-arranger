@@ -717,6 +717,17 @@ typedef struct engine {
      * to clear stuck notes on stop/song change). Off by default. */
     int drop_note_offs;
 
+    /* MIDI clock to Schwung: while Arranger plays, send Start, 24-PPQN Clock
+     * and Stop through midi_send_internal, so Schwung's transport (get_bpm,
+     * get_beat_position, and the realtime bytes broadcast to every chain
+     * slot) follows the song tempo. The shim takes system-realtime sent this
+     * way as the INTERNAL transport source -- the one movy drives -- and Move's
+     * own clock wins over it whenever Move's sequencer runs. Audio thread only. */
+    int send_clock;            /* user setting, default on */
+    int clock_running;         /* a Start has gone out and no Stop since */
+    int clock_restart;         /* play_from_top: re-anchor with a fresh Start */
+    double clock_phase;        /* fraction of a clock tick accumulated */
+
     /* Live Perform/Jam mute for the drum timeline (Row1 track button in the
      * UI). Gates note-ON emission only in drain_events_up_to/
      * emit_timeline_event (mirrors drop_note_offs's is_note_off_event split,
@@ -4869,6 +4880,7 @@ static void* arr_create_instance(const char *module_dir, const char *config_json
     e->last_event_channel_override = -1; /* no per-event override by default */
     e->loop = 1;          /* default to looping for performance mode */
     e->drum_enabled = 1;   /* audible by default; Perform/Jam mute is opt-in */
+    e->send_clock = 1;     /* Schwung follows the song tempo unless turned off */
     for (int i = 0; i < MAX_INSTRUMENTS; i++) e->inst_live_enabled[i] = 1;
     /* Pre-existing latent bug, newly reachable now that JS/the test harness
      * must poll get_param("state") for primary_published_gen BEFORE any
@@ -4998,6 +5010,50 @@ static int arr_get_error(void *instance, char *buf, int buf_len) {
     return 0;
 }
 
+/* One system-realtime byte to Schwung. The shim matches realtime on msg[1]
+ * and drops anything shorter than 4 bytes, so it goes as a full packet. */
+static void send_clock_byte(uint8_t status) {
+    if (!g_host || !g_host->midi_send_internal) return;
+    const uint8_t msg[4] = { 0x0F, status, 0, 0 };
+    g_host->midi_send_internal(msg, 4);
+}
+
+/* MIDI clock for this block -- see send_clock's declaration. Edge-driven off
+ * e->running rather than hooked into every place that starts or stops
+ * playback (Play, MIDI Start/Stop, end of song, Jam stop...), so none of them
+ * can be missed. Block-quantised (<= ~2.9 ms jitter), which the host's tempo
+ * EMA is built to absorb; the tick count itself never drifts, because the
+ * fractional phase carries across blocks exactly like the playhead's. */
+static void clock_tick(engine_t *e, int frames, int sample_rate) {
+    int want = e->send_clock && e->running;
+    if (!want) {
+        if (e->clock_running) {
+            send_clock_byte(0xFC);
+            e->clock_running = 0;
+        }
+        e->clock_restart = 0;
+        return;
+    }
+    if (!e->clock_running || e->clock_restart) {
+        /* Start, then the tick it anchors: the host takes the first 0xF8
+         * after 0xFA as beat 0, so beat 0 is the start of the song. */
+        send_clock_byte(0xFA);
+        send_clock_byte(0xF8);
+        e->clock_running = 1;
+        e->clock_restart = 0;
+        e->clock_phase = 0.0;
+        return;
+    }
+    double bpm = e->tempo_bpm > 0.0 ? e->tempo_bpm : 120.0;
+    e->clock_phase += (double)frames * bpm * 24.0 / (60.0 * (double)sample_rate);
+    int n = 0;
+    while (e->clock_phase >= 1.0 && n < 8) {
+        send_clock_byte(0xF8);
+        e->clock_phase -= 1.0;
+        n++;
+    }
+}
+
 static void arr_render_block(void *instance, int16_t *out_interleaved_lr, int frames) {
     engine_t *e = instance;
 
@@ -5011,6 +5067,7 @@ static void arr_render_block(void *instance, int16_t *out_interleaved_lr, int fr
     int sample_rate = g_host ? g_host->sample_rate : 44100;
 
     advance_playhead(e, frames, sample_rate);
+    clock_tick(e, frames, sample_rate);
 }
 
 /* Activate the most recently published primary build, if any: copies
@@ -5050,6 +5107,7 @@ static void activate_primary_if_published(engine_t *e) {
  * register a wrap. */
 static void play_from_top(engine_t *e) {
     activate_primary_if_published(e);
+    e->clock_restart = 1;      /* Schwung's beat 0 follows the song's */
     e->playhead_tick = 0;
     e->event_cursor = 0;
     e->running = 1;
@@ -5285,6 +5343,12 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
     }
     if (strcmp(key, "drop_note_offs") == 0) {
         e->drop_note_offs = atoi(val) ? 1 : 0;
+        return;
+    }
+    if (strcmp(key, "send_clock") == 0) {
+        /* Turning it off mid-song stops Schwung's transport on the next
+         * block (clock_tick sees send_clock 0 with clock_running set). */
+        e->send_clock = atoi(val) ? 1 : 0;
         return;
     }
     if (strcmp(key, "drum_enabled") == 0) {
@@ -5918,6 +5982,9 @@ static int arr_get_param(void *instance, const char *key, char *buf, int buf_len
     }
     if (strcmp(key, "drop_note_offs") == 0) {
         return snprintf(buf, buf_len, "%d", e->drop_note_offs);
+    }
+    if (strcmp(key, "send_clock") == 0) {
+        return snprintf(buf, buf_len, "%d", e->send_clock);
     }
     if (strcmp(key, "drum_enabled") == 0) {
         return snprintf(buf, buf_len, "%d", e->drum_enabled);
