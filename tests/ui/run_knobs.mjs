@@ -66,6 +66,24 @@ jog(1); click(); jog(1); click(); jog(1); click(); click();
 sl = saved();
 check(sl.knobs[1] && sl.knobs[1].comp === "fx1" && sl.knobs[1].key === "mix", "knob 2 mapped to FX 1 Mix");
 
+/* Knob 3 -> Master FX -> FX 2 (tapedelay) -> Feedback. Chain rows: None,
+ * Chain 1-4, Master FX. */
+jog(1); click(); jog(5);
+click();
+check(H.printed.includes("FX 2") && H.printed.some(t => /^ta/.test(t)) && !H.printed.includes("FX 1"),
+      "Master FX lists its loaded positions: " + JSON.stringify(H.printed));
+click();
+check(H.printed.includes("Feedback"), "Master FX position's parameters: " + JSON.stringify(H.printed));
+click();
+sl = saved();
+check(sl.knobs[2] && sl.knobs[2].slot === -1 && sl.knobs[2].comp === "fx2" && sl.knobs[2].key === "feedback" &&
+      sl.knobs[2].module === "tapedelay" && sl.knobs[2].value === "0.40",
+      "knob 3 mapped to Master FX 2 Feedback: " + JSON.stringify(sl.knobs[2]));
+check(H.printed.includes("3 MFX Feedback"), "the row names Master FX: " + JSON.stringify(H.printed));
+cc(73, 2); tick();
+check(lastWrite(0, "master_fx:fx2:feedback") === "0.42", "turning knob 3 writes master_fx:fx2:feedback at slot 0: " + JSON.stringify(H.writes.slice(-2)));
+jog(-2);
+
 /* Turning knob 1 here sets the value the setlist restores, and is heard. */
 cc(71, 5); tick();
 check(lastWrite(0, "synth:cutoff") === "0.55", "turning knob 1 writes synth:cutoff 0.55 (got " + lastWrite(0, "synth:cutoff") + ")");
@@ -77,7 +95,7 @@ back();                       /* to Setlist Edit */
 jog(-2); click();             /* Song B -> Transitions */
 check(H.printed.includes("Knobs") && H.printed.some(t => /^Se/.test(t)), "Transitions has a Knobs row, inheriting: " + JSON.stringify(H.printed));
 jog(3); click();              /* Knobs row */
-check(H.printed.some(t => /^1 \(Cutoff/.test(t)), "an inherited knob shows in parentheses");
+check(H.printed.some(t => /^1 \(C1 Cutoff\)/.test(t)), "an inherited knob shows in parentheses: " + JSON.stringify(H.printed));
 click(); jog(4); click();      /* Use Setlist, Off, Chain 1, 2, 3 */
 click(); jog(1); click();      /* Synth -> Wave */
 jog(1); click(); jog(1); click(); /* knob 2 -> Off */
@@ -86,7 +104,7 @@ check(sl.songs[1].knobs[0] && sl.songs[1].knobs[0].slot === 2 && sl.songs[1].kno
       "song B overrides knob 1: " + JSON.stringify(sl.songs[1].knobs));
 check(sl.songs[1].knobs[1] && sl.songs[1].knobs[1].off === true, "song B turns knob 2 off");
 check(!sl.songs[0].knobs, "song A has no overrides");
-check(H.printed.includes("1 Wave OB-Xd") && H.printed.includes("2 Off"), "song B's rows show its overrides");
+check(H.printed.includes("1 C3 Wave") && H.printed.includes("2 Off"), "song B's rows show its overrides: " + JSON.stringify(H.printed));
 back();
 check(H.printed.includes("2 own"), "Transitions counts song B's overrides");
 back(); back(); back();       /* Setlist Edit, Bank, Root */
@@ -100,11 +118,18 @@ tick(3);
 check(lastWrite(0, "synth:cutoff") === "0.55" && lastWrite(0, "fx1:mix") === "0.30",
       "song A restores cutoff 0.55 and mix 0.30: " + JSON.stringify(H.writes));
 
+check(lastWrite(0, "master_fx:fx2:feedback") === "0.42", "song A restores the Master FX knob too");
+H.printed.length = 0;
+cc(73, 1); tick();
+check(lastWrite(0, "master_fx:fx2:feedback") === "0.43" && H.printed.includes("MFX FX 2 tapedelay"),
+      "Performance turn on the Master FX knob, overlay names it: " + JSON.stringify(H.printed.slice(-3)));
+
 /* A turn in Performance is saved into the CURRENT song only. */
 H.printed.length = 0;
 cc(71, 3); tick();
 check(lastWrite(0, "synth:cutoff") === "0.58", "Performance turn writes 0.58");
 check(H.printed.some(t => /Cutoff 0\.58/.test(t)), "knob feedback shows name and value: " + JSON.stringify(H.printed.slice(-3)));
+check(H.printed.includes("C1 Synth Dexed"), "knob feedback names the chain, component and module: " + JSON.stringify(H.printed.slice(-3)));
 settle();
 sl = saved();
 check(sl.songs[0].knob_values && sl.songs[0].knob_values[0] &&

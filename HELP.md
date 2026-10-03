@@ -375,7 +375,7 @@ Play through a setlist.
 | Jog wheel | Scroll the info display |
 | Track 1 / 3 / 4 | Turn Drums / Inst 1 / Inst 2 on or off (kept when Play is pressed) |
 | Knobs 1–8 | Change the Schwung parameter mapped to that knob — see **Performance Knobs** |
-| Touch a knob | Show what it controls and its value |
+| Touch a knob | Show what it controls (chain or Master FX, component, module) and its value |
 | Play | Start playback from the current / selected song or section |
 | Back | Stop and return to Root Menu |
 
@@ -403,8 +403,9 @@ The Track buttons are live mutes, not saved to the song. Each song starts with i
 ### Performance Knobs
 
 Each of Move's 8 knobs can control one parameter of a Schwung chain while you
-perform — the synth, a MIDI FX or an audio FX of any of the 4 chains, using
-the parameters (and ranges) the module itself publishes.
+perform — the synth, a MIDI FX or an audio FX of any of the 4 chains, or an
+effect in Schwung's Master FX — using the parameters (and ranges) the module
+itself publishes.
 
 - **Per setlist, with song overrides.** Map the knobs in Setlist Edit >
   (knobs). A song can replace any knob with its own parameter, or turn it
@@ -415,6 +416,10 @@ the parameters (and ranges) the module itself publishes.
   knob in Perform saves the new value for the **current song** only. The
   setlist's own value is the starting point for songs that have none yet —
   set it by turning the knob on the setlist's Knobs screen.
+- **Rows and the knob display say where a knob points:** C1–C4 for a chain,
+  MFX for Master FX. Turning or touching a knob in Perform shows the chain or
+  Master FX, the component and its module on one line, and the parameter and
+  value on the next.
 - **On a Knobs screen**, turning a knob sets the value restored at that
   level, and you hear it as you turn.
 - **Another module in the chain?** A mapping remembers the module it was made
@@ -427,7 +432,7 @@ the parameters (and ranges) the module itself publishes.
 | Control (Knobs screen) | Action |
 |------------------------|--------|
 | Jog wheel / touch a knob | Select a knob row |
-| Jog click | Choose what the knob controls: Chain, then component, then parameter (or None / Use Setlist / Off) |
+| Jog click | Choose what the knob controls: Chain 1–4 or Master FX, then component, then parameter (or None / Use Setlist / Off) |
 | Turn a knob | Set the value it restores, live |
 | Delete | Clear the mapping (on a song: back to the setlist's) |
 | Back | Return |

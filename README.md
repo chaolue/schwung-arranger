@@ -33,7 +33,7 @@ and perform live — all from Move's pads, step buttons and jog wheel.
   transport and track buttons. Options > Chains sets which MIDI channel each
   chain listens on.
 - **Performance knobs** — map Move's 8 knobs to parameters of any Schwung
-  chain (synth, MIDI FX or audio FX), per setlist with per-song overrides;
+  chain (synth, MIDI FX or audio FX) or of Master FX, per setlist with per-song overrides;
   each song restores its own knob values, and the Arranger warns when the
   loaded Move Set is not the one the setlist was used with.
 - **Automatic backups** — the last 10 saved versions of each song are kept
