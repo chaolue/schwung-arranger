@@ -119,6 +119,7 @@ const VIEW_PERFORMANCE = "performance_view";
 const VIEW_OPTIONS = "options";
 const VIEW_OPTIONS_DRUMS = "options_drums";
 const VIEW_OPTIONS_INST = "options_inst";
+const VIEW_OPTIONS_CHAINS = "options_chains";
 const VIEW_SONG_SETTINGS = "song_settings";
 const VIEW_SONG_BACKUPS = "song_backups";
 const VIEW_SETLIST_BANK = "setlist_bank";
@@ -353,6 +354,333 @@ let backHoldSuspendFired = false;
 let backHoldPressValue = 0;
 let backHoldStatusByte = 0xB0;
 const BACK_SUSPEND_HOLD_MS = 500;
+
+/* ---- Schwung chains alongside Arranger (co-run) --------------------------
+ *
+ * Hold Track 1-4 to open Schwung's own editor for Chain 1-4 WITHOUT leaving
+ * Arranger, and hold Menu for Schwung's Master FX. Arranger keeps running
+ * underneath: playback, pads, steps, transport and the track buttons stay
+ * Arranger's, while the screen, jog, knobs, knob touches and Back drive the
+ * editor. So a song can keep playing while you tweak the synth it is
+ * playing, and the track buttons still mute.
+ *
+ * This is Schwung's co-run (docs/CORUN.md in Schwung), in the cede model:
+ * shadow_corun_begin_cede names only what Arranger hands over, and
+ * CORUN_F_OWN_BACK lets Back navigate INSIDE the editor -- shadow_ui can see
+ * its own view depth, so it ends the session itself at the editor's top
+ * level. Master FX is a co-run OVERLAY (shadow_corun_open("master_fx")), and
+ * an overlay only exists over an active session, so it is opened over a chain
+ * session. A framework-driven exit is never announced; reconcileChainView()
+ * polls shadow_corun_state() every tick to notice it.
+ *
+ * Replaces the inst-chain branch's host_jump_to_slot/host_jump_to_master_fx,
+ * which SUSPENDED Arranger to show the editor (stopping its screen and pads)
+ * and needed a patched Schwung. Co-run ships in stock Schwung; a host without
+ * it gets a notice instead.
+ *
+ * A Track or Menu TAP keeps its old meaning, but runs on RELEASE: the same
+ * press/hold/replay shape as Back-hold above, and for the same reason -- an
+ * action that fires on press (a Perform/Jam mute) cannot be taken back once a
+ * hold turns out to be a hold. With Shift held they act on press as before
+ * (Shift+Track 3/4 opens the Jam instrument menu). */
+const CHAIN_SLOT_COUNT = 4;          /* Schwung's chain slots, one per Move track */
+const LONG_PRESS_HOLD_MS = 500;      /* = Back-hold, and Schwung's own Track hold */
+const CHAIN_NOTICE_MS = 3000;
+const longPressHolds = new Map();    /* cc -> { startTime, fired, pressValue, statusByte } */
+let chainViewSlot = -1;              /* chain slot open alongside Arranger, or -1 */
+let chainViewMfx = false;            /* the Master FX overlay is up over it */
+let chainViewMfxKeep = 0;            /* keep_mask the overlay reported when it opened */
+let chainViewMfxPending = false;     /* open the overlay on the next tick */
+let chainViewOpenPending = -1;       /* open this slot on the next tick (fresh session) */
+let chainViewRepaintTicks = 0;       /* frames to force a redraw for, after a session */
+let lastChainSlot = 0;               /* which chain a Master FX session sits over */
+let chainNoticeText = "";            /* why a chain view did not open, while shown */
+let chainNoticeUntil = 0;
+
+function chainViewActive() {
+    return chainViewSlot >= 0;
+}
+
+function isTrackCc(cc) {
+    return cc >= MoveRow4 && cc <= MoveRow1;
+}
+
+/* CC43 = Track 1 = Chain 1 ... CC40 = Track 4 = Chain 4 (Move's track CCs run
+ * backwards). The same mapping as Schwung's own Track gestures. */
+function trackCcToChainSlot(cc) {
+    return MoveRow1 - cc;
+}
+
+/* The co-run API, or null on a Schwung without it. Checks every name used
+ * below up front, so a partial API cannot fail halfway into a session. */
+function corunApi() {
+    const g = globalThis;
+    for (const f of ["shadow_corun_begin_cede", "shadow_corun_end", "shadow_corun_state"]) {
+        if (typeof g[f] !== "function") return null;
+    }
+    for (const n of ["CORUN_TARGET_CHAIN_EDIT", "CORUN_F_OWN_BACK", "CORUN_GRP_OLED",
+                     "CORUN_GRP_KNOBS", "CORUN_GRP_JOG", "CORUN_GRP_TOUCH", "CORUN_GRP_BACK"]) {
+        if (typeof g[n] !== "number") return null;
+    }
+    return g;
+}
+
+function masterFxViewAvailable() {
+    if (!corunApi() || typeof shadow_corun_open !== "function" ||
+        typeof shadow_corun_close !== "function" || typeof shadow_corun_entries !== "function") {
+        return false;
+    }
+    try {
+        const ids = shadow_corun_entries();
+        return Array.isArray(ids) && ids.indexOf("master_fx") >= 0;
+    } catch (e) {
+        return false;
+    }
+}
+
+function corunState() {
+    if (typeof shadow_corun_state !== "function") return null;
+    try {
+        return shadow_corun_state();
+    } catch (e) {
+        return null;
+    }
+}
+
+/* What the editor drives: the screen, jog (turn + click), knobs, knob touches
+ * and Back. Ceded for a chain session; KEPT for the Master FX overlay, because
+ * an overlay drives the groups the tool keeps (docs/CORUN.md, "Overlay
+ * model"). Everything else -- pads, steps, transport, track buttons, Shift,
+ * Menu -- stays Arranger's either way. */
+function chainViewSurface(g) {
+    return g.CORUN_GRP_OLED | g.CORUN_GRP_KNOBS | g.CORUN_GRP_JOG |
+        g.CORUN_GRP_TOUCH | g.CORUN_GRP_BACK;
+}
+
+/* A control the editor owns while a session is up. Its PRESS never reaches
+ * Arranger, but some edges still do -- shadow_ui consumes only the press of
+ * the jog click and of Back, and forwards knob touches to the tool as well --
+ * and none of them may act on a screen nobody can see. */
+function chainViewOwnsEvent(status, d1) {
+    if (status === 0xB0) {
+        return d1 === MoveMainKnob || d1 === MoveMainButton || d1 === MoveBack ||
+            (d1 >= 71 && d1 <= 78);
+    }
+    if (status === MidiNoteOn || status === MidiNoteOff) {
+        return d1 <= 9;   /* capacitive knob touches */
+    }
+    return false;
+}
+
+/* Why a chain view did not open. Drawn by Arranger itself on every screen --
+ * the shared overlay is only drawn by the Builder and Perform screens -- and
+ * with drawing primitives only, so it needs no import an older Schwung's
+ * menu_layout might lack (a missing export fails the whole module load). */
+function chainViewNotice(line) {
+    chainNoticeText = line;
+    chainNoticeUntil = Date.now() + CHAIN_NOTICE_MS;
+    needsRedraw = true;
+    logDebug("chain view: " + line);
+}
+
+function drawChainNotice() {
+    if (!chainNoticeText) return;
+    fill_rect(4, 18, 120, 30, 0);
+    fill_rect(4, 18, 120, 2, 1);
+    fill_rect(4, 46, 120, 2, 1);
+    fill_rect(4, 18, 2, 30, 1);
+    fill_rect(122, 18, 2, 30, 1);
+    print(10, 23, "Schwung chains", 1);
+    print(10, 35, chainNoticeText, 1);
+}
+
+/* A session began: nothing Arranger was in the middle of may finish under the
+ * editor, out of sight. */
+function startChainView() {
+    backHoldActive = false;
+    for (const hold of longPressHolds.values()) hold.fired = true;
+    hideOverlay();
+}
+
+/* The session is gone, however it ended. Hand the screen and LEDs back.
+ * shadow_ui may draw the editor for one more frame (it reconciles at the top
+ * of ITS tick, before ours), so the redraw is forced for two. */
+function endChainView() {
+    chainViewSlot = -1;
+    chainViewMfx = false;
+    chainViewMfxPending = false;
+    resetLedState();
+    stepLedsDirty = true;
+    needsRedraw = true;
+    chainViewRepaintTicks = 2;
+    /* The editor can change a chain's channel or synth. */
+    if (currentView === VIEW_OPTIONS_CHAINS) refreshChainInfo();
+}
+
+/* Open (or re-target) a chain session on `slot`. */
+function openChainView(slot) {
+    const g = corunApi();
+    if (!g) {
+        chainViewNotice("Needs newer Schwung");
+        return false;
+    }
+    if (chainViewMfx) {
+        /* Leaving Master FX. shadow_corun_close() drops shadow_ui to its
+         * OVERTAKE_MODULE view, and it only re-primes the chain editor when
+         * the session's SLOT changes -- so the chain the overlay sat over
+         * cannot be reopened in place. End the session and open a fresh one
+         * on the next tick instead. */
+        if (slot === chainViewSlot) {
+            closeChainView();
+            chainViewOpenPending = slot;
+            return true;
+        }
+        try { shadow_corun_close(); } catch (e) { /* the begin below re-targets anyway */ }
+        chainViewMfx = false;
+    }
+    const wasActive = chainViewActive();
+    try {
+        g.shadow_corun_begin_cede(g.CORUN_TARGET_CHAIN_EDIT, slot, chainViewSurface(g), g.CORUN_F_OWN_BACK);
+    } catch (e) {
+        logDebug("chain view: begin threw " + e);
+    }
+    const st = corunState();
+    if (!st || st.target !== g.CORUN_TARGET_CHAIN_EDIT || st.id !== slot) {
+        if (wasActive) closeChainView();
+        chainViewNotice("Chain " + (slot + 1) + " unavailable");
+        return false;
+    }
+    chainViewSlot = slot;
+    lastChainSlot = slot;
+    chainViewMfxPending = false;
+    if (!wasActive) startChainView();
+    logDebug("chain view: chain " + (slot + 1));
+    return true;
+}
+
+/* Master FX, over a chain session -- opening one first if needed. The overlay
+ * itself goes up on the NEXT tick: shadow_ui primes a new session at the top
+ * of its tick, and priming sets its view to the chain editor, which would
+ * overwrite an overlay opened in the same frame. */
+function openMasterFxView() {
+    if (!masterFxViewAvailable()) {
+        chainViewNotice("Needs newer Schwung");
+        return;
+    }
+    if (!chainViewActive() && !openChainView(lastChainSlot)) return;
+    chainViewMfxPending = true;
+}
+
+/* End whatever session is up and return to Arranger. */
+function closeChainView() {
+    if (!chainViewActive()) return;
+    if (chainViewMfx && typeof shadow_corun_close === "function") {
+        try { shadow_corun_close(); } catch (e) { /* ending the session clears it too */ }
+    }
+    const st = corunState();
+    const g = globalThis;
+    if (st && st.target === g.CORUN_TARGET_CHAIN_EDIT && typeof shadow_corun_end === "function") {
+        try { shadow_corun_end(); } catch (e) { /* reconcile will see the state either way */ }
+    }
+    logDebug("chain view: closed");
+    endChainView();
+}
+
+/* Once per tick, before any hold fires: follow the session's real state.
+ * Returns true while a session is up. */
+function reconcileChainView() {
+    if (chainViewOpenPending >= 0) {
+        const slot = chainViewOpenPending;
+        chainViewOpenPending = -1;
+        openChainView(slot);
+        return chainViewActive();
+    }
+    if (!chainViewActive()) return false;
+    const g = globalThis;
+    const st = corunState();
+    if (!st || st.target !== g.CORUN_TARGET_CHAIN_EDIT) {
+        /* Back at the editor's top level, or the host tore co-run down. */
+        logDebug("chain view: ended by host");
+        endChainView();
+        return false;
+    }
+    if (st.id >= 0 && st.id < CHAIN_SLOT_COUNT) chainViewSlot = st.id;
+    if (chainViewMfxPending) {
+        chainViewMfxPending = false;
+        let opened = false;
+        try {
+            opened = shadow_corun_open("master_fx", chainViewSurface(g)) === true;
+        } catch (e) {
+            logDebug("chain view: master_fx open threw " + e);
+        }
+        const now = opened ? corunState() : null;
+        if (!now) {
+            closeChainView();
+            chainViewNotice("No Master FX view");
+            return false;
+        }
+        chainViewMfx = true;
+        chainViewMfxKeep = now.keep_mask | 0;
+        return true;
+    }
+    if (chainViewMfx && (st.keep_mask | 0) !== chainViewMfxKeep) {
+        /* Back at Master FX's root closed the overlay: shadow_corun_close()
+         * restores the session's keep mask. Without the overlay shadow_ui
+         * would be left on a fallback screen (see openChainView), so Back
+         * from Master FX goes straight back to Arranger. */
+        closeChainView();
+        return false;
+    }
+    return true;
+}
+
+function startLongPressHold(cc, statusByte, pressValue) {
+    longPressHolds.set(cc, { startTime: Date.now(), fired: false, pressValue, statusByte });
+}
+
+/* Release of a held Track/Menu: a tap replays the press through the normal
+ * routing, exactly as it would have run on press before holds existed. */
+function endLongPressHold(cc) {
+    const hold = longPressHolds.get(cc);
+    longPressHolds.delete(cc);
+    if (!hold || hold.fired) return;
+    if (cc === MoveMenu && chainViewActive()) {
+        /* Menu has no screen to act on under the editor: it is the way out. */
+        closeChainView();
+        return;
+    }
+    routeCcInput([hold.statusByte, cc, hold.pressValue], cc, hold.pressValue);
+}
+
+/* A held Track/Menu crossed LONG_PRESS_HOLD_MS. Holding the Track of the
+ * chain already open closes it again, like Schwung's own Track hold toggles
+ * between Move and Schwung; holding another Track switches chain. */
+function fireLongPressAction(cc) {
+    if (cc === MoveMenu) {
+        if (chainViewMfx || chainViewMfxPending) closeChainView();
+        else openMasterFxView();
+        return;
+    }
+    const slot = trackCcToChainSlot(cc);
+    if (slot < 0 || slot >= CHAIN_SLOT_COUNT) return;
+    if (chainViewActive() && !chainViewMfx && !chainViewMfxPending && chainViewSlot === slot) {
+        closeChainView();
+    } else {
+        openChainView(slot);
+    }
+}
+
+function tickLongPressHolds() {
+    if (longPressHolds.size === 0) return;
+    const now = Date.now();
+    for (const [cc, hold] of longPressHolds) {
+        if (!hold.fired && now - hold.startTime >= LONG_PRESS_HOLD_MS) {
+            hold.fired = true;
+            fireLongPressAction(cc);
+        }
+    }
+}
+
 let needsRedraw = true;
 /* Pending LED writes, keyed by LED: the note for a pad or step, 128 + the CC
  * for a button. A Map rather than a FIFO array: queueing an LED that is
@@ -465,7 +793,7 @@ let instrumentBarFocus = 0;
 let instrumentBarEditing = false;
 
 let selectedOutputIndex = 0;
-let optionsFocus = 0;      /* 0 = Drums, 1 = Instrument 1, 2 = Instrument 2, 3 = Click channel, 4 = Swap guard, 5 = DSP debug */
+let optionsFocus = 0;      /* 0 = Drums, 1 = Instrument 1, 2 = Instrument 2, 3 = Chains, 4 = Click channel, 5 = Swap guard, 6 = DSP debug */
 let optionsEditing = false;
 /* Focus/edit state within the Drums or Instrument 1/2 submenu (both are a
  * 2-item Output/Channel list). optionsInstIndex selects which instrument
@@ -475,6 +803,14 @@ let optionsEditing = false;
 let optionsSubFocus = 0;   /* 0 = Output, 1 = MIDI channel, (Drums only) 2 = Drop Note-Offs */
 let optionsSubEditing = false;
 let optionsInstIndex = 1;
+/* Options > Chains: one of Schwung's chain slots, read straight from the
+ * shim with shadow_get_param -- the SLOT is the source of truth for its own
+ * receive channel and synth, not Arranger, so these are only the last read,
+ * refreshed when the screen opens, the chain changes or a chain view closes.
+ * null = the read did not complete (never shown as a value). */
+let optionsChainIndex = 0;          /* 0..CHAIN_SLOT_COUNT-1 */
+let chainInfoChannel = null;        /* 0 = All, 1-16 */
+let chainInfoSynth = null;          /* display name; "" = no synth loaded */
 let swapGuardFraction = 0.25;  /* guard window (fraction of a beat) at mid-clip swap boundaries */
 let dspDebugEnabled = false;   /* runtime toggle for the DSP debug log (.dsp_log) */
 /* Drums Options: some drum playback modules/samplers don't ring out their
@@ -784,7 +1120,7 @@ const PAD_PREVIEW_DELAY_MS = 250; /* delay before pad tap triggers insert previe
  * Setlist / clip names that overflow the row width. */
 const SCROLLABLE_MENU_VIEWS = new Set([
     VIEW_ROOT, VIEW_FOLDER_LIST, VIEW_BUILDER, VIEW_TRIM, VIEW_SONG_SETTINGS, VIEW_SONG_BACKUPS,
-    VIEW_SONG_BANK, VIEW_OPTIONS, VIEW_OPTIONS_DRUMS, VIEW_OPTIONS_INST,
+    VIEW_SONG_BANK, VIEW_OPTIONS, VIEW_OPTIONS_DRUMS, VIEW_OPTIONS_INST, VIEW_OPTIONS_CHAINS,
     VIEW_SETLIST_BANK, VIEW_SETLIST_EDIT,
     VIEW_SETLIST_PICK, VIEW_SETLIST_CLICK, VIEW_PERF_SETLIST, VIEW_PERFORMANCE,
     VIEW_JAM_FOLDER, VIEW_JAM, VIEW_SECTION_PICK, VIEW_CHORD_PICK, VIEW_INSTRUMENT
@@ -3517,6 +3853,7 @@ function updateButtonLEDs() {
                 }
                 break;
             case VIEW_OPTIONS:
+            case VIEW_OPTIONS_CHAINS:
                 active.set(MoveBack, WhiteLedBright);
                 active.set(MoveMainButton, WhiteLedBright);
                 break;
@@ -6589,6 +6926,7 @@ function drawOptions() {
         { key: "drums", label: "Drums", value: currentOutputLabel() + " " + activeOutputChannel() },
         { key: "inst1", label: "Inst 1", value: (OUTPUT_LABELS[inst1Output] || inst1Output) + " " + inst1Channel },
         { key: "inst2", label: "Inst 2", value: (OUTPUT_LABELS[inst2Output] || inst2Output) + " " + inst2Channel },
+        { key: "chains", label: "Chains", value: "Chain " + (optionsChainIndex + 1) },
         { key: "clickchan", label: "Click Channel", value: clickChannel === 0 ? "Default" : String(clickChannel) },
         { key: "swapguard", label: "Swap Guard", value: Math.round(swapGuardFraction * 100) + "%" },
         { key: "dspdebug", label: "DSP Debug", value: dspDebugEnabled ? "On" : "Off" }
@@ -6674,6 +7012,103 @@ function openOptionsInst(index) {
     currentView = VIEW_OPTIONS_INST;
     menuStack.push({ title: index === 1 ? "Inst 1" : "Inst 2", selectedIndex: 0 });
     needsRedraw = true;
+}
+
+/* Options > Chains: Schwung's chain slots as Arranger sees them. Rows: the
+ * chain (1-4), its receive channel (editable here), and Edit Chain, which
+ * opens Schwung's editor for it alongside Arranger (the same as holding its
+ * Track button). Point a track's Output at Schwung on a chain's channel to
+ * play that chain. Reads and writes go to the SHIM's slot keys
+ * (slot:receive_channel, synth:name) through the shared shadow_ui bindings,
+ * the same keys Schwung's Slot Settings and Schwung Manager use -- no DSP
+ * round trip and no host patch. */
+function readChainSlotParam(slot, key) {
+    if (typeof shadow_get_param !== "function") return null;
+    try {
+        const v = shadow_get_param(slot, key);
+        return typeof v === "string" ? v : null;
+    } catch (e) {
+        return null;
+    }
+}
+
+function readChainChannel(slot) {
+    const raw = readChainSlotParam(slot, "slot:receive_channel");
+    const n = raw ? parseInt(raw, 10) : NaN;
+    return (Number.isFinite(n) && n >= 0 && n <= 16) ? n : null;
+}
+
+function refreshChainInfo() {
+    chainInfoChannel = readChainChannel(optionsChainIndex);
+    /* synth_module is "" for an empty chain; synth:name is the module's
+     * display name, with the id as the fallback. */
+    const moduleId = readChainSlotParam(optionsChainIndex, "synth_module");
+    if (moduleId === null) {
+        chainInfoSynth = null;
+    } else if (moduleId === "") {
+        chainInfoSynth = "";
+    } else {
+        const name = readChainSlotParam(optionsChainIndex, "synth:name");
+        chainInfoSynth = name ? name : moduleId;
+    }
+    needsRedraw = true;
+}
+
+/* A receive channel write, then a read-back: the slot is the authority, and
+ * under overtake a plain shadow_set_param is fire-and-forget (dropped when
+ * the param channel is busy -- which Arranger's own DSP polling makes it
+ * often), so the blocking variant is used where the host has it. */
+function writeChainChannel(slot, channel) {
+    const val = String(channel);
+    try {
+        if (typeof shadow_set_param_timeout === "function") {
+            shadow_set_param_timeout(slot, "slot:receive_channel", val, 200);
+        } else if (typeof shadow_set_param === "function") {
+            shadow_set_param(slot, "slot:receive_channel", val);
+        }
+    } catch (e) {
+        logDebug("chains: write failed " + e);
+    }
+    if (slot === optionsChainIndex) {
+        chainInfoChannel = readChainChannel(slot);
+        needsRedraw = true;
+    }
+}
+
+function chainChannelLabel(ch) {
+    if (ch === null) return "\u2014";
+    return ch === 0 ? "All" : String(ch);
+}
+
+function drawOptionsChains() {
+    drawMenuHeader("Chain " + (optionsChainIndex + 1), "");
+    const synth = chainInfoSynth === null ? "\u2014" : (chainInfoSynth === "" ? "Empty" : chainInfoSynth);
+    const items = [
+        { key: "chain", label: "Chain", value: String(optionsChainIndex + 1) },
+        { key: "channel", label: "MIDI Channel", value: chainChannelLabel(chainInfoChannel) },
+        { key: "edit", label: "Edit Chain", value: synth }
+    ];
+    drawMenuList({
+        labelX: 3,
+        items,
+        selectedIndex: optionsSubFocus,
+        getLabel: (item) => item.label,
+        getValue: (item) => item.value,
+        valueAlignRight: true,
+        editMode: optionsSubEditing,
+        labelGap: 2,
+        prioritizeSelectedValue: true,
+        selectedMinLabelChars: 7,
+        listArea: { topY: LIST_TOP_Y, bottomY: LIST_INDICATOR_BOTTOM_Y }
+    });
+}
+
+function openOptionsChains() {
+    optionsSubFocus = 0;
+    optionsSubEditing = false;
+    currentView = VIEW_OPTIONS_CHAINS;
+    menuStack.push({ title: "Chain " + (optionsChainIndex + 1), selectedIndex: 0 });
+    refreshChainInfo();
 }
 
 function drawSetlistBank() {
@@ -7778,12 +8213,12 @@ function duplicateSelectedSong() {
 }
 
 function handleOptionsInput(cc, value) {
-    /* Rows 0-2 (Drums, Instrument 1, Instrument 2) navigate into a submenu;
-     * rows 3-5 (Click Channel, Swap Guard, DSP Debug) edit in place. */
+    /* Rows 0-3 (Drums, Instrument 1, Instrument 2, Chains) navigate into a
+     * submenu; rows 4-6 (Click Channel, Swap Guard, DSP Debug) edit in place. */
     if (cc === MoveMainKnob) {
         const delta = decodeDelta(value);
         if (optionsEditing) {
-            if (optionsFocus === 3) {
+            if (optionsFocus === 4) {
                 /* Adjust the count-in click channel. 0 = follow the primary
                  * output channel (Default); 1-16 = explicit channel. */
                 const newCh = Math.max(0, Math.min(16, clickChannel + delta));
@@ -7791,7 +8226,7 @@ function handleOptionsInput(cc, value) {
                     clickChannel = newCh;
                     saveOutputSettings();
                 }
-            } else if (optionsFocus === 4) {
+            } else if (optionsFocus === 5) {
                 /* Adjust the mid-clip swap guard (0-100%, in 5% steps). */
                 const newG = Math.max(0, Math.min(1, swapGuardFraction + delta * 0.05));
                 if (newG !== swapGuardFraction) {
@@ -7799,7 +8234,7 @@ function handleOptionsInput(cc, value) {
                     saveOutputSettings();
                     pushSwapGuardToDsp();
                 }
-            } else if (optionsFocus === 5) {
+            } else if (optionsFocus === 6) {
                 /* Toggle the DSP debug log. */
                 dspDebugEnabled = !dspDebugEnabled;
                 saveOutputSettings();
@@ -7811,7 +8246,7 @@ function handleOptionsInput(cc, value) {
                 }
             }
         } else {
-            const newIdx = Math.max(0, Math.min(5, optionsFocus + delta));
+            const newIdx = Math.max(0, Math.min(6, optionsFocus + delta));
             if (newIdx !== optionsFocus) {
                 optionsFocus = newIdx;
             }
@@ -7824,6 +8259,8 @@ function handleOptionsInput(cc, value) {
             openOptionsInst(1);
         } else if (optionsFocus === 2) {
             openOptionsInst(2);
+        } else if (optionsFocus === 3) {
+            openOptionsChains();
         } else {
             optionsEditing = !optionsEditing;
             needsRedraw = true;
@@ -7916,6 +8353,52 @@ function handleOptionsInstInput(cc, value) {
         needsRedraw = true;
     } else if (cc === MoveMainButton && value > 0) {
         optionsSubEditing = !optionsSubEditing;
+        needsRedraw = true;
+    } else if (cc === MoveBack && value > 0) {
+        if (optionsSubEditing) {
+            optionsSubEditing = false;
+            needsRedraw = true;
+        } else {
+            menuStack.pop();
+            currentView = VIEW_OPTIONS;
+            needsRedraw = true;
+        }
+    }
+}
+
+function handleOptionsChainsInput(cc, value) {
+    if (cc === MoveMainKnob) {
+        const delta = decodeDelta(value);
+        if (optionsSubEditing) {
+            if (optionsSubFocus === 0) {
+                /* Page to another chain and read it. */
+                const newIdx = Math.max(0, Math.min(CHAIN_SLOT_COUNT - 1, optionsChainIndex + delta));
+                if (newIdx !== optionsChainIndex) {
+                    optionsChainIndex = newIdx;
+                    const frame = menuStack.current();
+                    if (frame) frame.title = "Chain " + (optionsChainIndex + 1);
+                    refreshChainInfo();
+                }
+            } else if (optionsSubFocus === 1 && chainInfoChannel !== null) {
+                /* The chain's receive channel. 0 = All. */
+                const newCh = Math.max(0, Math.min(16, chainInfoChannel + delta));
+                if (newCh !== chainInfoChannel) writeChainChannel(optionsChainIndex, newCh);
+            }
+        } else {
+            const newIdx = Math.max(0, Math.min(2, optionsSubFocus + delta));
+            if (newIdx !== optionsSubFocus) optionsSubFocus = newIdx;
+        }
+        needsRedraw = true;
+    } else if (cc === MoveMainButton && value > 0) {
+        if (optionsSubFocus === 2) {
+            optionsSubEditing = false;
+            openChainView(optionsChainIndex);
+        } else if (optionsSubFocus === 1 && chainInfoChannel === null) {
+            /* Nothing to edit until a read completes; try again. */
+            refreshChainInfo();
+        } else {
+            optionsSubEditing = !optionsSubEditing;
+        }
         needsRedraw = true;
     } else if (cc === MoveBack && value > 0) {
         if (optionsSubEditing) {
@@ -11224,6 +11707,13 @@ globalThis.init = function() {
 };
 
 globalThis.tick = function() {
+    /* Chain view first: follow the co-run session's real state, then let any
+     * held Track/Menu fire -- in that order, so an overlay requested by a hold
+     * is opened on the NEXT tick, after shadow_ui has primed the session (see
+     * openMasterFxView). */
+    reconcileChainView();
+    tickLongPressHolds();
+
     /* Promote a held Back to a suspend once it's been down BACK_SUSPEND_HOLD_MS
      * -- see backHoldActive's declaration. Checked unconditionally, ahead of
      * every view-specific tick work below, so it fires regardless of what the
@@ -11484,6 +11974,15 @@ globalThis.tick = function() {
         }
     }
 
+    if (chainViewRepaintTicks > 0) {
+        chainViewRepaintTicks--;
+        needsRedraw = true;
+    }
+    if (chainNoticeText && Date.now() >= chainNoticeUntil) {
+        chainNoticeText = "";
+        needsRedraw = true;
+    }
+
     if (needsRedraw) {
         const lq0 = ledQueueWrites;
         updateLEDs();
@@ -11496,6 +11995,12 @@ globalThis.tick = function() {
     }
     if (tickOverlay()) {
         needsRedraw = true;
+    }
+
+    /* While a chain view is up the screen is the editor's: shadow_ui draws it
+     * after this tick. Arranger keeps its LEDs (above) but draws nothing. */
+    if (needsRedraw && chainViewActive()) {
+        needsRedraw = false;
     }
 
     if (needsRedraw) {
@@ -11514,6 +12019,7 @@ globalThis.tick = function() {
                 case VIEW_OPTIONS: drawOptions(); break;
                 case VIEW_OPTIONS_DRUMS: drawOptionsDrums(); break;
                 case VIEW_OPTIONS_INST: drawOptionsInst(); break;
+                case VIEW_OPTIONS_CHAINS: drawOptionsChains(); break;
                 case VIEW_SETLIST_BANK: drawSetlistBank(); break;
                 case VIEW_SETLIST_EDIT: drawSetlistEdit(); break;
                 case VIEW_SETLIST_PICK: drawSetlistPick(); break;
@@ -11529,6 +12035,7 @@ globalThis.tick = function() {
                 case VIEW_JAM_INSTRUMENT: drawJamInstrumentMenu(); break;
             }
         }
+        drawChainNotice();
         needsRedraw = false;
     }
 
@@ -11595,6 +12102,7 @@ function routeCcInput(rawData, cc, value) {
         case VIEW_OPTIONS: handleOptionsInput(cc, value); break;
         case VIEW_OPTIONS_DRUMS: handleOptionsDrumsInput(cc, value); break;
         case VIEW_OPTIONS_INST: handleOptionsInstInput(cc, value); break;
+        case VIEW_OPTIONS_CHAINS: handleOptionsChainsInput(cc, value); break;
         case VIEW_SETLIST_BANK: handleSetlistBankInput(cc, value); break;
         case VIEW_SETLIST_EDIT: handleSetlistEditInput(cc, value); break;
         case VIEW_SETLIST_PICK: handleSetlistPickInput(cc, value); break;
@@ -11616,7 +12124,30 @@ globalThis.onMidiMessageInternal = function(data) {
     const cc = data[1];
     const value = data[2];
 
+    if (chainViewActive() && chainViewOwnsEvent(status, cc)) return;
+
     if (status === 0xB0) {
+        if (isTrackCc(cc) || cc === MoveMenu) {
+            /* See LONG_PRESS_HOLD_MS's declaration. */
+            if (value > 0) {
+                if (isTextEntryActive()) {
+                    routeCcInput(data, cc, value);
+                } else if (shiftHeld) {
+                    /* Shift+Track / Shift+Menu act on press as they always
+                     * have -- but not under a chain view, where they would
+                     * open an Arranger menu nobody can see. */
+                    if (!chainViewActive()) routeCcInput(data, cc, value);
+                } else {
+                    startLongPressHold(cc, data[0], value);
+                }
+            } else if (longPressHolds.has(cc)) {
+                endLongPressHold(cc);
+            } else if (!chainViewActive()) {
+                /* The release of a press that went straight through. */
+                routeCcInput(data, cc, value);
+            }
+            return;
+        }
         if (cc === MoveShift) {
             shiftHeld = value > 0;
             if (!shiftHeld) jamApplyKeyChangeOnShiftRelease();
@@ -11669,6 +12200,10 @@ globalThis.onMidiMessageExternal = function onMidiMessageExternal(data) {
 };
 
 globalThis.onResume = function onResume() {
+    /* A suspend tears co-run down (and its Track/Menu releases went to
+     * whatever was on screen); start clean. */
+    longPressHolds.clear();
+    if (chainViewActive()) endChainView();
     clearAllLEDs();
     resetLedState();
     /* The library may have changed while the module was suspended (files
@@ -11720,6 +12255,7 @@ function pollLibraryRescan() {
 }
 
 globalThis.onUnload = function onUnload() {
+    closeChainView();
     stopPlayback();
     clearAllLEDs();
     resetLedState();

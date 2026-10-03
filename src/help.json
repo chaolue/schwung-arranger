@@ -16,6 +16,10 @@
         "to suspend (keeps",
         "playing).",
         "",
+        "Hold Track 1-4 to",
+        "edit a Schwung",
+        "chain alongside.",
+        "",
         "Tap Back to exit."
       ]
     },
@@ -182,6 +186,28 @@
       ]
     },
     {
+      "title": "Schwung Chains",
+      "lines": [
+        "Hold Track 1-4:",
+        "edit Schwung chain",
+        "1-4 while the song",
+        "keeps playing.",
+        "Hold Menu: Master FX",
+        "",
+        "Pads, steps, Play",
+        "and Track buttons",
+        "stay the Arranger's.",
+        "",
+        "Back: steps out of",
+        "the editor.",
+        "Menu: back to the",
+        "Arranger.",
+        "",
+        "A Track or Menu tap",
+        "acts on release."
+      ]
+    },
+    {
       "title": "Options",
       "lines": [
         "Drums, Inst 1, and",
@@ -191,7 +217,12 @@
         "",
         "Swap Guard trims",
         "notes at clip",
-        "boundaries."
+        "boundaries.",
+        "",
+        "Chains: set a",
+        "Schwung chain's MIDI",
+        "channel; Edit Chain",
+        "opens it."
       ]
     }
   ]

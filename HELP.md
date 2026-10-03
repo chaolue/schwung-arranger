@@ -14,6 +14,10 @@ Button LED legend:
 |---------|--------|
 | Back (tap) | Screen-specific — see each section below |
 | Back (hold ≥0.5s) | Suspend the module: it parks in the background with playback still running. Return to it from the Schwung Tools menu to pick up where you left off |
+| Track 1–4 (hold ≥0.5s) | Open Schwung's editor for Chain 1–4 **alongside** the Arranger, which keeps playing — see **Schwung Chains** below |
+| Menu (hold ≥0.5s) | Open Schwung's Master FX alongside the Arranger |
+
+A quick tap of a Track button or Menu still does what that screen says it does, but it acts when you **let go** rather than when you press, so that a hold can be told apart from a tap. With Shift held they act on press, as before.
 
 ---
 
@@ -516,8 +520,8 @@ opened as a sub-screen from here.
 
 | Control | Action |
 |---------|--------|
-| Jog wheel (browse mode) | Move between Drums, Inst 1, Inst 2, Click Channel, Swap Guard, DSP Debug |
-| Jog click (on Drums / Inst 1 / Inst 2) | Open that track's Output/MIDI Channel sub-screen |
+| Jog wheel (browse mode) | Move between Drums, Inst 1, Inst 2, Chains, Click Channel, Swap Guard, DSP Debug |
+| Jog click (on Drums / Inst 1 / Inst 2 / Chains) | Open that sub-screen |
 | Jog wheel (edit mode, other fields) | Adjust the value |
 | Jog click (other fields) | Toggle edit / browse mode |
 | Back (edit mode) | Exit edit mode |
@@ -528,6 +532,7 @@ opened as a sub-screen from here.
 | Drums | Drum track's output + MIDI channel (opens a sub-screen — see below) |
 | Inst 1 | Instrument 1's output + MIDI channel (opens a sub-screen — see below) |
 | Inst 2 | Instrument 2's output + MIDI channel (opens a sub-screen — see below) |
+| Chains | Schwung's 4 chains: each one's MIDI channel, and a way into its editor (opens a sub-screen — see below) |
 | Click Channel | MIDI channel (1–16) used for the count-in click. **Default** follows the Drums output channel |
 | Swap Guard | Mid-clip swap guard window (0–100%). Removed at the outgoing side of a clip boundary to avoid overlaps; on the incoming side (e.g. a fill swapping back into a partially-played groove), any note that fell inside this window is replayed right at the resume point instead of being lost |
 | DSP Debug | Toggles the DSP debug log (`.dsp_log`) on/off |
@@ -556,6 +561,66 @@ Output routing for one track, opened from the Options list.
 | MIDI Channel | MIDI channel (1–16) used by the selected output |
 
 **Button LED hints:** Back and Main are lit.
+
+---
+
+### Options: Chains
+
+One of Schwung's 4 chains, as the Arranger sees it. A track whose Output is
+**Schwung** plays every chain listening on its MIDI channel, so this is where
+you match the two up without leaving the module. The channel is the chain's own
+setting — the same one as Schwung's Slot Settings and Schwung Manager — so a
+change here shows up there too, and is saved with the set.
+
+| Control | Action |
+|---------|--------|
+| Jog wheel (browse mode) | Move between Chain, MIDI Channel, Edit Chain |
+| Jog wheel (edit mode, Chain) | Show chain 1–4 |
+| Jog wheel (edit mode, MIDI Channel) | Change that chain's MIDI channel (All, 1–16) |
+| Jog click (on Edit Chain) | Open that chain's editor alongside the Arranger — the same as holding its Track button |
+| Jog click (other fields) | Toggle edit / browse mode |
+| Back (edit mode) | Exit edit mode |
+| Back (browse mode) | Return to Options |
+
+| Field | Meaning |
+|-------|---------|
+| Chain | Which chain is shown (1–4, the same numbers as Schwung's own) |
+| MIDI Channel | The channel the chain listens on. **All** listens on every channel |
+| Edit Chain | The synth loaded in the chain, or **Empty** |
+
+A **—** means Schwung did not answer; jog click on MIDI Channel to ask again.
+
+**Button LED hints:** Back and Main are lit.
+
+---
+
+## Schwung Chains
+
+Hold **Track 1–4** for half a second to open Schwung's own editor for Chain
+1–4, or hold **Menu** for Schwung's Master FX. The Arranger does not stop or
+suspend: the song keeps playing while the screen shows the editor, so you can
+shape a synth while it plays the part.
+
+| What stays with the Arranger | What the editor gets |
+|------------------------------|----------------------|
+| Pads, step buttons, Play, Record, Loop | The screen |
+| Track buttons (tap: the screen's own action, e.g. Perform/Jam mutes) | Jog wheel and jog click |
+| Shift, Menu, arrows, Copy/Delete/Undo | The 8 knobs and their touch |
+| Playback | Back |
+
+| Control (while a chain is open) | Action |
+|---------------------------------|--------|
+| Jog / knobs / jog click | Navigate and edit in Schwung's editor |
+| Back | Step back inside the editor; from its top level, return to the Arranger. From Master FX's top level, return to the Arranger |
+| Menu (tap) | Return to the Arranger |
+| Track 1–4 (hold) | Switch to that chain; hold the open chain's Track again to return to the Arranger |
+| Menu (hold) | Switch to Master FX; hold again to return to the Arranger |
+
+Shift + Track and Shift + Menu do nothing while a chain is open, so they cannot
+open an Arranger menu out of sight.
+
+Needs a Schwung with co-run (1.6.2 or newer for the knob grid inside the
+editor). On an older Schwung the Arranger shows a notice instead.
 
 ---
 
