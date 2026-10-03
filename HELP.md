@@ -313,10 +313,11 @@ Add, reorder, remove songs, and configure per-song options.
 
 | Control | Action |
 |---------|--------|
-| Jog wheel | Scroll the songs in the setlist (last entry is "(add song)") |
+| Jog wheel | Scroll the songs in the setlist (then "(add song)" and "(knobs)") |
 | Shift + Jog wheel | Move the selected song up / down in the set |
 | Jog click (on a song) | Open Click Settings for that song |
 | Jog click (on "(add song)") | Open the Song Bank to add a song |
+| Jog click (on "(knobs)") | Map the setlist's Performance knobs — see **Performance Knobs** below |
 | Delete | Remove the selected song from the setlist |
 | Left / Right | Move the selected song earlier / later in the setlist |
 | Back | Return to Setlist Bank |
@@ -345,9 +346,9 @@ Per-song count-in click and stop-after-finish options.
 
 | Control | Action |
 |---------|--------|
-| Jog wheel (browse mode) | Move between Bars, Note, Stop On End |
+| Jog wheel (browse mode) | Move between Bars, Note, Stop On End, Knobs |
 | Jog wheel (edit mode) | Adjust the selected value |
-| Jog click | Toggle edit / browse mode; on Stop On End it toggles Yes/No |
+| Jog click | Toggle edit / browse mode; on Stop On End it toggles Yes/No; on Knobs it opens this song's knobs |
 | Back (edit mode) | Exit edit mode |
 | Back (browse mode) | Save and return to Setlist Edit |
 
@@ -356,6 +357,7 @@ Per-song count-in click and stop-after-finish options.
 | Bars | Count-in click bars before this song starts (0 = no click) |
 | Note | MIDI note number used for the click (0 = silent / pad flash only) |
 | Stop On End | If Yes, playback stops when this song finishes and the next song is selected |
+| Knobs | This song's own knob mappings: **Setlist** while it uses the setlist's, or how many it overrides |
 
 ---
 
@@ -372,6 +374,8 @@ Play through a setlist.
 | Up / Down | Scroll the pad window up / down one row |
 | Jog wheel | Scroll the info display |
 | Track 1 / 3 / 4 | Turn Drums / Inst 1 / Inst 2 on or off (kept when Play is pressed) |
+| Knobs 1–8 | Change the Schwung parameter mapped to that knob — see **Performance Knobs** |
+| Touch a knob | Show what it controls and its value |
 | Play | Start playback from the current / selected song or section |
 | Back | Stop and return to Root Menu |
 
@@ -384,6 +388,7 @@ Play through a setlist.
 | Pad press (other song / click pad) | Queue a jump to that song at the next section boundary |
 | Up / Down | Scroll the pad window up / down one row |
 | Track 1 / 3 / 4 | Turn Drums / Inst 1 / Inst 2 on or off immediately |
+| Knobs 1–8 | Change the Schwung parameter mapped to that knob |
 | Play | Stop playback |
 | Back | Stop playback and return to Root Menu |
 
@@ -392,6 +397,47 @@ The pad window shows 4 rows of sections at a time. When playback reaches the thi
 The Track buttons are live mutes, not saved to the song. Each song starts with its own instrument settings (drums always on) when you switch to it; a mute set while stopped stays in place when you press Play.
 
 **Button LED hints:** Back, Up, Down and Play are lit; Play is green when stopped and red while playing. Track 1, 3 and 4 are lit in their track colour while that part is on, and off while it is muted.
+
+---
+
+### Performance Knobs
+
+Each of Move's 8 knobs can control one parameter of a Schwung chain while you
+perform — the synth, a MIDI FX or an audio FX of any of the 4 chains, using
+the parameters (and ranges) the module itself publishes.
+
+- **Per setlist, with song overrides.** Map the knobs in Setlist Edit >
+  (knobs). A song can replace any knob with its own parameter, or turn it
+  **Off**, in its Settings > Knobs; the rest follow the setlist. A song's
+  screen shows the setlist's mappings in (parentheses).
+- **Values are restored.** When a song is selected or starts playing, every
+  knob's parameter is set back to the value saved for that song. Turning a
+  knob in Perform saves the new value for the **current song** only. The
+  setlist's own value is the starting point for songs that have none yet —
+  set it by turning the knob on the setlist's Knobs screen.
+- **On a Knobs screen**, turning a knob sets the value restored at that
+  level, and you hear it as you turn.
+- **Another module in the chain?** A mapping remembers the module it was made
+  for. If that chain position now holds a different module (another Move Set,
+  or a swapped module), the knob shows **not loaded** and changes nothing.
+- Under a chain view (hold Track 1–4) the knobs belong to Schwung's editor.
+  Coming back, a mapped knob continues from wherever the editor left that
+  parameter.
+
+| Control (Knobs screen) | Action |
+|------------------------|--------|
+| Jog wheel / touch a knob | Select a knob row |
+| Jog click | Choose what the knob controls: Chain, then component, then parameter (or None / Use Setlist / Off) |
+| Turn a knob | Set the value it restores, live |
+| Delete | Clear the mapping (on a song: back to the setlist's) |
+| Back | Return |
+
+**Move Set check.** Schwung's chains belong to the Move Set, so a setlist
+remembers the Move Set it was used with. Opening it in Perform with a different
+Set loaded (or coming back to Arranger with one) shows **Use Move Set:** and
+the Set it expects, with the one that is loaded. **Back** returns to the
+setlist list, so you can leave the Arranger, load that Set on Move and come
+back; **Continue** plays with the loaded Set and remembers it from now on.
 
 ---
 

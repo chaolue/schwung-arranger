@@ -12,12 +12,16 @@ const g = globalThis;
 export const printed = [];
 g.print = (x, y, text) => { printed.push(String(text)); return true; };
 for (const f of ["clear_screen", "fill_rect", "draw_rect", "set_pixel", "draw_line",
-                 "host_flush_display", "host_ensure_dir", "host_write_file", "host_log",
+                 "host_flush_display", "host_ensure_dir", "host_log",
                  "shadow_log", "console_log"]) {
     g[f] = () => true;
 }
-g.host_read_file = () => null;
-g.host_file_exists = () => false;
+/* An in-memory file system: setlists and songs the tests write, everything
+ * else absent (ui.js treats a missing config as defaults). */
+export const files = new Map();
+g.host_read_file = (path) => files.has(path) ? files.get(path) : null;
+g.host_write_file = (path, text) => { files.set(path, String(text)); return true; };
+g.host_file_exists = (path) => files.has(path);
 g.move_midi_internal_send = () => true;
 g.move_midi_external_send = () => true;
 g.shadow_send_midi_to_dsp = () => true;
@@ -95,13 +99,30 @@ export function hostEnd() {
 export function hostBackAtOverlayRoot() { g.shadow_corun_close(); }
 install();
 
-/* ---- chain slots in the shim ---- */
+/* ---- chain slots in the shim ----
+ * Each chain: a receive channel and its components, each with a module id, a
+ * display name, chain_params and live values -- answered on the same keys the
+ * chain host serves ("synth_module", "fx1_module", "<comp>:name",
+ * "<comp>:chain_params", "<comp>:<key>"). */
+function synth(module, name, values) {
+    return { module, name, values: Object.assign({ cutoff: "0.50", wave: "Saw", voices: "4" }, values || {}),
+        params: [
+            { key: "cutoff", name: "Cutoff", type: "float", min: 0, max: 1, step: 0.01 },
+            { key: "wave", name: "Wave", type: "enum", options: ["Sine", "Saw", "Square"] },
+            { key: "voices", name: "Voices", type: "int", min: 1, max: 8 },
+            { key: "sample_path", name: "Sample", type: "filepath" },
+        ] };
+}
 export const slots = [
-    { recv: 1, module: "dexed", name: "Dexed" },
-    { recv: 2, module: "", name: "" },
-    { recv: 0, module: "obxd", name: "OB-Xd" },
-    { recv: 4, module: "sf2", name: "" },
+    { recv: 1, comps: { synth: synth("dexed", "Dexed"),
+                        fx1: { module: "freeverb", name: "Freeverb", values: { mix: "0.30" },
+                               params: [{ key: "mix", name: "Mix", type: "float", min: 0, max: 1, step: 0.05 }] } },
+      midi_fx: 0, fx: 1 },
+    { recv: 2, comps: {}, midi_fx: 0, fx: 0 },
+    { recv: 0, comps: { synth: synth("obxd", "OB-Xd") }, midi_fx: 0, fx: 0 },
+    { recv: 4, comps: { synth: synth("sf2", "") }, midi_fx: 0, fx: 0 },
 ];
+export const moveSet = { uuid: "set-a", name: "Gig Set" };
 export const paramLog = [];
 export let paramFails = false;
 export function setParamFails(v) { paramFails = v; }
@@ -109,17 +130,34 @@ g.shadow_get_param = (slot, key) => {
     paramLog.push(["get", slot, key]);
     if (paramFails) return null;
     const s = slots[slot];
+    if (key === "active_set") return moveSet.uuid ? moveSet.uuid + "\n" + moveSet.name + "\n1" : "";
     if (key === "slot:receive_channel") return String(s.recv);
-    if (key === "synth_module") return s.module;
-    if (key === "synth:name") return s.name;
+    if (key === "midi_fx_count") return String(s.midi_fx);
+    if (key === "fx_count") return String(s.fx);
+    let m = /^(synth|fx\d+|midi_fx\d+)_module$/.exec(key);
+    if (m) return s.comps[m[1]] ? s.comps[m[1]].module : "";
+    m = /^(synth|fx\d+|midi_fx\d+):(.+)$/.exec(key);
+    if (m) {
+        const c = s.comps[m[1]];
+        if (!c) return "";
+        if (m[2] === "name") return c.name;
+        if (m[2] === "chain_params") return JSON.stringify(c.params);
+        return c.values[m[2]] !== undefined ? String(c.values[m[2]]) : "";
+    }
     return "";
 };
+export const writes = [];
 g.shadow_set_param_timeout = (slot, key, val, t) => {
     paramLog.push(["set", slot, key, val, t]);
     if (paramFails) return false;
+    writes.push([slot, key, String(val)]);
+    const s = slots[slot];
     if (key === "slot:receive_channel") {
         const n = parseInt(val, 10);
-        if (n >= 0 && n <= 16) slots[slot].recv = n;
+        if (n >= 0 && n <= 16) s.recv = n;
+        return true;
     }
+    const m = /^(synth|fx\d+|midi_fx\d+):(.+)$/.exec(key);
+    if (m && s.comps[m[1]]) s.comps[m[1]].values[m[2]] = String(val);
     return true;
 };

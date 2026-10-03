@@ -120,6 +120,8 @@ const VIEW_OPTIONS = "options";
 const VIEW_OPTIONS_DRUMS = "options_drums";
 const VIEW_OPTIONS_INST = "options_inst";
 const VIEW_OPTIONS_CHAINS = "options_chains";
+const VIEW_KNOB_MAP = "knob_map";
+const VIEW_KNOB_PICK = "knob_pick";
 const VIEW_SONG_SETTINGS = "song_settings";
 const VIEW_SONG_BACKUPS = "song_backups";
 const VIEW_SETLIST_BANK = "setlist_bank";
@@ -513,8 +515,10 @@ function endChainView() {
     stepLedsDirty = true;
     needsRedraw = true;
     chainViewRepaintTicks = 2;
-    /* The editor can change a chain's channel or synth. */
+    /* The editor can change a chain's channel, synth or a mapped value. */
     if (currentView === VIEW_OPTIONS_CHAINS) refreshChainInfo();
+    if (currentView === VIEW_PERFORMANCE) refreshPerfKnobs();
+    if (currentView === VIEW_KNOB_MAP) refreshKnobEdit();
 }
 
 /* Open (or re-target) a chain session on `slot`. */
@@ -679,6 +683,674 @@ function tickLongPressHolds() {
             fireLongPressAction(cc);
         }
     }
+}
+
+/* ---- Performance knobs: Schwung parameters on Move's 8 knobs --------------
+ *
+ * In Performance (not under a chain view, which cedes the knobs), each knob
+ * can drive one parameter of one Schwung chain -- any component (synth, MIDI
+ * FX, audio FX) of any of the 4 chains. Mappings live in the SETLIST
+ * (setlist.knobs[0..7]); a song entry may OVERRIDE a knob (entry.knobs[i]: a
+ * mapping of its own, or {off:true}; absent = use the setlist's). Values are
+ * restored: when a song loads, every knob's saved value is written back to its
+ * parameter, and turning a knob saves into the CURRENT song -- in its override
+ * (mapping.value) or, for a setlist knob, in entry.knob_values[i] = {ref,
+ * value}, falling back to the setlist mapping's own value.
+ *
+ * Writes go to the chain through the shim's param channel, the same
+ * "<component>:<key>" keys the chain editor writes (shadow_set_param_timeout:
+ * a plain set is fire-and-forget under overtake and dropped when the channel
+ * is busy). Ranges, steps and options come from the component's own
+ * chain_params -- a module that publishes none offers no parameters rather
+ * than an invented 0..1 knob.
+ *
+ * A mapping stores the module id it was made against. Chains belong to the
+ * Move Set, so a Set change (or a module swap) can put a different module
+ * there: such a knob reads "not loaded" and writes NOTHING, rather than
+ * writing a number meant for another module's parameter. */
+const KNOB_COUNT = 8;
+const KNOB_SAVE_DELAY_MS = 1500;     /* batch flash writes while a knob turns */
+const KNOB_SHOW_MS = 1500;           /* feedback after the last turn */
+const KNOB_WRITES_PER_TICK = 4;      /* each is one param round trip (~3 ms) */
+const KNOB_WRITE_RETRIES = 20;
+const KNOB_PARAM_TYPES = new Set(["float", "int", "enum", "bool"]);
+let perfKnobs = new Array(KNOB_COUNT).fill(null);   /* resolved, see resolvePerfKnob */
+let perfKnobsKey = "";               /* which setlist+song perfKnobs was built for */
+const knobWriteQueue = new Map();    /* knob index -> { slot, fullKey, value, tries } */
+const knobMetaCache = new Map();     /* "slot|comp|module" -> { list, byKey } */
+const knobEnumAcc = new Array(KNOB_COUNT).fill(0);
+const knobTouched = new Array(KNOB_COUNT).fill(false);
+let knobSaveDue = 0;                 /* Date.now() after which currentSetlist is saved */
+let knobShowIndex = -1;
+let knobShowUntil = 0;
+
+function knobRef(m) {
+    return m.slot + "|" + m.comp + "|" + m.key;
+}
+
+function knobMappedCount(list) {
+    if (!Array.isArray(list)) return 0;
+    return list.filter(m => m && typeof m.key === "string").length;
+}
+
+function knobOverrideCount(entry) {
+    if (!entry || !Array.isArray(entry.knobs)) return 0;
+    return entry.knobs.filter(o => o && (o.off || typeof o.key === "string")).length;
+}
+
+function compModuleKey(comp) {
+    return comp === "synth" ? "synth_module" : comp + "_module";
+}
+
+function compLabel(comp) {
+    if (comp === "synth") return "Synth";
+    const mfx = /^midi_fx(\d+)$/.exec(comp);
+    if (mfx) return "MIDI FX " + mfx[1];
+    const fx = /^fx(\d+)$/.exec(comp);
+    return fx ? "FX " + fx[1] : comp;
+}
+
+/* The module in a chain position: a module id, "" for an empty position, or
+ * null when the read did not complete (never taken for "empty"). */
+function readCompModule(slot, comp) {
+    return readChainSlotParam(slot, compModuleKey(comp));
+}
+
+/* A component's editable parameters from its chain_params, cached per module.
+ * null = not available (no answer, or nothing parseable); a failure is not
+ * cached, so the next look retries. */
+function readCompMeta(slot, comp, moduleId) {
+    const cacheKey = slot + "|" + comp + "|" + moduleId;
+    if (knobMetaCache.has(cacheKey)) return knobMetaCache.get(cacheKey);
+    const raw = readChainSlotParam(slot, comp + ":chain_params");
+    if (raw === null) return null;
+    let arr = null;
+    try { arr = raw ? JSON.parse(raw) : []; } catch (e) { arr = null; }
+    if (!Array.isArray(arr)) return null;
+    const list = [];
+    const byKey = new Map();
+    for (const p of arr) {
+        if (!p || typeof p.key !== "string" || !KNOB_PARAM_TYPES.has(p.type)) continue;
+        if (p.type === "enum" && !(Array.isArray(p.options) && p.options.length > 0)) continue;
+        list.push(p);
+        byKey.set(p.key, p);
+    }
+    const meta = { list, byKey };
+    knobMetaCache.set(cacheKey, meta);
+    return meta;
+}
+
+function knobOptions(meta) {
+    if (Array.isArray(meta.options) && meta.options.length > 0) return meta.options;
+    return meta.type === "bool" ? ["0", "1"] : null;
+}
+
+function knobDecimals(step) {
+    if (!(step > 0) || step >= 1) return 0;
+    return Math.min(4, Math.ceil(-Math.log10(step) - 1e-9));
+}
+
+/* One knob turn applied to a parameter value. Returns the new value in the
+ * form the plugin uses (an option name or an index, for enums), or null when
+ * it does not change. */
+function knobStepValue(meta, cur, delta, knob) {
+    const options = knobOptions(meta);
+    if (options) {
+        let idx = options.indexOf(String(cur));
+        const usesIndex = idx < 0;
+        if (usesIndex) {
+            const n = parseInt(cur, 10);
+            idx = Number.isFinite(n) && n >= 0 && n < options.length ? n : 0;
+        }
+        /* Two detents per option, so a list can be stepped through deliberately. */
+        knobEnumAcc[knob] += delta;
+        const steps = knobEnumAcc[knob] > 0 ? Math.floor(knobEnumAcc[knob] / 2) : Math.ceil(knobEnumAcc[knob] / 2);
+        if (steps === 0) return null;
+        knobEnumAcc[knob] -= steps * 2;
+        const next = Math.max(0, Math.min(options.length - 1, idx + steps));
+        if (next === idx) return null;
+        return usesIndex ? String(next) : options[next];
+    }
+    const num = parseFloat(cur);
+    if (!Number.isFinite(num)) return null;
+    const min = Number.isFinite(meta.min) ? meta.min : (meta.type === "int" ? 0 : 0);
+    const max = Number.isFinite(meta.max) ? meta.max : (meta.type === "int" ? 127 : 1);
+    let step = meta.step > 0 ? meta.step : (meta.type === "int" ? 1 : (max - min) / 100);
+    if (!(step > 0)) step = 0.01;
+    let next = Math.max(min, Math.min(max, num + delta * step));
+    if (meta.type === "int") {
+        next = Math.round(next);
+        return next === Math.round(num) ? null : String(next);
+    }
+    const out = next.toFixed(knobDecimals(step));
+    return parseFloat(out) === num ? null : out;
+}
+
+function formatKnobValue(meta, value) {
+    if (value === null || value === undefined || value === "") return "—";
+    const options = meta ? knobOptions(meta) : null;
+    if (options) {
+        if (options.indexOf(String(value)) >= 0) return String(value);
+        const n = parseInt(value, 10);
+        return (Number.isFinite(n) && options[n] !== undefined) ? String(options[n]) : String(value);
+    }
+    const num = parseFloat(value);
+    if (!Number.isFinite(num)) return String(value);
+    const step = meta && meta.step > 0 ? meta.step : (meta && meta.type === "int" ? 1 : 0.01);
+    const text = num.toFixed(meta && meta.type === "int" ? 0 : knobDecimals(step));
+    return meta && meta.unit ? text + " " + meta.unit : text;
+}
+
+/* Which mapping a knob has for a song: the song's override, else the
+ * setlist's. source "song" | "setlist"; null = unassigned (or turned off by
+ * the song). */
+function knobMappingFor(setlist, entry, i) {
+    const o = entry && Array.isArray(entry.knobs) ? entry.knobs[i] : null;
+    if (o && o.off) return null;
+    if (o && typeof o.key === "string") return { m: o, source: "song" };
+    const m = setlist && Array.isArray(setlist.knobs) ? setlist.knobs[i] : null;
+    return (m && typeof m.key === "string") ? { m, source: "setlist" } : null;
+}
+
+function knobSavedValue(entry, i, res) {
+    if (res.source === "setlist" && entry && Array.isArray(entry.knob_values)) {
+        const v = entry.knob_values[i];
+        if (v && v.ref === knobRef(res.m) && v.value !== undefined) return v.value;
+    }
+    return res.m.value !== undefined ? res.m.value : null;
+}
+
+function storeKnobValue(entry, i, res, value) {
+    if (res.source === "setlist" && entry) {
+        if (!Array.isArray(entry.knob_values)) entry.knob_values = [];
+        entry.knob_values[i] = { ref: knobRef(res.m), value };
+    } else {
+        res.m.value = value;
+    }
+}
+
+/* A mapping checked against what is loaded now. status: "ok", "missing"
+ * (another module, or none, in that position) or "unknown" (no answer). */
+function resolveKnob(res, moduleCache) {
+    const m = res.m;
+    const ck = m.slot + "|" + m.comp;
+    let mod = moduleCache ? moduleCache.get(ck) : undefined;
+    if (mod === undefined) {
+        mod = readCompModule(m.slot, m.comp);
+        if (moduleCache) moduleCache.set(ck, mod);
+    }
+    if (mod === null) return { res, meta: null, status: "unknown" };
+    if (mod !== m.module) return { res, meta: null, status: "missing" };
+    const all = readCompMeta(m.slot, m.comp, mod);
+    const meta = all ? all.byKey.get(m.key) : null;
+    return { res, meta: meta || null, status: meta ? "ok" : (all ? "missing" : "unknown") };
+}
+
+function queueKnobWrite(i, m, value) {
+    knobWriteQueue.set(i, { slot: m.slot, fullKey: m.comp + ":" + m.key, value: String(value), tries: 0 });
+}
+
+function flushKnobWrites() {
+    if (knobWriteQueue.size === 0) return;
+    let n = 0;
+    for (const [i, w] of knobWriteQueue) {
+        if (n++ >= KNOB_WRITES_PER_TICK) break;
+        let ok = false;
+        try {
+            if (typeof shadow_set_param_timeout === "function") {
+                ok = shadow_set_param_timeout(w.slot, w.fullKey, w.value, 50) === true;
+            } else if (typeof shadow_set_param === "function") {
+                ok = shadow_set_param(w.slot, w.fullKey, w.value) === true;
+            }
+        } catch (e) { ok = false; }
+        if (ok || ++w.tries >= KNOB_WRITE_RETRIES) {
+            if (!ok) logDebug("knobs: gave up writing " + w.fullKey + " on chain " + (w.slot + 1));
+            knobWriteQueue.delete(i);
+        }
+    }
+}
+
+function markKnobSave() {
+    knobSaveDue = Date.now() + KNOB_SAVE_DELAY_MS;
+}
+
+function flushKnobSave(now) {
+    if (!knobSaveDue || (now !== undefined && now < knobSaveDue)) return;
+    knobSaveDue = 0;
+    if (currentSetlist) saveSetlist(currentSetlist);
+}
+
+/* Build perfKnobs for the current song and write back its saved values. Runs
+ * when a song loads; `force` re-resolves the same song (after a resume or a
+ * chain view, when a module may have changed). */
+function applyPerfKnobs(force) {
+    const entry = currentSetlist ? currentSetlist.songs[perfSongIndex] : null;
+    const key = (currentSetlist ? (currentSetlist.path || currentSetlist.name) : "") + "#" + perfSongIndex;
+    if (!force && key === perfKnobsKey) return;
+    perfKnobsKey = key;
+    knobWriteQueue.clear();
+    knobEnumAcc.fill(0);
+    const modules = new Map();
+    for (let i = 0; i < KNOB_COUNT; i++) {
+        const res = currentSetlist ? knobMappingFor(currentSetlist, entry, i) : null;
+        if (!res) { perfKnobs[i] = null; continue; }
+        const k = resolveKnob(res, modules);
+        k.value = knobSavedValue(entry, i, res);
+        perfKnobs[i] = k;
+        if (k.status === "ok" && k.value !== null) queueKnobWrite(i, res.m, k.value);
+    }
+}
+
+/* Re-resolve the current song's knobs WITHOUT writing their saved values:
+ * after a chain view or a resume the user may have changed those parameters
+ * elsewhere, and that is what the knobs should now continue from. */
+function refreshPerfKnobs() {
+    const entry = currentSetlist ? currentSetlist.songs[perfSongIndex] : null;
+    perfKnobsKey = (currentSetlist ? (currentSetlist.path || currentSetlist.name) : "") + "#" + perfSongIndex;
+    knobWriteQueue.clear();
+    const modules = new Map();
+    for (let i = 0; i < KNOB_COUNT; i++) {
+        const res = currentSetlist ? knobMappingFor(currentSetlist, entry, i) : null;
+        if (!res) { perfKnobs[i] = null; continue; }
+        const k = resolveKnob(res, modules);
+        k.value = null;
+        if (k.status === "ok") {
+            const live = readChainSlotParam(res.m.slot, res.m.comp + ":" + res.m.key);
+            k.value = live ? live : knobSavedValue(entry, i, res);
+        }
+        perfKnobs[i] = k;
+    }
+    needsRedraw = true;
+}
+
+/* Back out of Performance to the setlist picker (Move Set check: Back). */
+function leavePerformanceToSetlists() {
+    perfStop();
+    flushKnobSave();
+    menuStack.pop();
+    currentView = VIEW_PERF_SETLIST;
+    needsRedraw = true;
+    ledDirtyAll = true;
+}
+
+function showKnob(i) {
+    knobShowIndex = i;
+    knobShowUntil = Date.now() + KNOB_SHOW_MS;
+    needsRedraw = true;
+}
+
+/* A knob turned in Performance. */
+function turnPerfKnob(i, delta) {
+    const k = perfKnobs[i];
+    showKnob(i);
+    if (!k || k.status !== "ok" || !delta) return;
+    const m = k.res.m;
+    if (k.value === null) {
+        /* Nothing saved yet: start from what the parameter is now. */
+        const cur = readChainSlotParam(m.slot, m.comp + ":" + m.key);
+        if (cur === null || cur === "") return;
+        k.value = cur;
+    }
+    const next = knobStepValue(k.meta, k.value, delta, i);
+    if (next === null) return;
+    k.value = next;
+    queueKnobWrite(i, m, next);
+    const entry = currentSetlist ? currentSetlist.songs[perfSongIndex] : null;
+    storeKnobValue(entry, i, k.res, next);
+    markKnobSave();
+}
+
+/* Bottom-of-screen feedback while a knob is touched or just turned. */
+function drawPerfKnobFeedback() {
+    let i = knobShowIndex;
+    if (i < 0 || (Date.now() >= knobShowUntil && !knobTouched[i])) return;
+    const k = perfKnobs[i];
+    let text;
+    if (!k) text = "K" + (i + 1) + " unassigned";
+    else if (k.status === "missing") text = "K" + (i + 1) + " " + k.res.m.label + ": not loaded";
+    else if (k.status === "unknown") text = "K" + (i + 1) + " " + k.res.m.label + ": no answer";
+    else text = k.res.m.label + " " + formatKnobValue(k.meta, k.value);
+    fill_rect(0, 50, 128, 14, 0);
+    fill_rect(0, 50, 128, 1, 1);
+    print(2, 54, text.length > 21 ? text.substring(0, 21) : text, 1);
+}
+
+/* ---- Knob editing: Setlist Edit > Knobs, and a song's Transitions > Knobs --
+ *
+ * VIEW_KNOB_MAP lists Knob 1-8 for one scope: the setlist, or one song (whose
+ * rows show the setlist's mapping in parentheses while not overridden).
+ * Turning a physical knob here edits that knob's saved value at this scope,
+ * live on the chain, so the value a song restores is set the same way it is
+ * played. Jog click picks a mapping (VIEW_KNOB_PICK: chain, component,
+ * parameter); Delete clears it (a song: back to the setlist's). */
+let knobEditScope = "setlist";       /* "setlist" | "song" */
+let knobEditFocus = 0;
+let knobEditReturnView = VIEW_SETLIST_EDIT;
+let knobEditKnobs = new Array(KNOB_COUNT).fill(null);  /* resolveKnob() per row */
+let knobPickStage = "chain";         /* "chain" | "comp" | "param" */
+let knobPickIndex = 0;
+let knobPickSlot = 0;
+let knobPickComp = "";
+let knobPickModule = "";
+let knobPickModuleName = "";
+let knobPickItems = [];
+
+function knobEditEntry() {
+    return knobEditScope === "song" && currentSetlist ? currentSetlist.songs[setlistSongIndex] : null;
+}
+
+/* The mapping a row edits: the song's view of it (override or inherited) in
+ * song scope, the setlist's own in setlist scope. */
+function knobEditMapping(i) {
+    if (!currentSetlist) return null;
+    if (knobEditScope === "song") return knobMappingFor(currentSetlist, knobEditEntry(), i);
+    const m = Array.isArray(currentSetlist.knobs) ? currentSetlist.knobs[i] : null;
+    return m && typeof m.key === "string" ? { m, source: "setlist" } : null;
+}
+
+function refreshKnobEdit() {
+    const modules = new Map();
+    for (let i = 0; i < KNOB_COUNT; i++) {
+        const res = knobEditMapping(i);
+        knobEditKnobs[i] = res ? resolveKnob(res, modules) : null;
+    }
+    needsRedraw = true;
+}
+
+function openKnobMap(scope, returnView) {
+    knobEditScope = scope;
+    knobEditReturnView = returnView;
+    knobEditFocus = 0;
+    knobEnumAcc.fill(0);
+    currentView = VIEW_KNOB_MAP;
+    menuStack.push({ title: "Knobs", selectedIndex: 0 });
+    refreshKnobEdit();
+}
+
+function knobRowLabel(i) {
+    const res = knobEditMapping(i);
+    const entry = knobEditEntry();
+    const o = entry && Array.isArray(entry.knobs) ? entry.knobs[i] : null;
+    if (knobEditScope === "song" && o && o.off) return (i + 1) + " Off";
+    if (!res) return (i + 1) + " —";
+    const name = res.m.label + (res.m.moduleName ? " " + res.m.moduleName : "");
+    return (i + 1) + " " + (knobEditScope === "song" && res.source === "setlist" ? "(" + name + ")" : name);
+}
+
+function knobRowValue(i) {
+    const k = knobEditKnobs[i];
+    if (!k) return "";
+    if (k.status === "missing") return "not loaded";
+    if (k.status === "unknown") return "?";
+    return formatKnobValue(k.meta, knobSavedValue(knobEditEntry(), i, k.res));
+}
+
+function drawKnobMap() {
+    const entry = knobEditEntry();
+    const title = knobEditScope === "song" && entry ? "Knobs: " + shortSongName(entry.name) : "Knobs: Setlist";
+    drawMenuHeader(scrollHeader(title, 28), "");
+    const items = [];
+    for (let i = 0; i < KNOB_COUNT; i++) items.push({ i });
+    drawMenuList({
+        labelX: 3,
+        items,
+        selectedIndex: knobEditFocus,
+        getLabel: (item) => knobRowLabel(item.i),
+        getValue: (item) => knobRowValue(item.i),
+        valueAlignRight: true,
+        labelGap: 2,
+        prioritizeSelectedValue: true,
+        selectedMinLabelChars: 8,
+        listArea: { topY: LIST_TOP_Y, bottomY: LIST_INDICATOR_BOTTOM_Y }
+    });
+}
+
+/* A physical knob turned on the Knobs screen: edit the value this scope
+ * restores, and hear it. */
+function turnEditKnob(i, delta) {
+    knobEditFocus = i;
+    needsRedraw = true;
+    const k = knobEditKnobs[i];
+    if (!k || k.status !== "ok" || !delta) return;
+    const m = k.res.m;
+    const entry = knobEditEntry();
+    let cur = knobSavedValue(entry, i, k.res);
+    if (cur === null) cur = readChainSlotParam(m.slot, m.comp + ":" + m.key);
+    if (cur === null || cur === "") return;
+    const next = knobStepValue(k.meta, cur, delta, i);
+    if (next === null) return;
+    queueKnobWrite(i, m, next);
+    if (knobEditScope === "song") storeKnobValue(entry, i, k.res, next);
+    else m.value = next;
+    perfKnobsKey = "";               /* Performance re-reads it */
+    markKnobSave();
+}
+
+function clearKnobMapping(i) {
+    if (!currentSetlist) return;
+    if (knobEditScope === "song") {
+        const entry = knobEditEntry();
+        if (entry && Array.isArray(entry.knobs)) entry.knobs[i] = null;
+        if (entry && Array.isArray(entry.knob_values)) entry.knob_values[i] = null;
+    } else if (Array.isArray(currentSetlist.knobs)) {
+        currentSetlist.knobs[i] = null;
+    }
+    perfKnobsKey = "";
+    saveSetlist(currentSetlist);
+    refreshKnobEdit();
+}
+
+function handleKnobMapInput(cc, value) {
+    if (cc === MoveMainKnob) {
+        const delta = decodeDelta(value);
+        const n = Math.max(0, Math.min(KNOB_COUNT - 1, knobEditFocus + delta));
+        if (n !== knobEditFocus) { knobEditFocus = n; needsRedraw = true; }
+    } else if (cc >= 71 && cc <= 78) {
+        turnEditKnob(cc - 71, decodeDelta(value));
+    } else if (cc === MoveMainButton && value > 0) {
+        openKnobPick();
+    } else if (cc === MoveDelete && value > 0) {
+        clearKnobMapping(knobEditFocus);
+    } else if (cc === MoveBack && value > 0) {
+        flushKnobSave();
+        menuStack.pop();
+        currentView = knobEditReturnView;
+        needsRedraw = true;
+    }
+}
+
+/* ---- the picker ---- */
+function knobPickChainItems() {
+    const items = [];
+    if (knobEditScope === "song") {
+        items.push({ label: "Use Setlist", action: "inherit" });
+        items.push({ label: "Off", action: "off" });
+    } else {
+        items.push({ label: "None", action: "clear" });
+    }
+    for (let slot = 0; slot < CHAIN_SLOT_COUNT; slot++) {
+        const mod = readCompModule(slot, "synth");
+        const value = mod === null ? "?" : (mod === "" ? "Empty" : (readChainSlotParam(slot, "synth:name") || mod));
+        items.push({ label: "Chain " + (slot + 1), value, action: "chain", slot });
+    }
+    return items;
+}
+
+function knobPickCompItems(slot) {
+    const items = [];
+    const comps = ["synth"];
+    const midiCount = parseInt(readChainSlotParam(slot, "midi_fx_count") || "0", 10) || 0;
+    const fxCount = parseInt(readChainSlotParam(slot, "fx_count") || "0", 10) || 0;
+    for (let n = 1; n <= Math.min(midiCount, 8); n++) comps.push("midi_fx" + n);
+    for (let n = 1; n <= Math.min(fxCount, 8); n++) comps.push("fx" + n);
+    for (const comp of comps) {
+        const mod = readCompModule(slot, comp);
+        if (!mod) continue;
+        const name = readChainSlotParam(slot, comp + ":name") || mod;
+        items.push({ label: compLabel(comp), value: name, action: "comp", comp, module: mod, moduleName: name });
+    }
+    if (items.length === 0) items.push({ label: "Empty chain", action: "none" });
+    return items;
+}
+
+function knobPickParamItems(slot, comp, moduleId) {
+    const meta = readCompMeta(slot, comp, moduleId);
+    if (!meta) return [{ label: "No answer: retry", action: "retry" }];
+    if (meta.list.length === 0) return [{ label: "No parameters", action: "none" }];
+    return meta.list.map(p => ({ label: p.name || p.key, action: "param", param: p }));
+}
+
+function setKnobPickStage(stage) {
+    knobPickStage = stage;
+    knobPickIndex = 0;
+    if (stage === "chain") knobPickItems = knobPickChainItems();
+    else if (stage === "comp") knobPickItems = knobPickCompItems(knobPickSlot);
+    else knobPickItems = knobPickParamItems(knobPickSlot, knobPickComp, knobPickModule);
+    needsRedraw = true;
+}
+
+function openKnobPick() {
+    currentView = VIEW_KNOB_PICK;
+    menuStack.push({ title: "Knob " + (knobEditFocus + 1), selectedIndex: 0 });
+    setKnobPickStage("chain");
+}
+
+function closeKnobPick() {
+    menuStack.pop();
+    currentView = VIEW_KNOB_MAP;
+    refreshKnobEdit();
+}
+
+/* Store a new mapping (or none) for the focused knob at the edit scope. The
+ * Move Set it was made with is remembered, if the setlist has none yet. */
+function assignKnob(mapping) {
+    if (!currentSetlist) return;
+    const i = knobEditFocus;
+    if (knobEditScope === "song") {
+        const entry = knobEditEntry();
+        if (!entry) return;
+        if (!Array.isArray(entry.knobs)) entry.knobs = [];
+        entry.knobs[i] = mapping;
+        if (Array.isArray(entry.knob_values)) entry.knob_values[i] = null;
+    } else {
+        if (!Array.isArray(currentSetlist.knobs)) currentSetlist.knobs = [];
+        currentSetlist.knobs[i] = mapping;
+    }
+    if (!currentSetlist.move_set) {
+        const set = currentMoveSet();
+        if (set) currentSetlist.move_set = { uuid: set.uuid, name: set.name };
+    }
+    perfKnobsKey = "";
+    saveSetlist(currentSetlist);
+}
+
+function drawKnobPick() {
+    let title = "Knob " + (knobEditFocus + 1);
+    if (knobPickStage !== "chain") title += ": Chain " + (knobPickSlot + 1);
+    if (knobPickStage === "param") title += " " + compLabel(knobPickComp);
+    drawMenuHeader(scrollHeader(title, 28), "");
+    drawMenuList({
+        labelX: 3,
+        items: knobPickItems,
+        selectedIndex: knobPickIndex,
+        getLabel: (item) => item.label,
+        getValue: (item) => item.value || "",
+        valueAlignRight: true,
+        labelGap: 2,
+        listArea: { topY: LIST_TOP_Y, bottomY: LIST_INDICATOR_BOTTOM_Y }
+    });
+}
+
+function handleKnobPickInput(cc, value) {
+    if (cc === MoveMainKnob) {
+        const delta = decodeDelta(value);
+        const n = Math.max(0, Math.min(knobPickItems.length - 1, knobPickIndex + delta));
+        if (n !== knobPickIndex) { knobPickIndex = n; needsRedraw = true; }
+    } else if (cc === MoveMainButton && value > 0) {
+        const item = knobPickItems[knobPickIndex];
+        if (!item) return;
+        if (item.action === "chain") {
+            knobPickSlot = item.slot;
+            setKnobPickStage("comp");
+        } else if (item.action === "comp") {
+            knobPickComp = item.comp;
+            knobPickModule = item.module;
+            knobPickModuleName = item.moduleName;
+            setKnobPickStage("param");
+        } else if (item.action === "retry") {
+            setKnobPickStage(knobPickStage);
+        } else if (item.action === "param") {
+            const p = item.param;
+            const cur = readChainSlotParam(knobPickSlot, knobPickComp + ":" + p.key);
+            const mapping = {
+                slot: knobPickSlot, comp: knobPickComp, key: p.key, module: knobPickModule,
+                moduleName: knobPickModuleName, label: p.name || p.key
+            };
+            if (cur !== null && cur !== "") mapping.value = cur;
+            assignKnob(mapping);
+            closeKnobPick();
+        } else if (item.action === "clear" || item.action === "inherit") {
+            assignKnob(null);
+            closeKnobPick();
+        } else if (item.action === "off") {
+            assignKnob({ off: true });
+            closeKnobPick();
+        }
+    } else if (cc === MoveBack && value > 0) {
+        if (knobPickStage === "param") setKnobPickStage("comp");
+        else if (knobPickStage === "comp") setKnobPickStage("chain");
+        else closeKnobPick();
+    }
+}
+
+/* ---- Move Set check --------------------------------------------------------
+ *
+ * Schwung's chains belong to the Move Set, so a setlist's knob mappings only
+ * mean something with the Set they were made against. The setlist remembers
+ * the Set it was last played with (setlist.move_set = {uuid, name}); opening
+ * it for Performance with a different Set loaded asks first, naming the
+ * expected Set, so the user can back out and load it on Move. Arranger cannot
+ * load a Set itself -- Move offers no way to, short of its own Set Overview. */
+function currentMoveSet() {
+    let raw = readChainSlotParam(0, "active_set");
+    if (!raw && typeof host_read_file === "function") {
+        try { raw = host_read_file("/data/UserData/schwung/active_set.txt"); } catch (e) { raw = null; }
+    }
+    if (!raw) return null;
+    const lines = String(raw).split("\n");
+    const uuid = (lines[0] || "").trim();
+    const name = (lines[1] || "").trim();
+    return uuid ? { uuid, name: name || uuid } : null;
+}
+
+function rememberMoveSet(setlist, set) {
+    if (!setlist || !set) return;
+    if (setlist.move_set && setlist.move_set.uuid === set.uuid && setlist.move_set.name === set.name) return;
+    setlist.move_set = { uuid: set.uuid, name: set.name };
+    saveSetlist(setlist);
+}
+
+/* Run `proceed` if the loaded Move Set is the setlist's (or either is not
+ * known); otherwise ask, naming the expected Set. Continue adopts the loaded
+ * Set as the setlist's; Back runs `cancel`. */
+function checkMoveSet(setlist, proceed, cancel) {
+    const cur = currentMoveSet();
+    const saved = setlist ? setlist.move_set : null;
+    if (!cur) { proceed(); return; }
+    if (!saved || !saved.uuid) { rememberMoveSet(setlist, cur); proceed(); return; }
+    if (saved.uuid === cur.uuid) {
+        if (saved.name !== cur.name) rememberMoveSet(setlist, cur);
+        proceed();
+        return;
+    }
+    openConfirm({
+        title: "Use Move Set:",
+        name: saved.name,
+        detail: "Loaded: " + cur.name,
+        labels: ["Back", "Continue"],
+        onConfirm: () => { rememberMoveSet(setlist, cur); proceed(); },
+        onCancel: () => { if (cancel) cancel(); }
+    });
 }
 
 let needsRedraw = true;
@@ -3854,8 +4526,14 @@ function updateButtonLEDs() {
                 break;
             case VIEW_OPTIONS:
             case VIEW_OPTIONS_CHAINS:
+            case VIEW_KNOB_PICK:
                 active.set(MoveBack, WhiteLedBright);
                 active.set(MoveMainButton, WhiteLedBright);
+                break;
+            case VIEW_KNOB_MAP:
+                active.set(MoveBack, WhiteLedBright);
+                active.set(MoveMainButton, WhiteLedBright);
+                if (knobEditMapping(knobEditFocus) || knobEditScope === "song") active.set(MoveDelete, WhiteLedBright);
                 break;
             case VIEW_SETLIST_BANK:
                 active.set(MoveBack, WhiteLedBright);
@@ -7129,18 +7807,20 @@ function drawSetlistEdit() {
     const songs = currentSetlist ? currentSetlist.songs : [];
     const items = songs.map((s, i) => ({ type: "song", index: i, name: shortSongName(s.name) || "" }));
     items.push({ type: "add" });
+    items.push({ type: "knobs" });
     drawMenuList({
         labelX: 3,
         items,
         selectedIndex: setlistSongIndex,
         getLabel: (item) => {
             if (item.type === "add") return "(add song)";
+            if (item.type === "knobs") return "(knobs)";
             /* Return the full name so the shared list scroller marquees the
              * selected row instead of hard-truncating it. */
             return item.name || "";
         },
         getValue: (item) => {
-            if (item.type === "add") return "";
+            if (item.type === "knobs") return knobMappedCount(currentSetlist && currentSetlist.knobs) + "/" + KNOB_COUNT;
             return "";
         },
         maxVisible: 5
@@ -7186,7 +7866,8 @@ function drawSetlistClick() {
     const items = [
         { key: "bars", label: "Click Bars", value: bars === 0 ? "Off" : String(bars) },
         { key: "note", label: "Click Note", value: note === 0 ? "None" : String(note) },
-        { key: "stop", label: "Stop At End", value: stop ? "Yes" : "No" }
+        { key: "stop", label: "Stop At End", value: stop ? "Yes" : "No" },
+        { key: "knobs", label: "Knobs", value: knobOverrideCount(entry) ? knobOverrideCount(entry) + " own" : "Setlist" }
     ];
     drawMenuList({
         labelX: 3,
@@ -7347,6 +8028,7 @@ function drawPerformance() {
     /* Draw any active overlay (e.g. a missing-clip warning) on top of the
      * performance display. */
     drawOverlay();
+    drawPerfKnobFeedback();
 }
 
 function drawPerfSetlist() {
@@ -7986,11 +8668,12 @@ function startRenameSelectedSong() {
     });
 }
 
-function openConfirm({ title, name, onConfirm, onCancel }) {
+function openConfirm({ title, name, detail, labels, onConfirm, onCancel }) {
     confirmState = {
         title,
         name,
-        labels: ["No", "Yes"],
+        detail: detail || "",
+        labels: labels || ["No", "Yes"],
         selectedIndex: 0, /* default to "No" (safe) */
         onConfirm,
         onCancel
@@ -8007,7 +8690,7 @@ function closeConfirm(confirmed) {
 
 function drawConfirm() {
     if (!confirmState) return;
-    const { title, name, selectedIndex, labels } = confirmState;
+    const { title, name, detail, selectedIndex, labels } = confirmState;
     drawMenuHeader(title);
     /* Draw the quoted name locally (instead of the shared drawConfirmModal) so
      * long Song/Setlist names marquee rather than being hard-truncated. */
@@ -8015,7 +8698,8 @@ function drawConfirm() {
         const displayName = scrollHeader('"' + String(name) + '"', 20);
         print(4, LIST_TOP_Y, displayName, 1);
     }
-    const listY = LIST_TOP_Y + 16;
+    if (detail) print(4, LIST_TOP_Y + 9, scrollHeader(detail, 20), 1);
+    const listY = LIST_TOP_Y + (detail ? 20 : 16);
     for (let i = 0; i < labels.length; i++) {
         const rowY = listY + i * 9;
         const isSelected = i === selectedIndex;
@@ -8497,7 +9181,7 @@ function handleSetlistBankInput(cc, value) {
 
 function handleSetlistEditInput(cc, value) {
     if (!currentSetlist) return;
-    const itemCount = currentSetlist.songs.length + 1; /* songs + add entry */
+    const itemCount = currentSetlist.songs.length + 2; /* songs + add entry + knobs */
     if (cc === MoveMainKnob) {
         const delta = decodeDelta(value);
         if (shiftHeld) {
@@ -8514,7 +9198,10 @@ function handleSetlistEditInput(cc, value) {
             }
         }
     } else if (cc === MoveMainButton && value > 0) {
-        if (setlistSongIndex >= currentSetlist.songs.length) {
+        if (setlistSongIndex === currentSetlist.songs.length + 1) {
+            /* Jog click on "(knobs)": the setlist's knob mappings. */
+            openKnobMap("setlist", VIEW_SETLIST_EDIT);
+        } else if (setlistSongIndex >= currentSetlist.songs.length) {
             /* Jog click on "(add song)" opens the Song Bank picker. */
             songFiles = listSongFiles();
             setlistPickIndex = 0;
@@ -8613,10 +9300,16 @@ function handleSetlistClickInput(cc, value) {
                 setSetlistStopAfterFinish(currentSetlist, setlistSongIndex, !cur);
             }
         } else {
-            clickSettingsFocus = Math.max(0, Math.min(2, clickSettingsFocus + delta));
+            clickSettingsFocus = Math.max(0, Math.min(3, clickSettingsFocus + delta));
         }
         needsRedraw = true;
     } else if (cc === MoveMainButton && value > 0) {
+        if (clickSettingsFocus === 3) {
+            /* This song's knobs: overrides of the setlist's. */
+            clickSettingsEditing = false;
+            openKnobMap("song", VIEW_SETLIST_CLICK);
+            return;
+        }
         clickSettingsEditing = !clickSettingsEditing;
         needsRedraw = true;
     } else if (cc === MoveBack && value > 0) {
@@ -8633,8 +9326,11 @@ function handleSetlistClickInput(cc, value) {
 
 function handlePerformanceInput(cc, value) {
     /* Main knob is intentionally unused in performance view: song/section
-     * selection is done with pads, and the display uses plain print(). */
-    if (cc === MoveUp && value > 0) {
+     * selection is done with pads, and the display uses plain print(). The
+     * 8 knobs drive the setlist's Schwung parameters (see KNOB_COUNT). */
+    if (cc >= 71 && cc <= 78) {
+        turnPerfKnob(cc - 71, decodeDelta(value));
+    } else if (cc === MoveUp && value > 0) {
         /* Scroll the pad window up one row (reveal higher sections).
          * Reversed: Up scrolls down (reveal lower sections). */
         const maxRow = Math.max(0, Math.ceil(perfSongSections.length / 8) - 4);
@@ -8688,6 +9384,7 @@ function handlePerformanceInput(cc, value) {
         needsRedraw = true;
     } else if (cc === MoveBack && value > 0) {
         perfStop();
+        flushKnobSave();
         menuStack.pop();
         currentView = VIEW_ROOT;
         needsRedraw = true;
@@ -8708,32 +9405,40 @@ function handlePerfSetlistInput(cc, value) {
         const obj = path ? readJson(path) : null;
         if (obj) {
             obj.path = path;
-            currentSetlist = obj;
-            perfSongLoaded = false;
-            perfSongIndex = 0;
-            perfPlaying = false;
-            perfDisplayIndex = 0;
-            /* Re-entering perform mode starts the pad window at the top. */
-            perfScrollRow = 0;
-            perfManualScroll = false;
-            /* Load the first playable song immediately so the display and step
-             * LEDs reflect real section data before Play is pressed. */
-            const firstPlayable = perfNextPlayable(0);
-            if (firstPlayable >= 0) {
-                perfLoadSong(firstPlayable);
-            }
-            perfSongSections = buildPerfLayout();
-            currentView = VIEW_PERFORMANCE;
-            menuStack.push({ title: "Performance", selectedIndex: 0 });
-            needsRedraw = true;
-            stepLedsDirty = true;
-            ledDirtyAll = true;
+            /* The Move Set first: the setlist's knobs were mapped against the
+             * chains of the Set it was last played with. Back stays here. */
+            checkMoveSet(obj, () => enterPerformanceSetlist(obj), null);
         }
     } else if (cc === MoveBack && value > 0) {
         menuStack.pop();
         currentView = VIEW_ROOT;
         needsRedraw = true;
     }
+}
+
+/* Open a setlist in Performance (after the Move Set check). */
+function enterPerformanceSetlist(obj) {
+    currentSetlist = obj;
+    perfKnobsKey = "";
+    perfSongLoaded = false;
+    perfSongIndex = 0;
+    perfPlaying = false;
+    perfDisplayIndex = 0;
+    /* Re-entering perform mode starts the pad window at the top. */
+    perfScrollRow = 0;
+    perfManualScroll = false;
+    /* Load the first playable song immediately so the display and step
+     * LEDs reflect real section data before Play is pressed. */
+    const firstPlayable = perfNextPlayable(0);
+    if (firstPlayable >= 0) {
+        perfLoadSong(firstPlayable);
+    }
+    perfSongSections = buildPerfLayout();
+    currentView = VIEW_PERFORMANCE;
+    menuStack.push({ title: "Performance", selectedIndex: 0 });
+    needsRedraw = true;
+    stepLedsDirty = true;
+    ledDirtyAll = true;
 }
 
 /* ── Jam input handling ────────────────────────────────────────────── */
@@ -10712,6 +11417,9 @@ function perfLoadSong(index, preserveToggles) {
      * (coloured) and dims/greys the other songs. Without this, the previous
      * song's pad colours can persist when the active-pad flash runs. */
     ledDirtyAll = true;
+    /* Restore this song's knob values (no-op when it is the song already
+     * applied, e.g. perfStart reloading it before Play). */
+    applyPerfKnobs(false);
     return true;
 }
 
@@ -11982,6 +12690,14 @@ globalThis.tick = function() {
         chainNoticeText = "";
         needsRedraw = true;
     }
+    /* Knob values: send queued writes, save the setlist once turning stops,
+     * and take the feedback down when it expires. */
+    flushKnobWrites();
+    flushKnobSave(Date.now());
+    if (knobShowIndex >= 0 && Date.now() >= knobShowUntil && !knobTouched[knobShowIndex]) {
+        knobShowIndex = -1;
+        needsRedraw = true;
+    }
 
     if (needsRedraw) {
         const lq0 = ledQueueWrites;
@@ -12020,6 +12736,8 @@ globalThis.tick = function() {
                 case VIEW_OPTIONS_DRUMS: drawOptionsDrums(); break;
                 case VIEW_OPTIONS_INST: drawOptionsInst(); break;
                 case VIEW_OPTIONS_CHAINS: drawOptionsChains(); break;
+                case VIEW_KNOB_MAP: drawKnobMap(); break;
+                case VIEW_KNOB_PICK: drawKnobPick(); break;
                 case VIEW_SETLIST_BANK: drawSetlistBank(); break;
                 case VIEW_SETLIST_EDIT: drawSetlistEdit(); break;
                 case VIEW_SETLIST_PICK: drawSetlistPick(); break;
@@ -12103,6 +12821,8 @@ function routeCcInput(rawData, cc, value) {
         case VIEW_OPTIONS_DRUMS: handleOptionsDrumsInput(cc, value); break;
         case VIEW_OPTIONS_INST: handleOptionsInstInput(cc, value); break;
         case VIEW_OPTIONS_CHAINS: handleOptionsChainsInput(cc, value); break;
+        case VIEW_KNOB_MAP: handleKnobMapInput(cc, value); break;
+        case VIEW_KNOB_PICK: handleKnobPickInput(cc, value); break;
         case VIEW_SETLIST_BANK: handleSetlistBankInput(cc, value); break;
         case VIEW_SETLIST_EDIT: handleSetlistEditInput(cc, value); break;
         case VIEW_SETLIST_PICK: handleSetlistPickInput(cc, value); break;
@@ -12191,6 +12911,15 @@ globalThis.onMidiMessageInternal = function(data) {
             needsRedraw = true;
             return;
         }
+        if (cc < KNOB_COUNT && (currentView === VIEW_PERFORMANCE || currentView === VIEW_KNOB_MAP)) {
+            /* Knob touch: show (Performance) or select (Knobs) that knob. */
+            const down = status === MidiNoteOn && value > 0;
+            knobTouched[cc] = down;
+            if (down && currentView === VIEW_KNOB_MAP) knobEditFocus = cc;
+            if (down) showKnob(cc);
+            else needsRedraw = true;
+            return;
+        }
         handlePadPress(cc, value);
     }
 };
@@ -12204,6 +12933,12 @@ globalThis.onResume = function onResume() {
      * whatever was on screen); start clean. */
     longPressHolds.clear();
     if (chainViewActive()) endChainView();
+    knobTouched.fill(false);
+    if (currentView === VIEW_PERFORMANCE && currentSetlist) {
+        /* The Move Set (and with it the chains) may have changed while away. */
+        refreshPerfKnobs();
+        checkMoveSet(currentSetlist, () => {}, () => leavePerformanceToSetlists());
+    }
     clearAllLEDs();
     resetLedState();
     /* The library may have changed while the module was suspended (files
@@ -12256,6 +12991,7 @@ function pollLibraryRescan() {
 
 globalThis.onUnload = function onUnload() {
     closeChainView();
+    flushKnobSave();
     stopPlayback();
     clearAllLEDs();
     resetLedState();
