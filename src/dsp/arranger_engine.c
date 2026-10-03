@@ -1435,9 +1435,12 @@ static int resolve_clip_index(engine_t *e, const char *source_path,
         else leaf++;
         const char *hit = clip_lookup_find(e, leaf);
         if (!hit && strcasecmp(leaf + (strlen(leaf) > 4 ? strlen(leaf) - 4 : 0), ".mid") != 0) {
+            /* A truncated name would look up a DIFFERENT clip, so a leaf too
+             * long to take the extension is not retried with it. */
             char leaf_mid[128];
-            snprintf(leaf_mid, sizeof(leaf_mid), "%s.mid", leaf);
-            hit = clip_lookup_find(e, leaf_mid);
+            n = snprintf(leaf_mid, sizeof(leaf_mid), "%s.mid", leaf);
+            if (n >= 0 && (size_t)n < sizeof(leaf_mid))
+                hit = clip_lookup_find(e, leaf_mid);
         }
         if (hit && access(hit, F_OK) == 0) {
             copy_trunc(full_path, sizeof(full_path), hit);
@@ -1454,8 +1457,9 @@ static int resolve_clip_index(engine_t *e, const char *source_path,
             size_t leaf_len = strlen(leaf);
             if (leaf_len > 4 && strcasecmp(leaf + leaf_len - 4, ".mid") != 0) {
                 char leaf_mid[MAX_PATH_LEN];
-                snprintf(leaf_mid, sizeof(leaf_mid), "%s.mid", leaf);
-                if (find_file_recursive(e->library_root, leaf_mid, found, sizeof(found))) {
+                n = snprintf(leaf_mid, sizeof(leaf_mid), "%s.mid", leaf);
+                if (n >= 0 && (size_t)n < sizeof(leaf_mid) &&
+                    find_file_recursive(e->library_root, leaf_mid, found, sizeof(found))) {
                     copy_trunc(full_path, sizeof(full_path), found);
                     if (access(full_path, F_OK) == 0) goto found;
                 }
