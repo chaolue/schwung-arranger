@@ -704,11 +704,18 @@ function tickLongPressHolds() {
  * chain_params -- a module that publishes none offers no parameters rather
  * than an invented 0..1 knob.
  *
+ * Master FX is a fifth target, stored as slot MASTER_FX_TARGET (-1): its
+ * positions are addressed on the shim as "master_fx:fx<N>:<key>" at IPC slot
+ * 0, with "master_fx:fx<N>:name" serving the module id (NOT the slot chain's
+ * "<comp>_module" spelling, which the master bus does not serve).
+ *
  * A mapping stores the module id it was made against. Chains belong to the
  * Move Set, so a Set change (or a module swap) can put a different module
  * there: such a knob reads "not loaded" and writes NOTHING, rather than
  * writing a number meant for another module's parameter. */
 const KNOB_COUNT = 8;
+const MASTER_FX_TARGET = -1;         /* mapping.slot for Master FX */
+const MASTER_FX_POSITIONS = 8;
 const KNOB_SAVE_DELAY_MS = 1500;     /* batch flash writes while a knob turns */
 const KNOB_SHOW_MS = 1500;           /* feedback after the last turn */
 const KNOB_WRITES_PER_TICK = 4;      /* each is one param round trip (~3 ms) */
@@ -738,8 +745,36 @@ function knobOverrideCount(entry) {
     return entry.knobs.filter(o => o && (o.off || typeof o.key === "string")).length;
 }
 
+function isMasterFxSlot(slot) {
+    return slot === MASTER_FX_TARGET;
+}
+
+/* The shim's IPC slot and key for a component's own key: a chain addresses
+ * "<comp>:<key>" at its slot, Master FX "master_fx:<comp>:<key>" at slot 0. */
+function knobIpcSlot(slot) {
+    return isMasterFxSlot(slot) ? 0 : slot;
+}
+
+function compKey(slot, comp, key) {
+    return (isMasterFxSlot(slot) ? "master_fx:" : "") + comp + ":" + key;
+}
+
+function readCompParam(slot, comp, key) {
+    return readChainSlotParam(knobIpcSlot(slot), compKey(slot, comp, key));
+}
+
 function compModuleKey(comp) {
     return comp === "synth" ? "synth_module" : comp + "_module";
+}
+
+/* Where a mapping points, for screens: "Chain 1" / "Master FX". */
+function knobTargetName(slot) {
+    return isMasterFxSlot(slot) ? "Master FX" : "Chain " + (slot + 1);
+}
+
+/* The short form for list rows: "C1" / "MFX". */
+function knobTargetShort(slot) {
+    return isMasterFxSlot(slot) ? "MFX" : "C" + (slot + 1);
 }
 
 function compLabel(comp) {
@@ -753,6 +788,7 @@ function compLabel(comp) {
 /* The module in a chain position: a module id, "" for an empty position, or
  * null when the read did not complete (never taken for "empty"). */
 function readCompModule(slot, comp) {
+    if (isMasterFxSlot(slot)) return readCompParam(slot, comp, "name");
     return readChainSlotParam(slot, compModuleKey(comp));
 }
 
@@ -762,7 +798,7 @@ function readCompModule(slot, comp) {
 function readCompMeta(slot, comp, moduleId) {
     const cacheKey = slot + "|" + comp + "|" + moduleId;
     if (knobMetaCache.has(cacheKey)) return knobMetaCache.get(cacheKey);
-    const raw = readChainSlotParam(slot, comp + ":chain_params");
+    const raw = readCompParam(slot, comp, "chain_params");
     if (raw === null) return null;
     let arr = null;
     try { arr = raw ? JSON.parse(raw) : []; } catch (e) { arr = null; }
@@ -887,7 +923,8 @@ function resolveKnob(res, moduleCache) {
 }
 
 function queueKnobWrite(i, m, value) {
-    knobWriteQueue.set(i, { slot: m.slot, fullKey: m.comp + ":" + m.key, value: String(value), tries: 0 });
+    knobWriteQueue.set(i, { slot: knobIpcSlot(m.slot), fullKey: compKey(m.slot, m.comp, m.key),
+        value: String(value), tries: 0 });
 }
 
 function flushKnobWrites() {
@@ -904,7 +941,7 @@ function flushKnobWrites() {
             }
         } catch (e) { ok = false; }
         if (ok || ++w.tries >= KNOB_WRITE_RETRIES) {
-            if (!ok) logDebug("knobs: gave up writing " + w.fullKey + " on chain " + (w.slot + 1));
+            if (!ok) logDebug("knobs: gave up writing " + w.fullKey + " at slot " + w.slot);
             knobWriteQueue.delete(i);
         }
     }
@@ -955,7 +992,7 @@ function refreshPerfKnobs() {
         const k = resolveKnob(res, modules);
         k.value = null;
         if (k.status === "ok") {
-            const live = readChainSlotParam(res.m.slot, res.m.comp + ":" + res.m.key);
+            const live = readCompParam(res.m.slot, res.m.comp, res.m.key);
             k.value = live ? live : knobSavedValue(entry, i, res);
         }
         perfKnobs[i] = k;
@@ -987,7 +1024,7 @@ function turnPerfKnob(i, delta) {
     const m = k.res.m;
     if (k.value === null) {
         /* Nothing saved yet: start from what the parameter is now. */
-        const cur = readChainSlotParam(m.slot, m.comp + ":" + m.key);
+        const cur = readCompParam(m.slot, m.comp, m.key);
         if (cur === null || cur === "") return;
         k.value = cur;
     }
@@ -1000,19 +1037,29 @@ function turnPerfKnob(i, delta) {
     markKnobSave();
 }
 
-/* Bottom-of-screen feedback while a knob is touched or just turned. */
+/* Bottom-of-screen feedback while a knob is touched or just turned: what the
+ * knob drives (chain or Master FX, component and module) above the parameter
+ * and its value. */
 function drawPerfKnobFeedback() {
-    let i = knobShowIndex;
+    const i = knobShowIndex;
     if (i < 0 || (Date.now() >= knobShowUntil && !knobTouched[i])) return;
     const k = perfKnobs[i];
-    let text;
-    if (!k) text = "K" + (i + 1) + " unassigned";
-    else if (k.status === "missing") text = "K" + (i + 1) + " " + k.res.m.label + ": not loaded";
-    else if (k.status === "unknown") text = "K" + (i + 1) + " " + k.res.m.label + ": no answer";
-    else text = k.res.m.label + " " + formatKnobValue(k.meta, k.value);
-    fill_rect(0, 50, 128, 14, 0);
-    fill_rect(0, 50, 128, 1, 1);
-    print(2, 54, text.length > 21 ? text.substring(0, 21) : text, 1);
+    let where;
+    let what;
+    if (!k) {
+        where = "Knob " + (i + 1);
+        what = "Unassigned";
+    } else {
+        const m = k.res.m;
+        where = knobTargetShort(m.slot) + " " + compLabel(m.comp) + (m.moduleName ? " " + m.moduleName : "");
+        if (k.status === "missing") what = m.label + ": not loaded";
+        else if (k.status === "unknown") what = m.label + ": no answer";
+        else what = m.label + " " + formatKnobValue(k.meta, k.value);
+    }
+    fill_rect(0, 40, 128, 24, 0);
+    fill_rect(0, 40, 128, 1, 1);
+    print(2, 43, where.length > 21 ? where.substring(0, 21) : where, 1);
+    print(2, 54, what.length > 21 ? what.substring(0, 21) : what, 1);
 }
 
 /* ---- Knob editing: Setlist Edit > Knobs, and a song's Transitions > Knobs --
@@ -1073,7 +1120,7 @@ function knobRowLabel(i) {
     const o = entry && Array.isArray(entry.knobs) ? entry.knobs[i] : null;
     if (knobEditScope === "song" && o && o.off) return (i + 1) + " Off";
     if (!res) return (i + 1) + " —";
-    const name = res.m.label + (res.m.moduleName ? " " + res.m.moduleName : "");
+    const name = knobTargetShort(res.m.slot) + " " + res.m.label;
     return (i + 1) + " " + (knobEditScope === "song" && res.source === "setlist" ? "(" + name + ")" : name);
 }
 
@@ -1115,7 +1162,7 @@ function turnEditKnob(i, delta) {
     const m = k.res.m;
     const entry = knobEditEntry();
     let cur = knobSavedValue(entry, i, k.res);
-    if (cur === null) cur = readChainSlotParam(m.slot, m.comp + ":" + m.key);
+    if (cur === null) cur = readCompParam(m.slot, m.comp, m.key);
     if (cur === null || cur === "") return;
     const next = knobStepValue(k.meta, cur, delta, i);
     if (next === null) return;
@@ -1173,10 +1220,34 @@ function knobPickChainItems() {
         const value = mod === null ? "?" : (mod === "" ? "Empty" : (readChainSlotParam(slot, "synth:name") || mod));
         items.push({ label: "Chain " + (slot + 1), value, action: "chain", slot });
     }
+    items.push({ label: "Master FX", value: "", action: "chain", slot: MASTER_FX_TARGET });
+    return items;
+}
+
+/* Master FX's loaded positions: one read of "master_fx:modules" ([{id, path}]
+ * per position), else a ":name" read per position. */
+function masterFxCompItems() {
+    let ids = null;
+    const raw = readChainSlotParam(0, "master_fx:modules");
+    if (raw) {
+        try {
+            const arr = JSON.parse(raw);
+            if (Array.isArray(arr)) ids = arr.map(e => (e && typeof e === "object" && e.id) ? String(e.id) : "");
+        } catch (e) { ids = null; }
+    }
+    const items = [];
+    for (let n = 1; n <= MASTER_FX_POSITIONS; n++) {
+        const comp = "fx" + n;
+        const mod = ids ? (ids[n - 1] || "") : readCompModule(MASTER_FX_TARGET, comp);
+        if (!mod) continue;
+        items.push({ label: compLabel(comp), value: mod, action: "comp", comp, module: mod, moduleName: mod });
+    }
+    if (items.length === 0) items.push({ label: "No Master FX", action: "none" });
     return items;
 }
 
 function knobPickCompItems(slot) {
+    if (isMasterFxSlot(slot)) return masterFxCompItems();
     const items = [];
     const comps = ["synth"];
     const midiCount = parseInt(readChainSlotParam(slot, "midi_fx_count") || "0", 10) || 0;
@@ -1246,7 +1317,7 @@ function assignKnob(mapping) {
 
 function drawKnobPick() {
     let title = "Knob " + (knobEditFocus + 1);
-    if (knobPickStage !== "chain") title += ": Chain " + (knobPickSlot + 1);
+    if (knobPickStage !== "chain") title += ": " + knobTargetName(knobPickSlot);
     if (knobPickStage === "param") title += " " + compLabel(knobPickComp);
     drawMenuHeader(scrollHeader(title, 28), "");
     drawMenuList({
@@ -1281,7 +1352,7 @@ function handleKnobPickInput(cc, value) {
             setKnobPickStage(knobPickStage);
         } else if (item.action === "param") {
             const p = item.param;
-            const cur = readChainSlotParam(knobPickSlot, knobPickComp + ":" + p.key);
+            const cur = readCompParam(knobPickSlot, knobPickComp, p.key);
             const mapping = {
                 slot: knobPickSlot, comp: knobPickComp, key: p.key, module: knobPickModule,
                 moduleName: knobPickModuleName, label: p.name || p.key

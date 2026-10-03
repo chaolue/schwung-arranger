@@ -122,6 +122,13 @@ export const slots = [
     { recv: 0, comps: { synth: synth("obxd", "OB-Xd") }, midi_fx: 0, fx: 0 },
     { recv: 4, comps: { synth: synth("sf2", "") }, midi_fx: 0, fx: 0 },
 ];
+/* Master FX: positions fx1..fx8 at IPC slot 0, as "master_fx:fx<N>:<key>". */
+export const masterFx = {
+    fx2: { module: "tapedelay", values: { feedback: "0.40" },
+           params: [{ key: "feedback", name: "Feedback", type: "float", min: 0, max: 1, step: 0.01 }] },
+};
+export let masterModulesServed = true;
+export function setMasterModulesServed(v) { masterModulesServed = v; }
 export const moveSet = { uuid: "set-a", name: "Gig Set" };
 export const paramLog = [];
 export let paramFails = false;
@@ -130,6 +137,20 @@ g.shadow_get_param = (slot, key) => {
     paramLog.push(["get", slot, key]);
     if (paramFails) return null;
     const s = slots[slot];
+    if (key === "master_fx:modules") {
+        if (!masterModulesServed) return null;
+        const arr = [];
+        for (let n = 1; n <= 8; n++) { const c = masterFx["fx" + n]; arr.push({ id: c ? c.module : "", path: "" }); }
+        return JSON.stringify(arr);
+    }
+    let mm = /^master_fx:(fx\d+):(.+)$/.exec(key);
+    if (mm) {
+        const c = masterFx[mm[1]];
+        if (!c) return "";
+        if (mm[2] === "name") return c.module;
+        if (mm[2] === "chain_params") return JSON.stringify(c.params);
+        return c.values[mm[2]] !== undefined ? String(c.values[mm[2]]) : "";
+    }
     if (key === "active_set") return moveSet.uuid ? moveSet.uuid + "\n" + moveSet.name + "\n1" : "";
     if (key === "slot:receive_channel") return String(s.recv);
     if (key === "midi_fx_count") return String(s.midi_fx);
@@ -152,6 +173,11 @@ g.shadow_set_param_timeout = (slot, key, val, t) => {
     if (paramFails) return false;
     writes.push([slot, key, String(val)]);
     const s = slots[slot];
+    const mm = /^master_fx:(fx\d+):(.+)$/.exec(key);
+    if (mm) {
+        if (slot === 0 && masterFx[mm[1]]) masterFx[mm[1]].values[mm[2]] = String(val);
+        return true;
+    }
     if (key === "slot:receive_channel") {
         const n = parseInt(val, 10);
         if (n >= 0 && n <= 16) s.recv = n;
