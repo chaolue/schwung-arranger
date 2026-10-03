@@ -176,6 +176,26 @@ H.suspends.length = 0;
 hold(BACK);
 check(H.suspends.length === 1, "Back hold still suspends");
 
+/* 14b. Knob lights: Schwung's editor lights them during a chain view;
+ * Arranger leaves them alone then, and turns them off when it is back --
+ * even if the editor draws one more frame after the session ends. */
+{
+    const { setButtonLED } = await import('./shared/input_filter.mjs');
+    tick(3);
+    check(H.knobLeds.every(c => c === 0), "Arranger keeps the knob lights off: " + JSON.stringify(H.knobLeds));
+    hold(TR2);
+    for (let k = 0; k < 8; k++) setButtonLED(71 + k, 120, true);   /* the param grid */
+    tick(5);
+    check(H.knobLeds.every(c => c === 120), "untouched while the chain view is up: " + JSON.stringify(H.knobLeds));
+    H.hostEnd(); tick();
+    setButtonLED(73, 120, true);                                    /* a last editor frame */
+    tick(15);                                                       /* the full repaint drains at 8 LEDs a tick */
+    check(H.knobLeds.every(c => c === 0), "all off again after the chain view: " + JSON.stringify(H.knobLeds));
+    setButtonLED(74, 33, true);                                     /* lit while suspended */
+    g.onResume(); tick(15);
+    check(H.knobLeds[3] === 0, "off again after a resume: " + H.knobLeds[3]);
+}
+
 /* 15. onUnload ends a session. */
 hold(TR3);
 check(H.corun.target === 1, "chain 3 open");

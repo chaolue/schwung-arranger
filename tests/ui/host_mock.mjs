@@ -22,7 +22,13 @@ export const files = new Map();
 g.host_read_file = (path) => files.has(path) ? files.get(path) : null;
 g.host_write_file = (path, text) => { files.set(path, String(text)); return true; };
 g.host_file_exists = (path) => files.has(path);
-g.move_midi_internal_send = () => true;
+/* LED writes: [cin, status, d1, color]; knobLeds[i] is the last colour sent
+ * to the light under knob i+1 (CC 71-78), undefined = never written. */
+export const knobLeds = new Array(8);
+g.move_midi_internal_send = (msg) => {
+    if (msg && (msg[1] & 0xF0) === 0xB0 && msg[2] >= 71 && msg[2] <= 78) knobLeds[msg[2] - 71] = msg[3];
+    return true;
+};
 g.move_midi_external_send = () => true;
 g.shadow_send_midi_to_dsp = () => true;
 export const dspSets = [];
