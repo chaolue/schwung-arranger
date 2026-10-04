@@ -4548,13 +4548,13 @@ function updateButtonLEDs() {
                 }
                 if (ledHasLeftSection) active.set(MoveLeft, WhiteLedBright);
                 if (ledHasRightSection) active.set(MoveRight, WhiteLedBright);
-                /* Play stays red while playing; when stopped it is green only
+                /* Play is green while playing; when stopped it is white only
                  * if the current section has clips, else black (nothing to
                  * play). */
                 if (playbackState === "playing") {
-                    active.set(MovePlay, PureRed);
-                } else if (ledSec && ledSec.clips.length > 0) {
                     active.set(MovePlay, PureGreen);
+                } else if (ledSec && ledSec.clips.length > 0) {
+                    active.set(MovePlay, White);
                 }
                 /* The clip-editing controls (main button, copy, loop, delete,
                  * page up/down) only apply to the Drum track; the Chord and
@@ -4594,7 +4594,7 @@ function updateButtonLEDs() {
                             if (ledHasLeftSection) active.set(MoveLeft, WhiteLedBright);
                             if (ledHasRightSection) active.set(MoveRight, WhiteLedBright);
                             active.set(MoveDelete, WhiteLedBright);
-                            active.set(MovePlay, PureGreen);
+                            if (playbackState !== "playing") active.set(MovePlay, White);
                         }
                     } else if (shiftHeld) {
                         active.set(MoveShift, WhiteLedBright);
@@ -4603,7 +4603,7 @@ function updateButtonLEDs() {
                          * locked song, so leave them black. Shift+Left/Right
                          * (reorder sections) are also blocked but keep their
                          * dim/bright hints per section availability. */
-                        active.set(MovePlay, PureGreen);
+                        if (playbackState !== "playing") active.set(MovePlay, White);
                     }
                 }
                 break;
@@ -4720,7 +4720,7 @@ function updateButtonLEDs() {
                         ledQueue.delete(128 + MoveDown);
                     }
                 }
-                active.set(MovePlay, perfPlaying ? PureRed : PureGreen);
+                active.set(MovePlay, perfPlaying ? PureGreen : White);
                 active.set(MoveRow1, perfDrumEnabled ? TRACK_ROW_COLOUR[TRACK_DRUM] : Black);
                 active.set(MoveRow3, perfInst1Enabled ? TRACK_ROW_COLOUR[TRACK_INSTRUMENT_1] : Black);
                 active.set(MoveRow4, perfInst2Enabled ? TRACK_ROW_COLOUR[TRACK_INSTRUMENT_2] : Black);
@@ -4741,7 +4741,7 @@ function updateButtonLEDs() {
                     if (jamFillScroll > 0) active.set(MoveLeft, WhiteLedBright);
                     if (jamFillScroll < maxFillScroll) active.set(MoveRight, WhiteLedBright);
                 }
-                active.set(MovePlay, jamPlaying ? PureRed : Black);
+                active.set(MovePlay, jamPlaying ? PureGreen : Black);
                 active.set(MoveRow1, jamDrumEnabled ? TRACK_ROW_COLOUR[TRACK_DRUM] : Black);
                 active.set(MoveRow3, jamInst1Enabled ? TRACK_ROW_COLOUR[TRACK_INSTRUMENT_1] : Black);
                 active.set(MoveRow4, jamInst2Enabled ? TRACK_ROW_COLOUR[TRACK_INSTRUMENT_2] : Black);
