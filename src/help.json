@@ -34,8 +34,9 @@
             "Chord (press again).",
             "Track 2: Inst 1",
             "Track 3: Inst 2",
+            "Track 4: click",
+            "on/off.",
             "",
-            "Press to switch.",
             "Only Drum has full",
             "clip editing."
           ]
@@ -261,7 +262,12 @@
         "the song tempo to",
         "Schwung, so synced",
         "LFOs and delays",
-        "keep time."
+        "keep time.",
+        "",
+        "Click: metronome",
+        "output, channel and",
+        "accent/normal notes.",
+        "Track 4 turns it on."
       ]
     }
   ]

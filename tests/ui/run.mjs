@@ -129,7 +129,8 @@ H.setApi(true, true);
 for (let i = 0; i < 4; i++) { g.onMidiMessageInternal([0xB0, JOG, 1]); }
 tick();
 cc(CLICK, 127); cc(CLICK, 0); tick();
-for (let i = 0; i < 3; i++) g.onMidiMessageInternal([0xB0, JOG, 1]);
+// Options list: Drums, Inst 1, Inst 2, Click, Chains -> Chains is row 4.
+for (let i = 0; i < 4; i++) g.onMidiMessageInternal([0xB0, JOG, 1]);
 tick();
 H.paramLog.length = 0;
 cc(CLICK, 127); cc(CLICK, 0); tick();

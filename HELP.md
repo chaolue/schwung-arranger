@@ -78,6 +78,7 @@ the pads:
 | Track 1 | Drum, or Chord — press again to switch between them | White (Drum) / Azure Blue (Chord) |
 | Track 2 | Instrument 1 | Bright Yellow |
 | Track 3 | Instrument 2 | Purple |
+| Track 4 | Click on/off (not a track to edit — see **Options: Click**) | Bright Orange while on |
 
 The lit Track button shows which track is showing. See **Chord Track** and
 **Instrument Track** below for the other three — this section covers the Drum
@@ -345,16 +346,16 @@ Per-song count-in click and stop-after-finish options.
 
 | Control | Action |
 |---------|--------|
-| Jog wheel (browse mode) | Move between Bars, Note, Stop On End, Knobs |
+| Jog wheel (browse mode) | Move between Bars, Sound, Stop On End, Knobs |
 | Jog wheel (edit mode) | Adjust the selected value |
-| Jog click | Toggle edit / browse mode; on Stop On End it toggles Yes/No; on Knobs it opens this song's knobs |
+| Jog click | Toggle edit / browse mode; on Sound and Stop On End it toggles them; on Knobs it opens this song's knobs |
 | Back (edit mode) | Exit edit mode |
 | Back (browse mode) | Save and return to Setlist Edit |
 
 | Field | Meaning |
 |-------|---------|
 | Bars | Count-in click bars before this song starts (0 = no click) |
-| Note | MIDI note number used for the click (0 = silent / pad flash only) |
+| Sound | **On**: the click track plays the count-in, on its output, channel and notes (see **Options: Click**). **Off**: a silent count-in (pad flashes only) |
 | Stop On End | If Yes, playback stops when this song finishes and the next song is selected |
 | Knobs | This song's own knob mappings: **Setlist** while it uses the setlist's, or how many it overrides |
 
@@ -373,6 +374,7 @@ Play through a setlist.
 | Up / Down | Scroll the pad window up / down one row |
 | Jog wheel | Scroll the info display |
 | Track 1 / 2 / 3 | Turn Drums / Inst 1 / Inst 2 on or off (kept until you leave Perform) |
+| Track 4 | Turn the click on or off (lit orange while on) |
 | Record | Start or stop recording the Schwung mix to a WAV file (see below) |
 | Knobs 1–8 | Change the Schwung parameter mapped to that knob — see **Performance Knobs** |
 | Touch a knob | Show what it controls (chain or Master FX, component, module) and its value |
@@ -388,6 +390,7 @@ Play through a setlist.
 | Pad press (other song / click pad) | Queue a jump to that song at the next section boundary |
 | Up / Down | Scroll the pad window up / down one row |
 | Track 1 / 2 / 3 | Turn Drums / Inst 1 / Inst 2 on or off immediately |
+| Track 4 | Turn the click on or off (lit orange while on) |
 | Record | Start or stop recording the Schwung mix to a WAV file (see below) |
 | Knobs 1–8 | Change the Schwung parameter mapped to that knob |
 | Play | Stop playback |
@@ -500,6 +503,7 @@ Press Track 2 or Track 3 to turn on Inst 1 or Inst 2 and play chords over the gr
 | Jog wheel | Adjust the BPM in realtime |
 | Shift + Jog wheel | Change the key of the chord pads |
 | Track 1 / 2 / 3 | Turn Drums / Inst 1 / Inst 2 on or off |
+| Track 4 | Turn the click on or off (lit orange while on) |
 | Shift + Track 2 / 3 | Open the settings for Inst 1 / Inst 2 |
 | Play | Stop (if a preview is playing) |
 | Back | Return to the Jam Folder picker |
@@ -519,6 +523,7 @@ Press Track 2 or Track 3 to turn on Inst 1 or Inst 2 and play chords over the gr
 | Jog wheel | Change the BPM in realtime |
 | Shift + Jog wheel | Change the key of the chord pads |
 | Track 1 / 2 / 3 | Turn Drums / Inst 1 / Inst 2 on or off immediately |
+| Track 4 | Turn the click on or off (lit orange while on) |
 | Shift + Track 2 / 3 | Open the settings for Inst 1 / Inst 2 |
 | Play | Stop playback |
 | Back | Stop and return to the Jam Folder picker |
@@ -569,13 +574,13 @@ Inst 1 starts on Follow Note = kick with Bass voicing; Inst 2 starts on Follow N
 ## Options
 
 Choose where the Arranger sends MIDI, on which channel, and other playback options.
-Drums, Instrument 1, and Instrument 2 each have their own output routing —
-opened as a sub-screen from here.
+Drums, Instrument 1, Instrument 2 and the Click each have their own output
+routing — opened as a sub-screen from here.
 
 | Control | Action |
 |---------|--------|
-| Jog wheel (browse mode) | Move between Drums, Inst 1, Inst 2, Chains, Click Channel, Swap Guard, Schwung Clock, DSP Debug |
-| Jog click (on Drums / Inst 1 / Inst 2 / Chains) | Open that sub-screen |
+| Jog wheel (browse mode) | Move between Drums, Inst 1, Inst 2, Click, Chains, Swap Guard, Schwung Clock, DSP Debug |
+| Jog click (on Drums / Inst 1 / Inst 2 / Click / Chains) | Open that sub-screen |
 | Jog wheel (edit mode, other fields) | Adjust the value |
 | Jog click (other fields) | Toggle edit / browse mode |
 | Back (edit mode) | Exit edit mode |
@@ -586,8 +591,8 @@ opened as a sub-screen from here.
 | Drums | Drum track's output + MIDI channel (opens a sub-screen — see below) |
 | Inst 1 | Instrument 1's output + MIDI channel (opens a sub-screen — see below) |
 | Inst 2 | Instrument 2's output + MIDI channel (opens a sub-screen — see below) |
+| Click | The click track's output, MIDI channel and notes (opens a sub-screen — see below) |
 | Chains | Schwung's 4 chains: each one's MIDI channel, and a way into its editor (opens a sub-screen — see below) |
-| Click Channel | MIDI channel (1–16) used for the count-in click. **Default** follows the Drums output channel |
 | Swap Guard | Mid-clip swap guard window (0–100%). Removed at the outgoing side of a clip boundary to avoid overlaps; on the incoming side (e.g. a fill swapping back into a partially-played groove), any note that fell inside this window is replayed right at the resume point instead of being lost |
 | Schwung Clock | **On** (default): while the Arranger plays, it sends MIDI clock to Schwung at the song's tempo, so clock-synced Schwung modules and effects (synced LFOs, tempo delays, arpeggiators) follow the song and start on its first beat. Move's own clock takes over whenever Move's sequencer is playing. Move's own tempo is not changed |
 | DSP Debug | Toggles the DSP debug log (`.dsp_log`) on/off |
@@ -614,6 +619,34 @@ Output routing for one track, opened from the Options list.
 |-------|---------|
 | Output | Where this track sends MIDI: External (MIDI_OUT), Move (Move tracks), or Schwung (the synth chain) |
 | MIDI Channel | MIDI channel (1–16) used by the selected output |
+
+**Button LED hints:** Back and Main are lit.
+
+---
+
+### Options: Click
+
+The click track: a metronome that plays a note on every beat while the
+Arranger plays — the accent note on beat 1 of each bar, the normal note on the
+others (the time signature's beat, so eighths in 6/8). Turn it on or off with
+**Track 4** in Song Builder, Perform and Jam. It also plays each Perform song's
+count-in, when that song's **Sound** is on (see **Setlist Song Settings**), and
+it stays quiet during a count-in so the two don't double up.
+
+| Control | Action |
+|---------|--------|
+| Jog wheel (browse mode) | Move between Output, MIDI Channel, Accent Note, Normal Note |
+| Jog wheel (edit mode) | Change the selected value |
+| Jog click | Toggle edit / browse mode |
+| Back (edit mode) | Exit edit mode |
+| Back (browse mode) | Return to Options |
+
+| Field | Meaning |
+|-------|---------|
+| Output | Where the click goes: External (MIDI_OUT), Move (Move tracks), or Schwung (the synth chain). Default **Schwung** |
+| MIDI Channel | MIDI channel (1–16) for the click. Default **10** |
+| Accent Note | Note for beat 1 of each bar. Default **76** (GM Hi Wood Block) |
+| Normal Note | Note for the other beats. Default **77** (GM Low Wood Block) |
 
 **Button LED hints:** Back and Main are lit.
 

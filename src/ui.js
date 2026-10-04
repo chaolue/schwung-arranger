@@ -119,6 +119,7 @@ const VIEW_PERFORMANCE = "performance_view";
 const VIEW_OPTIONS = "options";
 const VIEW_OPTIONS_DRUMS = "options_drums";
 const VIEW_OPTIONS_INST = "options_inst";
+const VIEW_OPTIONS_CLICK = "options_click";
 const VIEW_OPTIONS_CHAINS = "options_chains";
 const VIEW_KNOB_MAP = "knob_map";
 const VIEW_KNOB_PICK = "knob_pick";
@@ -155,9 +156,11 @@ const TRACK_INSTRUMENT_2 = 3;
 /* Move Row button CC and colour per track, indexed by TRACK_DRUM/CHORD/
  * INSTRUMENT_1/2, so the Row buttons show which track is selected. */
 /* Track button per builder track: Track 1 holds both Drum and Chord (it
- * toggles between them), Track 2 = Inst 1, Track 3 = Inst 2. */
+ * toggles between them), Track 2 = Inst 1, Track 3 = Inst 2. Track 4 is the
+ * click on/off in every mode -- see toggleClick. */
 const TRACK_ROW_CC = [MoveRow1, MoveRow1, MoveRow2, MoveRow3];
 const TRACK_ROW_COLOUR = [White, AzureBlue, BrightYellow, Purple];
+const CLICK_ROW_COLOUR = 3; /* Bright Orange */
 
 /* The 12 major keys, in chromatic order. Each entry is the tonic note name. */
 const KEYS = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
@@ -292,7 +295,15 @@ let outputTarget = "schwung";
 let outputChannel = 10;   /* external/Move/Schwung channel: 1-16 */
 let moveChannel = 10;       /* 1-16 */
 let schwungChannel = 10;    /* 1-16 */
-let clickChannel = 0;       /* count-in click channel: 0 = follow primary output channel, else 1-16 */
+/* Click track (Options > Click): a metronome on every beat while playing,
+ * accent note on beat 1, on its own output and channel. It also plays
+ * Perform's count-ins. clickOn is the Track 4 toggle -- shared by every
+ * mode, not saved. Defaults: Schwung, channel 10, GM wood blocks. */
+let clickOutput = "schwung";
+let clickMidiChannel = 10;  /* 1-16 */
+let clickAccentNote = 76;   /* GM Hi Wood Block */
+let clickNormalNote = 77;   /* GM Low Wood Block */
+let clickOn = false;
 /* Instrument track output/channel, shared globally across all songs and set
  * from the Options menu (Instrument 1 / Instrument 2 submenus), not per-song. */
 let inst1Output = "external";
@@ -1911,7 +1922,7 @@ const PAD_PREVIEW_DELAY_MS = 250; /* delay before pad tap triggers insert previe
  * Setlist / clip names that overflow the row width. */
 const SCROLLABLE_MENU_VIEWS = new Set([
     VIEW_ROOT, VIEW_FOLDER_LIST, VIEW_BUILDER, VIEW_TRIM, VIEW_SONG_SETTINGS, VIEW_SONG_BACKUPS,
-    VIEW_SONG_BANK, VIEW_OPTIONS, VIEW_OPTIONS_DRUMS, VIEW_OPTIONS_INST, VIEW_OPTIONS_CHAINS,
+    VIEW_SONG_BANK, VIEW_OPTIONS, VIEW_OPTIONS_DRUMS, VIEW_OPTIONS_INST, VIEW_OPTIONS_CLICK, VIEW_OPTIONS_CHAINS,
     VIEW_SETLIST_BANK, VIEW_SETLIST_EDIT,
     VIEW_SETLIST_PICK, VIEW_SETLIST_CLICK, VIEW_PERF_SETLIST, VIEW_PERFORMANCE,
     VIEW_JAM_FOLDER, VIEW_JAM, VIEW_SECTION_PICK, VIEW_CHORD_PICK, VIEW_INSTRUMENT
@@ -2793,6 +2804,9 @@ export function toEngineSongJson(song) {
         ppq: song.ppq || 240,
         sync_mode: song.sync_mode || "internal",
         key: song.key || DEFAULT_KEY,
+        /* A Perform count-in: the click track plays it -- see clickSoundOn. */
+        count_in: song.count_in ? 1 : 0,
+        count_in_sound: song.count_in_sound ? 1 : 0,
         sections: secOut,
         instruments: instrumentsOut
     });
@@ -3105,8 +3119,20 @@ function loadSettings() {
     if (typeof mc === "number") moveChannel = mc;
     const sc = pick("schwung_channel", "number");
     if (typeof sc === "number") schwungChannel = sc;
-    const cc = pick("click_channel", "number");
-    if (typeof cc === "number") clickChannel = cc;
+    const co = pick("click_output", "string");
+    if (typeof co === "string") clickOutput = co;
+    const cmc = pick("click_midi_channel", "number");
+    if (typeof cmc === "number") {
+        clickMidiChannel = cmc;
+    } else {
+        /* The old count-in "Click Channel" (0 = follow the drums). */
+        const old = pick("click_channel", "number");
+        if (typeof old === "number" && old > 0) clickMidiChannel = old;
+    }
+    const can = pick("click_accent_note", "number");
+    if (typeof can === "number") clickAccentNote = can;
+    const cnn = pick("click_normal_note", "number");
+    if (typeof cnn === "number") clickNormalNote = cnn;
     const sg = pick("swap_guard_fraction", "number");
     if (typeof sg === "number") swapGuardFraction = sg;
     const dd = pick("dsp_debug", "boolean");
@@ -3129,8 +3155,11 @@ function loadSettings() {
     if (moveChannel > 16) moveChannel = 16;
     if (schwungChannel < 1) schwungChannel = 1;
     if (schwungChannel > 16) schwungChannel = 16;
-    if (clickChannel < 0) clickChannel = 0;
-    if (clickChannel > 16) clickChannel = 16;
+    if (clickMidiChannel < 1) clickMidiChannel = 1;
+    if (clickMidiChannel > 16) clickMidiChannel = 16;
+    clickAccentNote = Math.max(0, Math.min(127, clickAccentNote));
+    clickNormalNote = Math.max(0, Math.min(127, clickNormalNote));
+    if (OUTPUT_TARGETS.indexOf(clickOutput) < 0) clickOutput = "schwung";
     if (swapGuardFraction < 0) swapGuardFraction = 0;
     if (swapGuardFraction > 1) swapGuardFraction = 1;
     if (inst1Channel < 1) inst1Channel = 1;
@@ -3188,7 +3217,10 @@ function saveOutputSettings() {
         output_channel: outputChannel,
         move_channel: moveChannel,
         schwung_channel: schwungChannel,
-        click_channel: clickChannel,
+        click_output: clickOutput,
+        click_midi_channel: clickMidiChannel,
+        click_accent_note: clickAccentNote,
+        click_normal_note: clickNormalNote,
         swap_guard_fraction: swapGuardFraction,
         dsp_debug: dspDebugEnabled,
         drop_note_offs: dropNoteOffs,
@@ -3227,11 +3259,31 @@ function activeOutputChannel() {
     return outputChannel;
 }
 
-/* Effective MIDI channel for the count-in click. clickChannel 0 means follow
- * the primary output channel; otherwise it is an explicit 1-16 channel. */
-function activeClickChannel() {
-    return clickChannel > 0 ? clickChannel : activeOutputChannel();
+/* Push the click track's route, notes and on/off to the DSP. */
+function pushClickToDsp() {
+    if (typeof host_module_set_param !== "function" &&
+        typeof host_module_set_param_blocking !== "function") return;
+    const block = typeof host_module_set_param_blocking === "function";
+    const set = block ? host_module_set_param_blocking : host_module_set_param;
+    const t = block ? 100 : undefined;
+    set("click_output", clickOutput, t);
+    set("click_channel", String(clickMidiChannel - 1), t); /* DSP wants 0-based */
+    set("click_accent_note", String(clickAccentNote), t);
+    set("click_normal_note", String(clickNormalNote), t);
+    set("click_enabled", clickOn ? "1" : "0", t);
 }
+
+/* Track 4, in every mode: turn the click on or off. */
+function toggleClick() {
+    clickOn = !clickOn;
+    if (typeof host_module_set_param === "function") {
+        host_module_set_param("click_enabled", clickOn ? "1" : "0");
+    }
+    showOverlay("Click", clickOn ? "On" : "Off", 60);
+    needsRedraw = true;
+    ledDirtyAll = true;
+}
+
 
 /* Push the full output-routing state to the DSP. In co-run/overtake mode,
  * host_module_set_param is fire-and-forget over a SINGLE shared shadow_param
@@ -3285,6 +3337,7 @@ function applyOutputSettingsToDsp() {
     pushDspDebugToDsp();
     pushDropNoteOffsToDsp();
     pushSendClockToDsp();
+    pushClickToDsp();
 }
 
 /* Push the mid-clip swap guard fraction to the DSP. */
@@ -3373,7 +3426,7 @@ function addSongToSetlist(setlist, songFile) {
         name: songFile.name || clipDisplayName(songFile.path || songFile),
         path: songFile.path || (SONGS_DIR + "/" + songFile),
         click_bars: 0,
-        click_note: 0,
+        click_sound: true,
         stop_after_finish: false
     };
     setlist.songs.push(entry);
@@ -3460,11 +3513,18 @@ function setSetlistClickBars(setlist, idx, bars) {
     saveSetlist(setlist);
 }
 
-function setSetlistClickNote(setlist, idx, note) {
+/* Whether a song's count-in is heard (the click track plays it) or silent
+ * (pad flashes only). Setlists saved before the click track had a per-song
+ * click_note instead, where 0 ("None") meant silent. */
+function clickSoundOn(entry) {
+    if (!entry) return false;
+    if (typeof entry.click_sound === "boolean") return entry.click_sound;
+    return (entry.click_note || 0) > 0;
+}
+
+function setSetlistClickSound(setlist, idx, on) {
     if (!setlist || idx < 0 || idx >= setlist.songs.length) return;
-    setlist.songs[idx].click_note = Math.max(0, Math.min(127, note));
-    entryClickRevision(setlist.songs[idx]);
-    generateClickForEntry(setlist.songs[idx]);
+    setlist.songs[idx].click_sound = !!on;
     saveSetlist(setlist);
 }
 
@@ -4590,6 +4650,7 @@ function updateButtonLEDs() {
                     }
                     active.set(TRACK_ROW_CC[t], rowColour);
                 }
+                active.set(MoveRow4, clickOn ? CLICK_ROW_COLOUR : DarkGrey);
                 if (ledHasLeftSection) active.set(MoveLeft, WhiteLedBright);
                 if (ledHasRightSection) active.set(MoveRight, WhiteLedBright);
                 /* Play is green while playing; when stopped it is white only
@@ -4769,6 +4830,7 @@ function updateButtonLEDs() {
                 active.set(MoveRow1, perfDrumEnabled ? TRACK_ROW_COLOUR[TRACK_DRUM] : Black);
                 active.set(MoveRow2, perfInst1Enabled ? TRACK_ROW_COLOUR[TRACK_INSTRUMENT_1] : Black);
                 active.set(MoveRow3, perfInst2Enabled ? TRACK_ROW_COLOUR[TRACK_INSTRUMENT_2] : Black);
+                active.set(MoveRow4, clickOn ? CLICK_ROW_COLOUR : Black);
                 break;
             case VIEW_JAM_FOLDER:
                 active.set(MoveBack, WhiteLedBright);
@@ -4790,6 +4852,7 @@ function updateButtonLEDs() {
                 active.set(MoveRow1, jamDrumEnabled ? TRACK_ROW_COLOUR[TRACK_DRUM] : Black);
                 active.set(MoveRow2, jamInst1Enabled ? TRACK_ROW_COLOUR[TRACK_INSTRUMENT_1] : Black);
                 active.set(MoveRow3, jamInst2Enabled ? TRACK_ROW_COLOUR[TRACK_INSTRUMENT_2] : Black);
+                active.set(MoveRow4, clickOn ? CLICK_ROW_COLOUR : Black);
                 break;
         }
     }
@@ -7764,8 +7827,8 @@ function drawOptions() {
         { key: "drums", label: "Drums", value: currentOutputLabel() + " " + activeOutputChannel() },
         { key: "inst1", label: "Inst 1", value: (OUTPUT_LABELS[inst1Output] || inst1Output) + " " + inst1Channel },
         { key: "inst2", label: "Inst 2", value: (OUTPUT_LABELS[inst2Output] || inst2Output) + " " + inst2Channel },
+        { key: "click", label: "Click", value: (OUTPUT_LABELS[clickOutput] || clickOutput) + " " + clickMidiChannel },
         { key: "chains", label: "Chains", value: "Chain " + (optionsChainIndex + 1) },
-        { key: "clickchan", label: "Click Channel", value: clickChannel === 0 ? "Default" : String(clickChannel) },
         { key: "swapguard", label: "Swap Guard", value: Math.round(swapGuardFraction * 100) + "%" },
         { key: "clock", label: "Schwung Clock", value: sendClock ? "On" : "Off" },
         { key: "dspdebug", label: "DSP Debug", value: dspDebugEnabled ? "On" : "Off" }
@@ -7842,6 +7905,79 @@ function openOptionsDrums() {
     currentView = VIEW_OPTIONS_DRUMS;
     menuStack.push({ title: "Drums", selectedIndex: 0 });
     needsRedraw = true;
+}
+
+/* Options > Click: the click track's Output, MIDI Channel and the notes it
+ * sends -- Accent on beat 1, Normal on the other beats. */
+function openOptionsClick() {
+    optionsSubFocus = 0;
+    optionsSubEditing = false;
+    currentView = VIEW_OPTIONS_CLICK;
+    menuStack.push({ title: "Click", selectedIndex: 0 });
+    needsRedraw = true;
+}
+
+function midiNoteLabel(n) {
+    return n + " " + NOTE_NAMES[n % 12] + (Math.floor(n / 12) - 1);
+}
+
+function drawOptionsClick() {
+    drawMenuHeader("Click", "");
+    const items = [
+        { key: "output", label: "Output", value: OUTPUT_LABELS[clickOutput] || clickOutput },
+        { key: "channel", label: "MIDI Channel", value: String(clickMidiChannel) },
+        { key: "accent", label: "Accent Note", value: midiNoteLabel(clickAccentNote) },
+        { key: "normal", label: "Normal Note", value: midiNoteLabel(clickNormalNote) }
+    ];
+    drawMenuList({
+        labelX: 3,
+        items,
+        selectedIndex: optionsSubFocus,
+        getLabel: (item) => item.label,
+        getValue: (item) => item.value,
+        valueAlignRight: true,
+        editMode: optionsSubEditing,
+        labelGap: 2,
+        prioritizeSelectedValue: true,
+        selectedMinLabelChars: 7,
+        listArea: { topY: LIST_TOP_Y, bottomY: LIST_INDICATOR_BOTTOM_Y }
+    });
+}
+
+function handleOptionsClickInput(cc, value) {
+    if (cc === MoveMainKnob) {
+        const delta = decodeDelta(value);
+        if (optionsSubEditing) {
+            if (optionsSubFocus === 0) {
+                const idx = Math.max(0, Math.min(OUTPUT_TARGETS.length - 1, OUTPUT_TARGETS.indexOf(clickOutput) + delta));
+                clickOutput = OUTPUT_TARGETS[idx];
+            } else if (optionsSubFocus === 1) {
+                clickMidiChannel = Math.max(1, Math.min(16, clickMidiChannel + delta));
+            } else if (optionsSubFocus === 2) {
+                clickAccentNote = Math.max(0, Math.min(127, clickAccentNote + delta));
+            } else {
+                clickNormalNote = Math.max(0, Math.min(127, clickNormalNote + delta));
+            }
+            saveOutputSettings();
+            pushClickToDsp();
+        } else {
+            const newIdx = Math.max(0, Math.min(3, optionsSubFocus + delta));
+            if (newIdx !== optionsSubFocus) optionsSubFocus = newIdx;
+        }
+        needsRedraw = true;
+    } else if (cc === MoveMainButton && value > 0) {
+        optionsSubEditing = !optionsSubEditing;
+        needsRedraw = true;
+    } else if (cc === MoveBack && value > 0) {
+        if (optionsSubEditing) {
+            optionsSubEditing = false;
+            needsRedraw = true;
+        } else {
+            menuStack.pop();
+            currentView = VIEW_OPTIONS;
+            needsRedraw = true;
+        }
+    }
 }
 
 function openOptionsInst(index) {
@@ -8022,11 +8158,10 @@ function drawSetlistClick() {
     const entry = currentSetlist ? currentSetlist.songs[setlistSongIndex] : null;
     drawMenuHeader(scrollHeader("Edit: " + (entry ? shortSongName(entry.name) : ""), 28), "");
     const bars = entry ? (entry.click_bars || 0) : 0;
-    const note = entry ? (entry.click_note || 0) : 0;
     const stop = entry ? (entry.stop_after_finish || false) : false;
     const items = [
         { key: "bars", label: "Click Bars", value: bars === 0 ? "Off" : String(bars) },
-        { key: "note", label: "Click Note", value: note === 0 ? "None" : String(note) },
+        { key: "sound", label: "Click Sound", value: clickSoundOn(entry) ? "On" : "Off" },
         { key: "stop", label: "Stop At End", value: stop ? "Yes" : "No" },
         { key: "knobs", label: "Knobs", value: knobOverrideCount(entry) ? knobOverrideCount(entry) + " own" : "Setlist" }
     ];
@@ -8561,7 +8696,7 @@ function handleBuilderInput(cc, value) {
     const locked = songIsLocked();
     /* Track buttons: Track 1 toggles between the Drum and Chord tracks
      * (from an instrument track it goes to Drum first), Track 2/3 select
-     * Inst 1/Inst 2. */
+     * Inst 1/Inst 2, Track 4 toggles the click. */
     if ((cc === MoveRow1 || cc === MoveRow2 || cc === MoveRow3) && value > 0) {
         if (cc === MoveRow1) {
             builderTrack = (builderTrack === TRACK_DRUM) ? TRACK_CHORD : TRACK_DRUM;
@@ -8572,6 +8707,10 @@ function handleBuilderInput(cc, value) {
         stepLedsDirty = true;
         ledDirtyAll = true;
         needsRedraw = true;
+        return;
+    }
+    if (cc === MoveRow4 && value > 0) {
+        toggleClick();
         return;
     }
     /* The Chord and Instrument tracks don't use the clip-editing controls
@@ -9061,21 +9200,13 @@ function duplicateSelectedSong() {
 }
 
 function handleOptionsInput(cc, value) {
-    /* Rows 0-3 (Drums, Instrument 1, Instrument 2, Chains) navigate into a
-     * submenu; rows 4-7 (Click Channel, Swap Guard, Schwung Clock, DSP Debug)
-     * edit in place. */
+    /* Rows 0-4 (Drums, Instrument 1, Instrument 2, Click, Chains) navigate
+     * into a submenu; rows 5-7 (Swap Guard, Schwung Clock, DSP Debug) edit in
+     * place. */
     if (cc === MoveMainKnob) {
         const delta = decodeDelta(value);
         if (optionsEditing) {
-            if (optionsFocus === 4) {
-                /* Adjust the count-in click channel. 0 = follow the primary
-                 * output channel (Default); 1-16 = explicit channel. */
-                const newCh = Math.max(0, Math.min(16, clickChannel + delta));
-                if (newCh !== clickChannel) {
-                    clickChannel = newCh;
-                    saveOutputSettings();
-                }
-            } else if (optionsFocus === 5) {
+            if (optionsFocus === 5) {
                 /* Adjust the mid-clip swap guard (0-100%, in 5% steps). */
                 const newG = Math.max(0, Math.min(1, swapGuardFraction + delta * 0.05));
                 if (newG !== swapGuardFraction) {
@@ -9114,6 +9245,8 @@ function handleOptionsInput(cc, value) {
         } else if (optionsFocus === 2) {
             openOptionsInst(2);
         } else if (optionsFocus === 3) {
+            openOptionsClick();
+        } else if (optionsFocus === 4) {
             openOptionsChains();
         } else {
             optionsEditing = !optionsEditing;
@@ -9463,8 +9596,8 @@ function handleSetlistClickInput(cc, value) {
                 const cur = currentSetlist.songs[setlistSongIndex].click_bars || 0;
                 setSetlistClickBars(currentSetlist, setlistSongIndex, cur + delta);
             } else if (clickSettingsFocus === 1) {
-                const cur = currentSetlist.songs[setlistSongIndex].click_note || 0;
-                setSetlistClickNote(currentSetlist, setlistSongIndex, cur + delta);
+                const entry = currentSetlist.songs[setlistSongIndex];
+                setSetlistClickSound(currentSetlist, setlistSongIndex, !clickSoundOn(entry));
             } else if (clickSettingsFocus === 2) {
                 const cur = currentSetlist.songs[setlistSongIndex].stop_after_finish || false;
                 setSetlistStopAfterFinish(currentSetlist, setlistSongIndex, !cur);
@@ -9531,6 +9664,8 @@ function handlePerformanceInput(cc, value) {
             logDebug("PERFPLAY start selectedSection=" + perfSelectedSection + " selectedSong=" + perfSelectedSong + " songIndex=" + perfSongIndex);
             perfStart();
         }
+    } else if (cc === MoveRow4 && value > 0) {
+        toggleClick();
     } else if ((cc === MoveRow1 || cc === MoveRow2 || cc === MoveRow3) && value > 0) {
         /* Live mute toggle for drums/Inst 1/Inst 2 (Track 1/2/3, same as
          * Song Builder's track buttons). */
@@ -10621,6 +10756,8 @@ function handleJamInput(cc, value) {
          * Inversion/Note Gap menu for that Jam instrument, instead of
          * toggling it. */
         openJamInstrumentMenu(cc === MoveRow2 ? 0 : 1);
+    } else if (cc === MoveRow4 && value > 0) {
+        toggleClick();
     } else if ((cc === MoveRow1 || cc === MoveRow2 || cc === MoveRow3) && value > 0) {
         /* Drums/Inst 1/Inst 2 on/off (Track 1/2/3, same as Song Builder's
          * track buttons). Toggling an instrument also flips the chord-pad
@@ -11590,9 +11727,9 @@ function perfLoadSong(index, resetToggles) {
 }
 
 /* Play the current song through the DSP. If the setlist entry has a click
- * (click_bars > 0), first play a separate count-in click timeline, then the
- * real song. The click is a generated MIDI file (or pad-flash only if
- * click_note is 0). */
+ * (click_bars > 0), first play a separate count-in timeline, then the real
+ * song. The count-in's generated MIDI file only sets its length; the click
+ * track plays it if the entry's Click Sound is on (else pad flashes only). */
 function perfPlayCurrent() {
     if (!currentSong) return;
     /* A new play request is going out -- don't trust stopped_at_end again
@@ -11601,8 +11738,8 @@ function perfPlayCurrent() {
     perfObservedRunningSincePlay = false;
     const entry = currentSetlist ? currentSetlist.songs[perfSongIndex] : null;
     const clickBars = entry ? (entry.click_bars || 0) : 0;
-    const clickNote = entry ? (entry.click_note || 0) : 0;
-    logClick("PERFCLICK bars=" + clickBars + " note=" + clickNote + " songBars=" + (currentSong.sections ? currentSong.sections.length : 0) +
+    const clickSound = clickSoundOn(entry);
+    logClick("PERFCLICK bars=" + clickBars + " sound=" + clickSound + " songBars=" + (currentSong.sections ? currentSong.sections.length : 0) +
         " sig=" + (currentSong.time_sig_num || "?") + "/" + (currentSong.time_sig_den || "?") + " ppq=" + (currentSong.ppq || "?"));
     perfClickBars = clickBars;
     /* Reset tick-driven count-in state so stale values from a previous song's
@@ -11641,19 +11778,21 @@ function perfPlayCurrent() {
                 start_bar: 0,
                 end_bar: clickBars,
                 guard_fraction: 0,
-                velocity_scale: 1.0,
-                /* Route the count-in click to its own MIDI channel so it can
-                 * be separated from the song/primary output. */
-                channel: activeClickChannel()
+                velocity_scale: 1.0
             }]
         }];
+        /* The count-in's clip only sets its length; the click track plays it
+         * (on the click's own output, channel and notes) if this song's
+         * count-in has sound. */
+        clickSong.count_in = true;
+        clickSong.count_in_sound = clickSoundOn(entry);
         currentSong = clickSong;
         playbackSectionIndex = 0;
         previewBarOffset = 0;
         logClick("PERFCLICK path=" + clickMidiPath + " json=" + JSON.stringify(toEngineSongJson(clickSong)));
         perfClickPlaying = true;
         perfClickDsp = true;
-        perfClickMute = (clickNote <= 0);
+        perfClickMute = !clickSound;
         perfClickStartMs = Date.now();
         /* Force a full step-LED redraw so the count-in click's steps (blue)
          * replace any steps left lit by the previous song's last section.
@@ -12911,6 +13050,7 @@ globalThis.tick = function() {
                 case VIEW_OPTIONS: drawOptions(); break;
                 case VIEW_OPTIONS_DRUMS: drawOptionsDrums(); break;
                 case VIEW_OPTIONS_INST: drawOptionsInst(); break;
+                case VIEW_OPTIONS_CLICK: drawOptionsClick(); break;
                 case VIEW_OPTIONS_CHAINS: drawOptionsChains(); break;
                 case VIEW_KNOB_MAP: drawKnobMap(); break;
                 case VIEW_KNOB_PICK: drawKnobPick(); break;
@@ -12996,6 +13136,7 @@ function routeCcInput(rawData, cc, value) {
         case VIEW_OPTIONS: handleOptionsInput(cc, value); break;
         case VIEW_OPTIONS_DRUMS: handleOptionsDrumsInput(cc, value); break;
         case VIEW_OPTIONS_INST: handleOptionsInstInput(cc, value); break;
+        case VIEW_OPTIONS_CLICK: handleOptionsClickInput(cc, value); break;
         case VIEW_OPTIONS_CHAINS: handleOptionsChainsInput(cc, value); break;
         case VIEW_KNOB_MAP: handleKnobMapInput(cc, value); break;
         case VIEW_KNOB_PICK: handleKnobPickInput(cc, value); break;

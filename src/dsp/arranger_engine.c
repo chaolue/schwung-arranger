@@ -337,6 +337,11 @@ typedef struct {
     char key[8];             /* song key (tonic note name) */
     int instrument_count;
     instrument_t instruments[MAX_INSTRUMENTS];
+    /* A count-in timeline (Perform's click before a song): its clip only
+     * sets the length -- nothing in it is played -- and the click track
+     * plays it instead when count_in_sound is set. See update_click. */
+    uint8_t count_in;
+    uint8_t count_in_sound;
 } song_t;
 
 /* -------------------------------------------------------------------------- */
@@ -725,6 +730,17 @@ typedef struct engine {
      * way as the INTERNAL transport source -- the one movy drives -- and Move's
      * own clock wins over it whenever Move's sequencer runs. Audio thread only. */
     int send_clock;            /* user setting, default on */
+
+    /* Click track: a metronome on every beat while playing (accent on beat
+     * 1), on its own route/channel -- see update_click. click_enabled is the
+     * Track 4 toggle; a count-in timeline plays it regardless (when its
+     * count_in_sound is set). */
+    uint8_t click_enabled;
+    inst_voice_t click_voice;      /* only output_target/channel are used */
+    uint8_t click_accent_note, click_normal_note;
+    uint8_t click_sounding, click_sounding_note;
+    uint32_t click_on_tick, click_off_tick, click_last_tick;
+    uint32_t click_last_beat;      /* UINT32_MAX = none yet this playback */
     int clock_running;         /* a Start has gone out and no Stop since */
     int clock_restart;         /* play_from_top: re-anchor with a fresh Start */
     double clock_phase;        /* fraction of a clock tick accumulated */
@@ -2315,6 +2331,7 @@ static void emit_instrument_notes_release(engine_t *e) {
                     send_instrument_raw(t, (uint8_t)c, 0x80, (uint8_t)n, 0);
                     e->inst_notes_on[t][c][n]--;
                 }
+    e->click_sounding = 0; /* released above along with everything else */
 }
 
 /* Find the per-bar override entry for a section/bar, or NULL if that bar has
@@ -2877,6 +2894,13 @@ static int parse_song_json(engine_t *e, const char *json, song_t *song,
     json_get_string(json, "name", song->name, sizeof(song->name));
     json_get_string(json, "key", song->key, sizeof(song->key));
     if (!song->key[0]) copy_trunc(song->key, sizeof(song->key), "C");
+    {
+        int ci = 0, cs = 0;
+        json_get_int_at(json, "count_in", &ci);
+        json_get_int_at(json, "count_in_sound", &cs);
+        song->count_in = ci ? 1 : 0;
+        song->count_in_sound = cs ? 1 : 0;
+    }
     double tmp_d = 120.0;
     json_get_double_at(json, "tempo_bpm", &tmp_d);
     song->tempo_bpm = tmp_d;
@@ -4051,6 +4075,8 @@ static void copy_song_used(song_t *dst, const song_t *src) {
     dst->time_sig_den = src->time_sig_den;
     dst->total_bars = src->total_bars;
     memcpy(dst->key, src->key, sizeof dst->key);
+    dst->count_in = src->count_in;
+    dst->count_in_sound = src->count_in_sound;
 
     int ns = clamp_count(src->section_count, MAX_SONG_SECTIONS);
     dst->section_count = src->section_count;
@@ -4401,6 +4427,7 @@ static void drain_events_up_to(engine_t *e, uint32_t target) {
     while (e->event_cursor < e->live_slot.event_count) {
         const smf_event_t *ev = &e->live_slot.events[e->event_cursor];
         if (ev->tick >= target) break;
+        if (e->live_slot.song.count_in) { e->event_cursor++; continue; } /* the click track plays it */
         e->last_event_channel_override = ev->channel_override;
         /* Follow-note instruments: emit the chord when a matching drum
          * note-on fires (e.g. bass follows the kick). Always runs, even
@@ -4428,6 +4455,7 @@ static void drain_events_up_to(engine_t *e, uint32_t target) {
  * ordinary in-block playback, not shared with either of the swap-boundary
  * paths this helper serves. */
 static void emit_timeline_event(engine_t *e, const smf_event_t *ev) {
+    if (e->live_slot.song.count_in) return; /* the click track plays it */
     e->last_event_channel_override = ev->channel_override;
     if (should_suppress_note_off(e, ev) || should_suppress_note_on(e, ev)) return;
     if (e->emit_directly) {
@@ -4937,6 +4965,11 @@ static void* arr_create_instance(const char *module_dir, const char *config_json
     e->loop = 1;          /* default to looping for performance mode */
     e->drum_enabled = 1;   /* audible by default; Perform/Jam mute is opt-in */
     e->send_clock = 1;     /* Schwung follows the song tempo unless turned off */
+    e->click_voice.output_target = OUTPUT_TARGET_SCHWUNG;
+    e->click_voice.channel = 9;
+    e->click_accent_note = 76;     /* GM Hi Wood Block */
+    e->click_normal_note = 77;     /* GM Low Wood Block */
+    e->click_last_beat = UINT32_MAX;
     for (int i = 0; i < MAX_INSTRUMENTS; i++) e->inst_live_enabled[i] = 1;
     /* Pre-existing latent bug, newly reachable now that JS/the test harness
      * must poll get_param("state") for primary_published_gen BEFORE any
@@ -5086,6 +5119,51 @@ static void clock_tick(engine_t *e, int frames, int sample_rate) {
     }
 }
 
+static void click_release(engine_t *e) {
+    if (!e->click_sounding) return;
+    emit_instrument_event(e, &e->click_voice, 0x80, e->click_sounding_note, 0);
+    e->click_sounding = 0;
+}
+
+/* The click track, once per block after the playhead moves: a note on each
+ * beat (the time signature's own beat -- eighths in 6/8), the accent note on
+ * beat 1 of the bar, held for half a beat. Plays while running when the
+ * Track 4 toggle is on, or through a count-in timeline when its sound is on.
+ * A playhead that moved backwards (loop wrap, the count-in handing over to
+ * the song, a seek back) starts a new beat even at the same beat number. A
+ * beat only clicks if the block lands in its first half, so turning the
+ * click on mid-beat waits for the next one. */
+static void update_click(engine_t *e) {
+    const song_t *sg = &e->live_slot.song;
+    int want = e->running && e->ticks_per_bar > 0 && e->time_sig_num > 0 &&
+               (sg->count_in ? sg->count_in_sound : e->click_enabled);
+    uint32_t tick = e->playhead_tick;
+    if (e->click_sounding && (!want || tick >= e->click_off_tick || tick < e->click_on_tick)) {
+        click_release(e);
+    }
+    if (!want) {
+        e->click_last_beat = UINT32_MAX;
+        e->click_last_tick = tick;
+        return;
+    }
+    uint32_t bt = e->ticks_per_bar / (uint32_t)e->time_sig_num;
+    if (bt == 0) return;
+    uint32_t beat = tick / bt;
+    int wrapped = tick < e->click_last_tick;
+    e->click_last_tick = tick;
+    if (beat == e->click_last_beat && !wrapped) return;
+    e->click_last_beat = beat;
+    if (tick % bt > bt / 2) return;
+    click_release(e);
+    int accent = (tick % e->ticks_per_bar) < bt;
+    uint8_t note = accent ? e->click_accent_note : e->click_normal_note;
+    emit_instrument_event(e, &e->click_voice, 0x90, note, accent ? 127 : 100);
+    e->click_sounding = 1;
+    e->click_sounding_note = note;
+    e->click_on_tick = tick;
+    e->click_off_tick = tick - (tick % bt) + bt / 2;
+}
+
 static void arr_render_block(void *instance, int16_t *out_interleaved_lr, int frames) {
     engine_t *e = instance;
 
@@ -5099,6 +5177,7 @@ static void arr_render_block(void *instance, int16_t *out_interleaved_lr, int fr
     int sample_rate = g_host ? g_host->sample_rate : 44100;
 
     advance_playhead(e, frames, sample_rate);
+    update_click(e);
     clock_tick(e, frames, sample_rate);
 }
 
@@ -5369,6 +5448,28 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
     }
     if (strcmp(key, "drop_note_offs") == 0) {
         e->drop_note_offs = atoi(val) ? 1 : 0;
+        return;
+    }
+    if (strcmp(key, "click_enabled") == 0) {
+        e->click_enabled = atoi(val) ? 1 : 0;
+        return;
+    }
+    if (strcmp(key, "click_output") == 0) {
+        click_release(e); /* the note-off must go where the note-on went */
+        if (strcmp(val, "move") == 0) e->click_voice.output_target = OUTPUT_TARGET_MOVE;
+        else if (strcmp(val, "schwung") == 0) e->click_voice.output_target = OUTPUT_TARGET_SCHWUNG;
+        else e->click_voice.output_target = OUTPUT_TARGET_EXTERNAL;
+        return;
+    }
+    if (strcmp(key, "click_channel") == 0) {
+        click_release(e);
+        e->click_voice.channel = atoi(val) & 0x0F; /* already 0-based */
+        return;
+    }
+    if (strcmp(key, "click_accent_note") == 0 || strcmp(key, "click_normal_note") == 0) {
+        int v = atoi(val);
+        uint8_t n = (uint8_t)(v < 0 ? 0 : (v > 127 ? 127 : v));
+        if (key[6] == 'a') e->click_accent_note = n; else e->click_normal_note = n;
         return;
     }
     if (strcmp(key, "send_clock") == 0) {

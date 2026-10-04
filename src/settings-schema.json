@@ -67,13 +67,36 @@
             "default": 1
         },
         {
-            "key": "click_channel",
-            "label": "Default Click Output Channel",
+            "key": "click_output",
+            "label": "Click Output",
+            "type": "enum",
+            "options": ["External", "Move", "Schwung"],
+            "values": ["external", "move", "schwung"],
+            "default": "schwung"
+        },
+        {
+            "key": "click_midi_channel",
+            "label": "Click MIDI Channel",
+            "type": "int",
+            "min": 1,
+            "max": 16,
+            "default": 10
+        },
+        {
+            "key": "click_accent_note",
+            "label": "Click Accent Note (beat 1)",
             "type": "int",
             "min": 0,
-            "max": 16,
-            "default": 0,
-            "help": "0 follows the primary output channel; 1-16 is an explicit channel."
+            "max": 127,
+            "default": 76
+        },
+        {
+            "key": "click_normal_note",
+            "label": "Click Normal Note (other beats)",
+            "type": "int",
+            "min": 0,
+            "max": 127,
+            "default": 77
         },
         {
             "key": "swap_guard_fraction",
