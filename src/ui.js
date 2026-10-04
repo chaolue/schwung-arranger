@@ -6286,6 +6286,7 @@ function drawRoot() {
         getValue: () => "",
         maxVisible: 5
     });
+    drawOverlay();
 }
 
 function drawFolderList() {
@@ -8328,8 +8329,19 @@ function drawJamHoldOverlay() {
 
 /* ── Input handling ─────────────────────────────────────────────────── */
 
+/* Exiting from the root menu takes two Back presses: the first shows a popup
+ * asking for the second, which must come within EXIT_CONFIRM_MS. Any other
+ * input on the root menu cancels it. */
+const EXIT_CONFIRM_MS = 2000;
+let exitConfirmUntil = 0;
+
 function handleRootInput(cc, value) {
     const items = ["Song Builder", "Setlists", "Perform", "Jam", "Output"];
+    if (value > 0 && cc !== MoveBack && exitConfirmUntil) {
+        exitConfirmUntil = 0;
+        hideOverlay();
+        needsRedraw = true;
+    }
     if (cc === MoveMainKnob) {
         const delta = decodeDelta(value);
         const idx = menuStack.getSelectedIndex();
@@ -8352,6 +8364,14 @@ function handleRootInput(cc, value) {
          * unconditionally for Shift+Back anyway -- this tap path is what a
          * host without that interception, or one that hasn't yet seen
          * Shift+Back, falls back to. */
+        if (Date.now() >= exitConfirmUntil) {
+            exitConfirmUntil = Date.now() + EXIT_CONFIRM_MS;
+            showOverlay("Press Back again", "to exit Arranger", Math.round(EXIT_CONFIRM_MS * 60 / 1000));
+            needsRedraw = true;
+            return;
+        }
+        exitConfirmUntil = 0;
+        hideOverlay();
         if (typeof host_exit_module === "function") {
             host_exit_module();
         } else if (typeof host_return_to_menu === "function") {
