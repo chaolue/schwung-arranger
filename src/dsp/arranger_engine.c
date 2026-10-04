@@ -747,6 +747,10 @@ typedef struct engine {
      * saved value -- found live: Inst 1/2 muted while stopped kept playing
      * after Play, while the pads/buttons showed them muted. Defaults to 1. */
     uint8_t inst_live_enabled[MAX_INSTRUMENTS];
+    /* How many times each instrument note is currently sounding, per output
+     * route (external/move/schwung) and channel -- see
+     * emit_instrument_notes_release. */
+    uint8_t inst_notes_on[3][16][128];
 
     /* Channel override of the most recently drained event, used by
      * emit_direct_event when a per-clip channel (e.g. a dedicated click
@@ -2191,22 +2195,38 @@ static int chord_voiced_intervals(const char *quality, int inversion, int *out, 
 
 /* Emit a single note-on/off for an instrument, routed to the instrument's own
  * output target and channel (independent of the engine's drum routing). */
+static void send_instrument_raw(int target, uint8_t ch, uint8_t high, uint8_t note, uint8_t vel);
+
 static void emit_instrument_event(engine_t *e, const inst_voice_t *inst,
                                   uint8_t status, uint8_t note, uint8_t vel) {
-    (void)e;
     if (!g_host) return;
     uint8_t high = status & 0xF0;
+    int target = (inst->output_target >= 0 && inst->output_target <= 2) ? inst->output_target : 0;
+    uint8_t ch = (uint8_t)(inst->channel & 0x0F);
+    uint8_t n = note & 0x7F;
+    /* Count what's sounding, so stopping can release anything a lost
+     * note-off left behind -- see emit_instrument_notes_release. */
+    if (high == 0x90 && vel > 0) {
+        if (e->inst_notes_on[target][ch][n] < 255) e->inst_notes_on[target][ch][n]++;
+    } else if (high == 0x80 || high == 0x90) {
+        if (e->inst_notes_on[target][ch][n] > 0) e->inst_notes_on[target][ch][n]--;
+    }
+    send_instrument_raw(target, ch, high, n, vel);
+}
+
+/* Send one instrument message to its output route. */
+static void send_instrument_raw(int target, uint8_t ch, uint8_t high, uint8_t note, uint8_t vel) {
+    if (!g_host) return;
     uint8_t cin = 0x0F;
     if (high == 0x80)      cin = 0x08;
     else if (high == 0x90) cin = 0x09;
     else if (high == 0xB0) cin = 0x0B;
-    uint8_t ch = (uint8_t)(inst->channel & 0x0F);
     uint8_t cable = 2;
-    if (inst->output_target == OUTPUT_TARGET_SCHWUNG) cable = 0;
+    if (target == OUTPUT_TARGET_SCHWUNG) cable = 0;
     uint8_t msg[4] = { (cable << 4) | cin, high | ch, note, vel };
-    if (inst->output_target == OUTPUT_TARGET_SCHWUNG) {
+    if (target == OUTPUT_TARGET_SCHWUNG) {
         if (g_host->midi_send_internal) g_host->midi_send_internal(msg, 4);
-    } else if (inst->output_target == OUTPUT_TARGET_MOVE) {
+    } else if (target == OUTPUT_TARGET_MOVE) {
         if (g_host->midi_inject_to_move) g_host->midi_inject_to_move(msg, 4);
     } else {
         if (g_host->midi_send_external) g_host->midi_send_external(msg, 4);
@@ -2278,6 +2298,22 @@ static void emit_instrument_chord_off(engine_t *e, const inst_voice_t *inst,
     int notes[4];
     int n = chord_voiced_notes(inst, ch, notes);
     for (int i = 0; i < n; i++) emit_instrument_event(e, inst, 0x80, (uint8_t)notes[i], 0);
+}
+
+/* Send a note-off for every instrument note still sounding, on every route
+ * and channel, and forget them. The backstop on stop: the per-instrument
+ * all-off functions only know each instrument's LAST chord, so any note whose
+ * own note-off was lost (overwritten bookkeeping, a parameter or route change
+ * mid-note) would otherwise hang until the module closed. Instrument routes
+ * don't get the drums' CC 123, and a Schwung chain synth needn't honour it. */
+static void emit_instrument_notes_release(engine_t *e) {
+    for (int t = 0; t < 3; t++)
+        for (int c = 0; c < 16; c++)
+            for (int n = 0; n < 128; n++)
+                while (e->inst_notes_on[t][c][n] > 0) {
+                    send_instrument_raw(t, (uint8_t)c, 0x80, (uint8_t)n, 0);
+                    e->inst_notes_on[t][c][n]--;
+                }
 }
 
 /* Find the per-bar override entry for a section/bar, or NULL if that bar has
@@ -2601,6 +2637,12 @@ static void emit_instruments_follow(engine_t *e, uint8_t note, uint32_t tick) {
                 tick >= e->last_inst_follow_tick[i] &&
                 (tick - e->last_inst_follow_tick[i]) <= guard_ticks;
             if (!is_duplicate_attack) {
+                /* Release whatever this instrument is still sounding first --
+                 * see emit_jam_instruments_follow for why its own scheduled
+                 * off can't be relied on. */
+                if (e->last_inst_chord_set[i]) {
+                    emit_instrument_chord_off(e, &e->last_inst_resolved[i], &e->last_inst_chord[i]);
+                }
                 /* Fire the new note-on immediately (on the drum hit). */
                 emit_instrument_chord(e, &resolved, ch, 100);
                 e->last_inst_chord[i] = *ch;
@@ -2687,6 +2729,17 @@ static void emit_jam_instruments_follow(engine_t *e, uint8_t note, uint32_t tick
             chord_equal(&e->jam_last_chord[i], ch) &&
             since_last <= guard_ticks;
         if (!is_duplicate_attack) {
+            /* Release the chord still sounding before playing the next one.
+             * Its own scheduled off can't be relied on: for the last hit
+             * before a loop wraps there's no later hit in the timeline, so
+             * that off is scheduled at the loop end -- which the playhead,
+             * back near 0 after the wrap, never reaches -- and the next
+             * attack then overwrote the only record of those notes. Found
+             * live: notes left held after stopping Jam until the module was
+             * closed. */
+            if (e->jam_last_chord_set[i]) {
+                emit_instrument_chord_off(e, &e->jam_last_resolved[i], &e->jam_last_chord[i]);
+            }
             emit_instrument_chord(e, &resolved, ch, 100);
             e->jam_last_chord[i] = *ch;
             e->jam_last_chord_set[i] = 1;
@@ -4585,6 +4638,7 @@ static void handle_loop_or_stop(engine_t *e, uint32_t *target) {
                 /* Cut off any instrument chord notes still sounding. */
                 emit_instruments_all_off(e);
                 emit_jam_instruments_all_off(e);
+                emit_instrument_notes_release(e);
                 if (e->playhead_tick > e->live_slot.end_tick) e->playhead_tick = e->live_slot.end_tick;
             }
         }
@@ -5547,6 +5601,7 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
         /* Send note-offs for any instrument chords still sounding. */
         emit_instruments_all_off(e);
         emit_jam_instruments_all_off(e);
+        emit_instrument_notes_release(e);
         /* Discard any not-yet-promoted Jam chord pick -- it was queued for
          * a future bar boundary that will now never arrive, so resuming it
          * later (see "play"'s apply_pending_jam_chord call) would be
