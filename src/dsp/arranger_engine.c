@@ -4,8 +4,9 @@
  * Responsibilities:
  *  - Parse Standard MIDI File Type 1 from the user's MIDI library.
  *  - Build a merged, boundary-guarded event timeline per Arranger Song.
- *  - Drive playback from the audio clock at the song's tempo; Move's own
- *    transport Start/Stop (MIDI 0xFA/0xFC) start and stop it too.
+ *  - Drive playback from the audio clock at the song's tempo. Only Arranger's
+ *    own Play/Stop control it; Move's transport doesn't. While playing it
+ *    sends MIDI clock to Schwung so synced modules follow the song.
  *  - Emit note-on/note-off events to the host for routing (external / Move /
  *    Schwung chain) via the v2 generator plugin API.
  *
@@ -5014,38 +5015,12 @@ static void arr_destroy_instance(void *instance) {
     free(e);
 }
 
-static void play_from_top(engine_t *e);
-
 static void arr_on_midi(void *instance, const uint8_t *msg, int len, int source) {
-    engine_t *e = instance;
-    if (!e || len < 1) return;
-    (void)source;
-    uint8_t status = msg[0];
-
-    if (status == 0xFA) {
-        play_from_top(e);
-        dsp_log_enqueue_worker("MIDI START");
-        return;
-    }
-    if (status == 0xFB) {
-        e->running = 1;
-        return;
-    }
-    if (status == 0xFC) {
-        e->running = 0;
-        queue_clear(e);
-        emit_all_notes_off(e);
-        /* As set_param("stop") does. Without these, a chord sounding on an
-         * instrument routed anywhere other than the drums hung after Move's
-         * transport stopped: the CC 123 above only goes out on the drum
-         * route, and the scheduled instrument note-offs only fire from
-         * advance_playhead, which returns early once running is 0. */
-        emit_instruments_all_off(e);
-        emit_jam_instruments_all_off(e);
-        return;
-    }
-
-    /* Arranger is a generator; do not pass through external input. */
+    /* Arranger is a generator with its own transport: it doesn't pass
+     * through external input, and Move's own transport (MIDI Start/Continue/
+     * Stop) deliberately doesn't start or stop it -- only Arranger's own Play
+     * and Stop do. (It still sends its clock to Schwung -- see clock_tick.) */
+    (void)instance; (void)msg; (void)len; (void)source;
 }
 
 static int arr_get_error(void *instance, char *buf, int buf_len) {
@@ -5075,7 +5050,7 @@ static void send_clock_byte(uint8_t status) {
 
 /* MIDI clock for this block -- see send_clock's declaration. Edge-driven off
  * e->running rather than hooked into every place that starts or stops
- * playback (Play, MIDI Start/Stop, end of song, Jam stop...), so none of them
+ * playback (Play, Stop, end of song, Jam stop...), so none of them
  * can be missed. Block-quantised (<= ~2.9 ms jitter), which the host's tempo
  * EMA is built to absorb; the tick count itself never drifts, because the
  * fractional phase carries across blocks exactly like the playhead's. */
@@ -5131,7 +5106,7 @@ static void arr_render_block(void *instance, int16_t *out_interleaved_lr, int fr
  * primary_ch.slot[active] into e->live_slot (a bounded copy, never a pointer
  * handoff -- see copy_timeline_slot) and updates the scalars callers read
  * from live_slot's new content. Called at the top of play_from_top
- * (set_param("play") and MIDI Start) and set_param("play_from_bar"); JS
+ * (set_param("play")) and set_param("play_from_bar"); JS
  * issues those only after confirming state.primary_published_gen advanced
  * past the generation it requested. A
  * no-op if there is nothing new to activate (e.g. play_from_bar seeking
@@ -5152,16 +5127,10 @@ static void activate_primary_if_published(engine_t *e) {
     copy_trunc(e->active_source, sizeof(e->active_source), e->live_slot.source);
 }
 
-/* Start playback from the top of the newest published build: set_param
- * ("play"), and Move's own transport Start (MIDI 0xFA, which the host
- * delivers to an overtake DSP from cable 0 whenever Move's sequencer starts).
- * The two used to differ -- 0xFA only rewound the playhead and set running:
- * it never activated a newly built song, so Start on a freshly loaded song
- * played nothing at all, and after a song had ended it ran on with
- * stopped_at_end still set (which the UI's end-of-song handling reads). The
- * bar counters, tick remainder and pending instrument note-offs carried over
- * too, so bar 1's chord sounded only when the stale counters happened to
- * register a wrap. */
+/* Start playback from the top of the newest published build (set_param
+ * "play"): activates a newly built song, clears stopped_at_end (which the
+ * UI's end-of-song handling reads), and resets the bar counters, tick
+ * remainder and pending instrument note-offs, so bar 1's chord sounds. */
 static void play_from_top(engine_t *e) {
     activate_primary_if_published(e);
     e->clock_restart = 1;      /* Schwung's beat 0 follows the song's */

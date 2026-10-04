@@ -92,7 +92,8 @@ int main(int argc, char **argv) {
     api->render_block(e, buf, 128);
     CHECK(n_stop == 1, "turning it off while playing sends Stop");
 
-    /* Move's own Start/Stop (on_midi) drive the clock like Play/Stop. */
+    /* Move's own Start/Stop (on_midi) do NOT start or stop Arranger -- only
+     * its own Play/Stop do -- so they send no clock either. */
     api->set_param(e, "send_clock", "1");
     api->set_param(e, "stop", "1");
     api->render_block(e, buf, 128);
@@ -102,7 +103,7 @@ int main(int argc, char **argv) {
     api->render_block(e, buf, 128);
     api->on_midi(e, stop, 1, 0);
     api->render_block(e, buf, 128);
-    CHECK(n_start == 1 && n_stop == 1, "Move Start/Stop: start %d stop %d", n_start, n_stop);
+    CHECK(n_start == 0 && n_stop == 0, "Move Start/Stop leave Arranger stopped: start %d stop %d", n_start, n_stop);
     CHECK(n_other == 0, "nothing but realtime packets sent (%d other)", n_other);
 
     api->destroy_instance(e);
