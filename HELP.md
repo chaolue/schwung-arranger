@@ -373,6 +373,7 @@ Play through a setlist.
 | Up / Down | Scroll the pad window up / down one row |
 | Jog wheel | Scroll the info display |
 | Track 1 / 2 / 3 | Turn Drums / Inst 1 / Inst 2 on or off (kept until you leave Perform) |
+| Record | Start or stop recording the Schwung mix to a WAV file (see below) |
 | Knobs 1–8 | Change the Schwung parameter mapped to that knob — see **Performance Knobs** |
 | Touch a knob | Show what it controls (chain or Master FX, component, module) and its value |
 | Play | Start playback from the current / selected song or section |
@@ -387,6 +388,7 @@ Play through a setlist.
 | Pad press (other song / click pad) | Queue a jump to that song at the next section boundary |
 | Up / Down | Scroll the pad window up / down one row |
 | Track 1 / 2 / 3 | Turn Drums / Inst 1 / Inst 2 on or off immediately |
+| Record | Start or stop recording the Schwung mix to a WAV file (see below) |
 | Knobs 1–8 | Change the Schwung parameter mapped to that knob |
 | Play | Stop playback |
 | Back | Stop playback and return to Root Menu |
@@ -394,6 +396,8 @@ Play through a setlist.
 The pad window shows 4 rows of sections at a time. When playback reaches the third visible row, the window auto-scrolls up one row so the next row of sections becomes visible at the top. The currently playing pad/section is shown in bright green; queued jumps flash white. Step LEDs show bar progress within the current section, or the selected section's clip layout while stopped. The active bar flashes white-to-black on the beat for a prominent cue, then returns to its clip colour on the next bar.
 
 The Track buttons are live mutes, not saved to the song. Each song starts with its own instrument settings (drums always on) when you switch to it; a mute set while stopped stays in place when you press Play.
+
+**Recording:** Record starts recording Schwung's audio output (the same "Resample" source Schwung's own sampler uses) to `UserLibrary/Recordings/Arranger/<setlist>_<date-time>.wav`; press it again to stop and save. It runs independently of Play/Stop, so a whole set can go into one file, and stops when you leave Perform. Record is red while recording and white otherwise.
 
 **Button LED hints:** Back, Up, Down and Play are lit; Play is white when stopped and green while playing. Track 1, 2 and 3 are lit in their track colour while that part is on, and off while it is muted.
 

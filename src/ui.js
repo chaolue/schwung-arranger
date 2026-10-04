@@ -1003,8 +1003,49 @@ function refreshPerfKnobs() {
     needsRedraw = true;
 }
 
+/* Perform-mode recording: Record toggles Schwung's own sampler, recording
+ * the Schwung mix ("Resample") to a WAV under RECORDINGS_DIR -- the same
+ * host_sampler_* calls Schwung's Song Mode tool uses. Independent of
+ * playback, so a set can be recorded across several Play/Stops. Stops when
+ * leaving Perform. */
+const RECORDINGS_DIR = "/data/UserData/UserLibrary/Recordings/Arranger";
+let perfRecording = false;
+
+function perfRecordingAvailable() {
+    return typeof host_sampler_start === "function" && typeof host_sampler_stop === "function";
+}
+
+function perfToggleRecording() {
+    if (perfRecording) { perfStopRecording(); return; }
+    if (!perfRecordingAvailable()) {
+        showOverlay("Recording", "not available", 120);
+        needsRedraw = true;
+        return;
+    }
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-").substring(0, 19);
+    const name = safeFileName(currentSetlist ? (currentSetlist.name || "set") : "set");
+    const path = RECORDINGS_DIR + "/" + name + "_" + stamp + ".wav";
+    try { ensureDir(RECORDINGS_DIR); } catch (e) {}
+    if (typeof host_sampler_set_source === "function") host_sampler_set_source(0); /* Schwung mix */
+    host_sampler_start(path);
+    perfRecording = true;
+    logDebug("PERFREC start path=" + path);
+    showOverlay("Recording", name + "_" + stamp.substring(11), 120);
+    needsRedraw = true;
+}
+
+function perfStopRecording() {
+    if (!perfRecording) return;
+    host_sampler_stop();
+    perfRecording = false;
+    logDebug("PERFREC stop");
+    showOverlay("Recording saved", "Recordings/Arranger", 150);
+    needsRedraw = true;
+}
+
 /* Back out of Performance to the setlist picker (Move Set check: Back). */
 function leavePerformanceToSetlists() {
+    perfStopRecording();
     perfStop();
     flushKnobSave();
     menuStack.pop();
@@ -4724,6 +4765,7 @@ function updateButtonLEDs() {
                     }
                 }
                 active.set(MovePlay, perfPlaying ? PureGreen : White);
+                if (perfRecordingAvailable()) active.set(MoveRec, perfRecording ? BrightRed : White);
                 active.set(MoveRow1, perfDrumEnabled ? TRACK_ROW_COLOUR[TRACK_DRUM] : Black);
                 active.set(MoveRow2, perfInst1Enabled ? TRACK_ROW_COLOUR[TRACK_INSTRUMENT_1] : Black);
                 active.set(MoveRow3, perfInst2Enabled ? TRACK_ROW_COLOUR[TRACK_INSTRUMENT_2] : Black);
@@ -9509,7 +9551,10 @@ function handlePerformanceInput(cc, value) {
             }
         }
         needsRedraw = true;
+    } else if (cc === MoveRec && value > 0) {
+        perfToggleRecording();
     } else if (cc === MoveBack && value > 0) {
+        perfStopRecording();
         perfStop();
         flushKnobSave();
         menuStack.pop();
@@ -13123,6 +13168,7 @@ function pollLibraryRescan() {
 
 globalThis.onUnload = function onUnload() {
     closeChainView();
+    perfStopRecording();
     flushKnobSave();
     stopPlayback();
     clearAllLEDs();
