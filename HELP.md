@@ -70,15 +70,14 @@ Choose the MIDI folder a new song is built from, or change the current song's so
 ### Edit Song
 
 Build and arrange a song from Groove/Fill clips. A song has four tracks — Drum,
-Chord, and two Instrument tracks — selected with the four **Track** buttons
-above the pads:
+Chord, and two Instrument tracks — selected with the **Track** buttons above
+the pads:
 
 | Track button | Track | LED colour |
 |---------------|-------|------------|
-| Track 1 | Drum | White |
-| Track 2 | Chord | Azure Blue |
-| Track 3 | Instrument 1 | Bright Yellow |
-| Track 4 | Instrument 2 | Purple |
+| Track 1 | Drum, or Chord — press again to switch between them | White (Drum) / Azure Blue (Chord) |
+| Track 2 | Instrument 1 | Bright Yellow |
+| Track 3 | Instrument 2 | Purple |
 
 The lit Track button shows which track is showing. See **Chord Track** and
 **Instrument Track** below for the other three — this section covers the Drum
@@ -132,7 +131,7 @@ the song's key (set in Song Settings) and drive any Instrument track set to
 The display shows the section, the chord currently sounding, the next chord
 change and its bar, and the current bar position.
 
-**Button LED hints:** Track 2 is lit azure blue.
+**Button LED hints:** Track 1 is lit azure blue.
 
 ---
 
@@ -177,7 +176,7 @@ The display shows the section, the chord currently sounding, whether this bar
 sends or mutes the instrument, the song key, and the instrument's MIDI output
 channel (set in Options).
 
-**Button LED hints:** Track 3 (Instrument 1) is lit bright yellow; Track 4
+**Button LED hints:** Track 2 (Instrument 1) is lit bright yellow; Track 3
 (Instrument 2) is lit purple.
 
 ---
@@ -373,7 +372,7 @@ Play through a setlist.
 | Pad press (other song / click pad) | Select that song; Play will start from there |
 | Up / Down | Scroll the pad window up / down one row |
 | Jog wheel | Scroll the info display |
-| Track 1 / 3 / 4 | Turn Drums / Inst 1 / Inst 2 on or off (kept when Play is pressed) |
+| Track 1 / 2 / 3 | Turn Drums / Inst 1 / Inst 2 on or off (kept until you leave Perform) |
 | Knobs 1–8 | Change the Schwung parameter mapped to that knob — see **Performance Knobs** |
 | Touch a knob | Show what it controls (chain or Master FX, component, module) and its value |
 | Play | Start playback from the current / selected song or section |
@@ -387,7 +386,7 @@ Play through a setlist.
 | Pad press again (same section) | Escalate the jump to the end of the current bar |
 | Pad press (other song / click pad) | Queue a jump to that song at the next section boundary |
 | Up / Down | Scroll the pad window up / down one row |
-| Track 1 / 3 / 4 | Turn Drums / Inst 1 / Inst 2 on or off immediately |
+| Track 1 / 2 / 3 | Turn Drums / Inst 1 / Inst 2 on or off immediately |
 | Knobs 1–8 | Change the Schwung parameter mapped to that knob |
 | Play | Stop playback |
 | Back | Stop playback and return to Root Menu |
@@ -396,7 +395,7 @@ The pad window shows 4 rows of sections at a time. When playback reaches the thi
 
 The Track buttons are live mutes, not saved to the song. Each song starts with its own instrument settings (drums always on) when you switch to it; a mute set while stopped stays in place when you press Play.
 
-**Button LED hints:** Back, Up, Down and Play are lit; Play is green when stopped and red while playing. Track 1, 3 and 4 are lit in their track colour while that part is on, and off while it is muted.
+**Button LED hints:** Back, Up, Down and Play are lit; Play is white when stopped and green while playing. Track 1, 2 and 3 are lit in their track colour while that part is on, and off while it is muted.
 
 ---
 
@@ -482,7 +481,7 @@ Choose which folder of clips to jam with. The folder's name (BPM / time signatur
 
 Layer a groove with fills on the fly. Left 4 columns of pads are grooves; right 4 columns are fills (filtered by the current groove's part type).
 
-Press Track 3 or Track 4 to turn on Inst 1 or Inst 2 and play chords over the groove. While either instrument is on, the two left columns become chord pads and the grooves and fills shrink to 3 columns each. See **Jam Chord Pads** below.
+Press Track 2 or Track 3 to turn on Inst 1 or Inst 2 and play chords over the groove. While either instrument is on, the two left columns become chord pads and the grooves and fills shrink to 3 columns each. See **Jam Chord Pads** below.
 
 #### While stopped
 
@@ -496,8 +495,8 @@ Press Track 3 or Track 4 to turn on Inst 1 or Inst 2 and play chords over the gr
 | Hold a chord pad | Show the chord's name and degree in the overlay (doesn't select it) |
 | Jog wheel | Adjust the BPM in realtime |
 | Shift + Jog wheel | Change the key of the chord pads |
-| Track 1 / 3 / 4 | Turn Drums / Inst 1 / Inst 2 on or off |
-| Shift + Track 3 / 4 | Open the settings for Inst 1 / Inst 2 |
+| Track 1 / 2 / 3 | Turn Drums / Inst 1 / Inst 2 on or off |
+| Shift + Track 2 / 3 | Open the settings for Inst 1 / Inst 2 |
 | Play | Stop (if a preview is playing) |
 | Back | Return to the Jam Folder picker |
 
@@ -515,8 +514,8 @@ Press Track 3 or Track 4 to turn on Inst 1 or Inst 2 and play chords over the gr
 | Left / Right | Scroll the fill pads up / down |
 | Jog wheel | Change the BPM in realtime |
 | Shift + Jog wheel | Change the key of the chord pads |
-| Track 1 / 3 / 4 | Turn Drums / Inst 1 / Inst 2 on or off immediately |
-| Shift + Track 3 / 4 | Open the settings for Inst 1 / Inst 2 |
+| Track 1 / 2 / 3 | Turn Drums / Inst 1 / Inst 2 on or off immediately |
+| Shift + Track 2 / 3 | Open the settings for Inst 1 / Inst 2 |
 | Play | Stop playback |
 | Back | Stop and return to the Jam Folder picker |
 
@@ -524,11 +523,11 @@ While a fill plays, the groove it will return to is shown in green; once the ret
 
 Step LEDs show the current clip's bar layout, flashing white-to-black on the current bar as it plays. Fills overlay the groove's bars where they fall.
 
-**Button LED hints:** Back, Up, Down, Left and Right are lit; Play is red while playing. Track 1, 3 and 4 are lit in their track colour while that part is on.
+**Button LED hints:** Back, Up, Down, Left and Right are lit; Play is green while playing. Track 1, 2 and 3 are lit in their track colour while that part is on.
 
 #### Jam Chord Pads
 
-Turn on Inst 1 or Inst 2 with Track 3 or Track 4 to show the chord pads. The two left columns hold the 8 chords of the current key, starting at the bottom-left pad and going up each column: I, ii, iii, IV (column 1), then V, vi, vii° and the root chord an octave up (column 2). Shift + Jog wheel changes the key. Changing the key moves the current chord into the new key once you release Shift, taking effect at the start of the next bar (or when you press Play, if stopped); its pad shows red until then.
+Turn on Inst 1 or Inst 2 with Track 2 or Track 3 to show the chord pads. The two left columns hold the 8 chords of the current key, starting at the bottom-left pad and going up each column: I, ii, iii, IV (column 1), then V, vi, vii° and the root chord an octave up (column 2). Shift + Jog wheel changes the key. Changing the key moves the current chord into the new key once you release Shift, taking effect at the start of the next bar (or when you press Play, if stopped); its pad shows red until then.
 
 Both instruments play the same chosen chord.
 
@@ -541,7 +540,7 @@ With chord pads showing, an extra line at the bottom of the display shows the ke
 
 #### Jam Instrument Settings
 
-Hold Shift and press Track 3 or Track 4 to open that instrument's settings. Changes take effect immediately while playing and are not saved.
+Hold Shift and press Track 2 or Track 3 to open that instrument's settings. Changes take effect immediately while playing and are not saved.
 
 | Control | Action |
 |---------|--------|

@@ -154,7 +154,9 @@ const TRACK_INSTRUMENT_2 = 3;
 
 /* Move Row button CC and colour per track, indexed by TRACK_DRUM/CHORD/
  * INSTRUMENT_1/2, so the Row buttons show which track is selected. */
-const TRACK_ROW_CC = [MoveRow1, MoveRow2, MoveRow3, MoveRow4];
+/* Track button per builder track: Track 1 holds both Drum and Chord (it
+ * toggles between them), Track 2 = Inst 1, Track 3 = Inst 2. */
+const TRACK_ROW_CC = [MoveRow1, MoveRow1, MoveRow2, MoveRow3];
 const TRACK_ROW_COLOUR = [White, AzureBlue, BrightYellow, Purple];
 
 /* The 12 major keys, in chromatic order. Each entry is the tonic note name. */
@@ -4535,14 +4537,15 @@ function updateButtonLEDs() {
                  * an available-but-unset bar on the chord/instrument steps.
                  * A selected Instrument track that's currently disabled shows
                  * its very-dark partner instead of the full colour. */
-                for (let t = 0; t < TRACK_ROW_CC.length; t++) {
-                    let rowColour = DarkGrey;
-                    if (t === builderTrack) {
-                        rowColour = TRACK_ROW_COLOUR[t];
-                        if (t === TRACK_INSTRUMENT_1 || t === TRACK_INSTRUMENT_2) {
-                            const trackInst = instrumentForTrack(t);
-                            if (trackInst && !trackInst.enabled) rowColour = veryDarkPartner(rowColour);
-                        }
+                active.set(MoveRow1, DarkGrey);
+                active.set(MoveRow2, DarkGrey);
+                active.set(MoveRow3, DarkGrey);
+                {
+                    const t = builderTrack;
+                    let rowColour = TRACK_ROW_COLOUR[t];
+                    if (t === TRACK_INSTRUMENT_1 || t === TRACK_INSTRUMENT_2) {
+                        const trackInst = instrumentForTrack(t);
+                        if (trackInst && !trackInst.enabled) rowColour = veryDarkPartner(rowColour);
                     }
                     active.set(TRACK_ROW_CC[t], rowColour);
                 }
@@ -4722,8 +4725,8 @@ function updateButtonLEDs() {
                 }
                 active.set(MovePlay, perfPlaying ? PureGreen : White);
                 active.set(MoveRow1, perfDrumEnabled ? TRACK_ROW_COLOUR[TRACK_DRUM] : Black);
-                active.set(MoveRow3, perfInst1Enabled ? TRACK_ROW_COLOUR[TRACK_INSTRUMENT_1] : Black);
-                active.set(MoveRow4, perfInst2Enabled ? TRACK_ROW_COLOUR[TRACK_INSTRUMENT_2] : Black);
+                active.set(MoveRow2, perfInst1Enabled ? TRACK_ROW_COLOUR[TRACK_INSTRUMENT_1] : Black);
+                active.set(MoveRow3, perfInst2Enabled ? TRACK_ROW_COLOUR[TRACK_INSTRUMENT_2] : Black);
                 break;
             case VIEW_JAM_FOLDER:
                 active.set(MoveBack, WhiteLedBright);
@@ -4743,8 +4746,8 @@ function updateButtonLEDs() {
                 }
                 active.set(MovePlay, jamPlaying ? PureGreen : Black);
                 active.set(MoveRow1, jamDrumEnabled ? TRACK_ROW_COLOUR[TRACK_DRUM] : Black);
-                active.set(MoveRow3, jamInst1Enabled ? TRACK_ROW_COLOUR[TRACK_INSTRUMENT_1] : Black);
-                active.set(MoveRow4, jamInst2Enabled ? TRACK_ROW_COLOUR[TRACK_INSTRUMENT_2] : Black);
+                active.set(MoveRow2, jamInst1Enabled ? TRACK_ROW_COLOUR[TRACK_INSTRUMENT_1] : Black);
+                active.set(MoveRow3, jamInst2Enabled ? TRACK_ROW_COLOUR[TRACK_INSTRUMENT_2] : Black);
                 break;
         }
     }
@@ -8494,32 +8497,16 @@ function handleFolderListInput(cc, value) {
 
 function handleBuilderInput(cc, value) {
     const locked = songIsLocked();
-    /* Move Row buttons switch the builder track. Row 1 = drum, Row 2 = chord,
-     * Row 3/4 = instrument tracks. */
-    if (cc === MoveRow1 && value > 0) {
-        builderTrack = TRACK_DRUM;
-        stepLedsDirty = true;
-        ledDirtyAll = true;
-        needsRedraw = true;
-        return;
-    }
-    if (cc === MoveRow2 && value > 0) {
-        builderTrack = TRACK_CHORD;
-        chordCursorBar = 0;
-        stepLedsDirty = true;
-        ledDirtyAll = true;
-        needsRedraw = true;
-        return;
-    }
-    if (cc === MoveRow3 && value > 0) {
-        builderTrack = TRACK_INSTRUMENT_1;
-        stepLedsDirty = true;
-        ledDirtyAll = true;
-        needsRedraw = true;
-        return;
-    }
-    if (cc === MoveRow4 && value > 0) {
-        builderTrack = TRACK_INSTRUMENT_2;
+    /* Track buttons: Track 1 toggles between the Drum and Chord tracks
+     * (from an instrument track it goes to Drum first), Track 2/3 select
+     * Inst 1/Inst 2. */
+    if ((cc === MoveRow1 || cc === MoveRow2 || cc === MoveRow3) && value > 0) {
+        if (cc === MoveRow1) {
+            builderTrack = (builderTrack === TRACK_DRUM) ? TRACK_CHORD : TRACK_DRUM;
+            if (builderTrack === TRACK_CHORD) chordCursorBar = 0;
+        } else {
+            builderTrack = (cc === MoveRow2) ? TRACK_INSTRUMENT_1 : TRACK_INSTRUMENT_2;
+        }
         stepLedsDirty = true;
         ledDirtyAll = true;
         needsRedraw = true;
@@ -9482,16 +9469,15 @@ function handlePerformanceInput(cc, value) {
             logDebug("PERFPLAY start selectedSection=" + perfSelectedSection + " selectedSong=" + perfSelectedSong + " songIndex=" + perfSongIndex);
             perfStart();
         }
-    } else if ((cc === MoveRow1 || cc === MoveRow3 || cc === MoveRow4) && value > 0) {
-        /* Live mute toggle for drums/Inst 1/Inst 2, same track-button
-         * mapping as Song Builder (Row1=drums, Row3=Inst1, Row4=Inst2; Row2
-         * reserved/unused here too). */
+    } else if ((cc === MoveRow1 || cc === MoveRow2 || cc === MoveRow3) && value > 0) {
+        /* Live mute toggle for drums/Inst 1/Inst 2 (Track 1/2/3, same as
+         * Song Builder's track buttons). */
         if (cc === MoveRow1) {
             perfDrumEnabled = !perfDrumEnabled;
             if (typeof host_module_set_param === "function") {
                 host_module_set_param("drum_enabled", perfDrumEnabled ? "1" : "0");
             }
-        } else if (cc === MoveRow3) {
+        } else if (cc === MoveRow2) {
             perfInst1Enabled = !perfInst1Enabled;
             if (typeof host_module_set_param === "function") {
                 host_module_set_param("inst1_enabled", perfInst1Enabled ? "1" : "0");
@@ -10565,23 +10551,22 @@ function handleJamInput(cc, value) {
             stepLedsDirty = true;
             ledDirtyAll = true;
         }
-    } else if (shiftHeld && (cc === MoveRow3 || cc === MoveRow4) && value > 0) {
-        /* Shift+Row3/Row4: open the live Octave/Follow Note/Voicing/
+    } else if (shiftHeld && (cc === MoveRow2 || cc === MoveRow3) && value > 0) {
+        /* Shift+Track 2/3: open the live Octave/Follow Note/Voicing/
          * Inversion/Note Gap menu for that Jam instrument, instead of
-         * toggling its mute. */
-        openJamInstrumentMenu(cc === MoveRow3 ? 0 : 1);
-    } else if ((cc === MoveRow1 || cc === MoveRow3 || cc === MoveRow4) && value > 0) {
-        /* Live mute toggle for drums/Inst 1/Inst 2 -- same track-button
-         * mapping as Song Builder (Row1=drums, Row3=Inst1, Row4=Inst2; Row2
-         * is reserved/unused here, same as in Perform). Toggling an
-         * instrument also flips the chord-pad grid layout on/off -- see
-         * jamChordModeActive/drawJamLEDs/handleJamPad. */
+         * toggling it. */
+        openJamInstrumentMenu(cc === MoveRow2 ? 0 : 1);
+    } else if ((cc === MoveRow1 || cc === MoveRow2 || cc === MoveRow3) && value > 0) {
+        /* Drums/Inst 1/Inst 2 on/off (Track 1/2/3, same as Song Builder's
+         * track buttons). Toggling an instrument also flips the chord-pad
+         * grid layout on/off -- see jamChordModeActive/drawJamLEDs/
+         * handleJamPad. */
         if (cc === MoveRow1) {
             jamDrumEnabled = !jamDrumEnabled;
             if (typeof host_module_set_param === "function") {
                 host_module_set_param("drum_enabled", jamDrumEnabled ? "1" : "0");
             }
-        } else if (cc === MoveRow3) {
+        } else if (cc === MoveRow2) {
             jamInst1Enabled = !jamInst1Enabled;
             if (typeof host_module_set_param === "function") {
                 host_module_set_param("jam_inst1_enabled", jamInst1Enabled ? "1" : "0");
