@@ -9552,7 +9552,7 @@ function enterPerformanceSetlist(obj) {
      * LEDs reflect real section data before Play is pressed. */
     const firstPlayable = perfNextPlayable(0);
     if (firstPlayable >= 0) {
-        perfLoadSong(firstPlayable);
+        perfLoadSong(firstPlayable, true); /* entering Perform: fresh mutes */
     }
     perfSongSections = buildPerfLayout();
     currentView = VIEW_PERFORMANCE;
@@ -11477,7 +11477,7 @@ function buildPerfLayout() {
 
 /* Load the given setlist song index (0-based) into the builder state and send
  * it to the DSP as a one-shot timeline. */
-function perfLoadSong(index, preserveToggles) {
+function perfLoadSong(index, resetToggles) {
     if (!currentSetlist) return false;
     if (index < 0 || index >= currentSetlist.songs.length) return false;
     const entry = currentSetlist.songs[index];
@@ -11488,21 +11488,16 @@ function perfLoadSong(index, preserveToggles) {
     perfFullSong = JSON.parse(JSON.stringify(currentSong));
     perfFullSongLoaded = false; /* DSP gets it on the next playCurrentSong */
     /* Live mute toggles are a per-session performance control, not a saved
-     * preference -- reset to match THIS song's own authored instrument
-     * enabled flags (drums always on; an instrument slot the song never
-     * configured defaults to off, same as instrumentForTrack's own default)
-     * whenever the user actually switches to a DIFFERENT song, so an
-     * unrelated song's mute state doesn't carry over. preserveToggles skips
-     * that reset -- used by callers that reload the SAME already-selected
-     * song purely to guarantee fresh internal state (e.g. perfStart, right
-     * before playback begins) -- a real bug found live: without this,
-     * pressing Play after muting Inst 1/2 while stopped silently turned
-     * them back on, because perfStart's own "always reload before playing"
-     * reload was indistinguishable from a genuine song switch. The current
-     * values are still (re-)pushed either way, because drum_enabled is
-     * engine-level (not part of the song JSON) and wouldn't otherwise be
-     * cleared/restored by the upcoming song_json rebuild alone. */
-    if (!preserveToggles) {
+     * preference: they're set to this song's own authored instrument enabled
+     * flags (drums always on; an instrument slot the song never configured
+     * defaults to off) only when Perform is entered (resetToggles), and
+     * otherwise kept as the user left them -- across stops, song changes,
+     * auto-advance and the end of the setlist. Found live: resetting on every
+     * song load reverted the user's mutes whenever playback stopped at the
+     * end of the setlist (which reloads the first song) or moved on to
+     * another song. The current values are (re-)pushed either way, because
+     * drum_enabled is engine-level (not part of the song JSON). */
+    if (resetToggles) {
         perfDrumEnabled = true;
         perfInst1Enabled = !!(perfFullSong.instruments && perfFullSong.instruments[0] && perfFullSong.instruments[0].enabled);
         perfInst2Enabled = !!(perfFullSong.instruments && perfFullSong.instruments[1] && perfFullSong.instruments[1].enabled);
@@ -11682,18 +11677,24 @@ function perfStart() {
     stopPlayback();
     /* Always reload the full song from the setlist before starting. A previous
      * queued section jump may have left `currentSong` as a sliced one-shot, and
-     * reusing it would play from the wrong section or fail with zero events.
-     * preserveToggles=true: this is the SAME song the user was already on
-     * while stopped, not a switch to a different one, so any mute toggles
-     * set while stopped must survive into playback -- see perfLoadSong. */
+     * reusing it would play from the wrong section or fail with zero events. */
     if (perfSongIndex < 0 || perfSongIndex >= currentSetlist.songs.length) {
         const start = perfNextPlayable(0);
         if (start < 0) return; /* no playable songs in the setlist */
         perfSongIndex = start;
     }
-    if (!perfLoadSong(perfSongIndex, true)) return;
+    if (!perfLoadSong(perfSongIndex)) return;
     perfSongSections = buildPerfLayout();
     perfPlaying = true;
+    /* Don't trust the DSP's stopped_at_end until this playback has been seen
+     * running -- see perfObservedRunningSincePlay. perfPlayCurrent arms this
+     * too, but starting from a selected section goes through
+     * perfFireSectionJump instead, which didn't. Found live: after the
+     * setlist finished, the last song's stale stopped_at_end fired an
+     * immediate "advance" -- selecting a section in the first song started
+     * the second song from the top, and selecting one in the second song
+     * reset the display to the first while the section played. */
+    perfObservedRunningSincePlay = false;
     perfQueuedSection = -1;
     perfQueuedSectionPresses = 0;
     perfQueuedSongIndex = -1;
@@ -12015,8 +12016,7 @@ function perfTick() {
         if (Date.now() - perfClickStartMs >= perfClickTotalMs) {
             logDebug("perfTick: pad-flash click ended, starting song");
             perfClickPlaying = false;
-            /* preserveToggles=true: same song, mid count-in -- see perfStart. */
-            if (perfLoadSong(perfSongIndex, true)) {
+            if (perfLoadSong(perfSongIndex)) {
                 perfObservedRunningSincePlay = false; /* see its declaration */
                 playCurrentSong();
             }
@@ -12070,9 +12070,8 @@ function perfTick() {
             perfClickPlaying = false;
             perfClickMute = false;
             if (!perfClickSongStaged) {
-                /* Staging wasn't ready: blocking rebuild (rare fallback).
-                 * preserveToggles=true: same song, mid count-in -- see perfStart. */
-                if (perfLoadSong(perfSongIndex, true)) {
+                /* Staging wasn't ready: blocking rebuild (rare fallback). */
+                if (perfLoadSong(perfSongIndex)) {
                     perfObservedRunningSincePlay = false; /* see its declaration */
                     playCurrentSong();
                     perfFullSongLoaded = true;
