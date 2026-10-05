@@ -1551,7 +1551,7 @@ let trimOriginalChannel = 0;
 let trimClip = null;
 /* Scroller for the read-only source-folder line at the top of the trim view,
  * so long folder paths marquee instead of being hard-truncated. */
-let trimSrcScroller = createTextScroller({ scrollInterval: 8, delayFrames: 12 });
+let trimSrcScroller = createUniformScroller();
 
 let songSettingsFocus = 0;
 let songSettingsPendingBpm = 120;
@@ -1896,12 +1896,12 @@ let jamChordHoldTime = 0;
 let jamChordHoldShown = false;
 
 /* Dedicated marquee scroller for the Jam header (folder name). */
-const jamHeaderScroller = createTextScroller();
+const jamHeaderScroller = createUniformScroller();
 
 /* Dedicated marquee scrollers for the four performance info lines (Now / Sec /
  * NSec / Next). Kept separate from the shared menu/header scrollers so long
  * song and section names scroll in place without fighting other scrollers. */
-const perfLineScrollers = [0, 1, 2, 3].map(() => createTextScroller());
+const perfLineScrollers = [0, 1, 2, 3].map(() => createUniformScroller());
 
 const PAD_PREVIEW_DELAY_MS = 250; /* delay before pad tap triggers insert preview */
 
@@ -1917,6 +1917,27 @@ const SCROLLABLE_MENU_VIEWS = new Set([
 ]);
 const MENU_SCROLL_TICK_MS = 30; /* ~25fps redraw for marquee animation (halves the ~2s scroll-start delay) */
 let lastMenuScrollTick = 0;
+
+/* All of Arranger's marquee scrollers run at one speed: the shared menu
+ * list's own settings (the text_scroll defaults), stepped at most once per
+ * scroll beat -- the MENU_SCROLL_TICK_MS cadence that also redraws the
+ * scrolling menu screens, which is what paces the shared list. They used to
+ * differ: some had slower settings, and all stepped once per redraw, so a
+ * screen redrawn every tick (Perform, Jam) scrolled faster than a menu. */
+let scrollBeat = 0;
+let lastScrollBeatMs = 0;
+
+function createUniformScroller() {
+    const sc = createTextScroller();
+    let lastBeat = -1;
+    return Object.assign({}, sc, {
+        tick() {
+            if (lastBeat === scrollBeat) return false;
+            lastBeat = scrollBeat;
+            return sc.tick();
+        }
+    });
+}
 let lastLedQueueSampleTick = 0;    /* throttle for the LED-queue backlog diagnostic */
 let lastLedQueueSampleLen = -1;    /* previous sampled ledQueue.size, to log the growth rate */
 /* Per-mechanism push accumulators for the same diagnostic -- reset each time
@@ -6351,10 +6372,7 @@ function scrollHeader(title, maxChars) {
     if (!title) return "";
     let sc = headerScrollers.get(title);
     if (!sc) {
-        /* Slower scroll: 8 frames between steps (vs the default 2) so long
-         * names glide rather than zip past. Short delay so names start
-         * scrolling quickly instead of sitting truncated for ~2s. */
-        sc = createTextScroller({ scrollInterval: 8, delayFrames: 12 });
+        sc = createUniformScroller();
         headerScrollers.set(title, sc);
     }
     sc.setSelected(title);
@@ -12863,6 +12881,13 @@ function drawPopup() {
 
 globalThis.tick = function() {
     tickPopup();
+    {
+        const nowMs = Date.now();
+        if (nowMs - lastScrollBeatMs >= MENU_SCROLL_TICK_MS) {
+            lastScrollBeatMs = nowMs;
+            scrollBeat++;
+        }
+    }
     /* Chain view first: follow the co-run session's real state, then let any
      * held Track/Menu fire -- in that order, so an overlay requested by a hold
      * is opened on the NEXT tick, after shadow_ui has primed the session (see
