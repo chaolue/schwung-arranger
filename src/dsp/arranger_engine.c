@@ -783,6 +783,9 @@ typedef struct engine {
     /* Drum notes currently sounding, per route and channel (0/1) -- see
      * emit_drum_notes_release. */
     uint8_t drum_notes_on[3][16][128];
+    /* Channels (bit per channel) each route played a note on since the last
+     * stop -- where emit_notes_off_cc sends All Notes Off. */
+    uint16_t notes_ch_used[3];
 
     /* Channel override of the most recently drained event, used by
      * emit_direct_event when a per-clip channel (e.g. a dedicated click
@@ -1044,7 +1047,10 @@ static void emit_direct_event(engine_t *e, uint8_t status, uint8_t d1, uint8_t d
      * actually went out on -- see emit_drum_notes_release. */
     {
         int t = (e->output_target >= 0 && e->output_target <= 2) ? e->output_target : 0;
-        if (high == 0x90 && d2 > 0) e->drum_notes_on[t][ch][d1 & 0x7F] = 1;
+        if (high == 0x90 && d2 > 0) {
+            e->drum_notes_on[t][ch][d1 & 0x7F] = 1;
+            e->notes_ch_used[t] |= (uint16_t)(1u << ch);
+        }
         else if (high == 0x80 || high == 0x90) e->drum_notes_on[t][ch][d1 & 0x7F] = 0;
     }
     int sent = 0;
@@ -1112,17 +1118,25 @@ static int emit_drum_notes_release(engine_t *e) {
 static void emit_all_notes_off(engine_t *e) {
     int drums = emit_drum_notes_release(e);
     if (drums) dsp_log_enqueue_worker("STOP released %d drum note(s)", drums);
-    /* A clip may use a per-clip channel override (e.g. the count-in click on
-     * a dedicated channel). Sending CC 123 only on the primary output_channel
-     * leaves stale notes sounding on those override channels, so the next
-     * play can start with a note already on and sound like a blip/partial
-     * note. Send CC 123 on every MIDI channel to be safe. */
-    for (int ch = 0; ch < 16; ch++) {
-        if (e->emit_directly) {
-            emit_direct_event(e, 0xB0 | ch, 123, 0, 3);
-        } else {
-            queue_push(e, 0xB0 | ch, 123, 0, 3);
-        }
+    /* Emitting directly, All Notes Off goes out after every note-off, from
+     * emit_notes_off_cc. Queued output still gets it here. */
+    if (e->emit_directly) return;
+    for (int ch = 0; ch < 16; ch++) queue_push(e, 0xB0 | ch, 123, 0, 3);
+}
+
+/* All Notes Off (CC 123) on every route and channel a note played on since
+ * the last stop -- drums, instruments and click alike -- sent after their
+ * explicit note-offs as a backstop. This used to go through
+ * emit_direct_event, which ignores the channel it is given, so all 16 copies
+ * landed on the drum channel and an instrument channel never got one --
+ * seen in a USB capture of Stop. */
+static void emit_notes_off_cc(engine_t *e) {
+    for (int t = 0; t < 3; t++) {
+        uint16_t used = e->notes_ch_used[t];
+        e->notes_ch_used[t] = 0;
+        if (!e->emit_directly) continue;
+        for (int c = 0; c < 16; c++)
+            if (used & (1u << c)) send_instrument_raw(t, (uint8_t)c, 0xB0, 123, 0);
     }
 }
 
@@ -2271,6 +2285,7 @@ static void emit_instrument_event(engine_t *e, const inst_voice_t *inst,
      * note-off left behind -- see emit_instrument_notes_release. */
     if (high == 0x90 && vel > 0) {
         if (e->inst_notes_on[target][ch][n] < 255) e->inst_notes_on[target][ch][n]++;
+        e->notes_ch_used[target] |= (uint16_t)(1u << ch);
     } else if (high == 0x80 || high == 0x90) {
         if (e->inst_notes_on[target][ch][n] > 0) e->inst_notes_on[target][ch][n]--;
     }
@@ -4738,6 +4753,7 @@ static void handle_loop_or_stop(engine_t *e, uint32_t *target) {
                 emit_instruments_all_off(e);
                 emit_jam_instruments_all_off(e);
                 emit_instrument_notes_release(e);
+                emit_notes_off_cc(e);
                 if (e->playhead_tick > e->live_slot.end_tick) e->playhead_tick = e->live_slot.end_tick;
             }
         }
@@ -5005,7 +5021,7 @@ static void engine_clear_error(engine_t *e) {
 
 /* DSP build version stamp. Keep in sync with UI_BUILD_VERSION in ui.js so the
  * running dsp.so can be confirmed from .dsp_log on module load. */
-static const char *const DSP_BUILD_VERSION = "arranger-dsp-2026-10-05-stoplog";
+static const char *const DSP_BUILD_VERSION = "arranger-dsp-2026-10-05-cc123";
 
 static void* arr_create_instance(const char *module_dir, const char *config_json) {
     (void)module_dir;
@@ -5745,6 +5761,7 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
         emit_instruments_all_off(e);
         emit_jam_instruments_all_off(e);
         emit_instrument_notes_release(e);
+        emit_notes_off_cc(e);
         /* Discard any not-yet-promoted Jam chord pick -- it was queued for
          * a future bar boundary that will now never arrive, so resuming it
          * later (see "play"'s apply_pending_jam_chord call) would be
