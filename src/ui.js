@@ -8,7 +8,7 @@
  * confirmed from the logs (see init()/playCurrentSong()) instead of guessing
  * whether a new file actually loaded. Keep the DSP dsp_build_version in
  * arranger_engine.c in sync so both sides are verifiable. */
-const UI_BUILD_VERSION = "arranger-ui-2026-10-05-bassorder";
+const UI_BUILD_VERSION = "arranger-ui-2026-10-05-chordjog";
 
 /* Lit white buttons at full brightness (127). Schwung's WhiteLedBright is 124. */
 const WhiteLedFull = 127;
@@ -6305,8 +6305,10 @@ function drawChordStepLEDs(force) {
         if (inst) {
             /* A disabled instrument track shows every bar dimmed — none of
              * it is actually sounding right now, regardless of per-bar
-             * chord/mute state. */
-            if (!chord || chord.none) {
+             * chord/mute state. The jog cursor's bar shows white. */
+            if (barIndex === chordCursorBar) {
+                stepColor(s, White, force);
+            } else if (!chord || chord.none) {
                 stepColor(s, DarkGrey, force);
             } else if (inst.enabled && instrumentBarOn(inst, secIndex, barIndex)) {
                 stepColor(s, trackColour, force);
@@ -6610,6 +6612,63 @@ function drawInstrumentTrack() {
     print(2, LIST_TOP_Y + 18, "Bar " + (chordCursorBar + 1) + "/" + totalBars + "  " + (on ? "Send" : "Mute"), 1);
     print(2, LIST_TOP_Y + 27, "Key " + key + "  Ch " + channel, 1);
     drawOverlay();
+}
+
+/* Bars of the displayed section the jog wheel stops at on the chord or an
+ * instrument track: ones with a chord (or No Chord); on an instrument track
+ * also ones with their own per-bar settings or muted. */
+function chordTrackContentBars(sec, secIndex) {
+    const total = sectionChordBars(sec);
+    const inst = (builderTrack === TRACK_INSTRUMENT_1 || builderTrack === TRACK_INSTRUMENT_2)
+        ? instrumentForTrack(builderTrack) : null;
+    const out = [];
+    for (let b = 0; b < total; b++) {
+        if (chordAtBar(sec, b) ||
+            (inst && (instrumentBarOverride(inst, secIndex, b) || !instrumentBarOn(inst, secIndex, b)))) out.push(b);
+    }
+    return out;
+}
+
+/* Jog on the chord/instrument tracks: move the bar cursor to the next (or
+ * previous) bar with something in it -- or bar by bar when nothing is set
+ * yet -- keeping it in the step window. */
+function jogChordCursor(delta) {
+    const secIndex = chordDisplaySectionIndex();
+    const sec = currentSong ? currentSong.sections[secIndex] : null;
+    if (!sec || delta === 0) return;
+    const total = sectionChordBars(sec);
+    const bars = chordTrackContentBars(sec, secIndex);
+    let bar = Math.max(0, Math.min(total - 1, chordCursorBar));
+    for (let n = Math.abs(delta); n > 0; n--) {
+        if (bars.length === 0) {
+            bar = Math.max(0, Math.min(total - 1, bar + Math.sign(delta)));
+        } else if (delta > 0) {
+            const next = bars.find(b => b > bar);
+            if (next === undefined) break;
+            bar = next;
+        } else {
+            const prev = bars.filter(b => b < bar).pop();
+            if (prev === undefined) break;
+            bar = prev;
+        }
+    }
+    chordCursorBar = bar;
+    if (bar < stepScrollOffset) stepScrollOffset = bar;
+    else if (bar >= stepScrollOffset + NUM_STEPS) stepScrollOffset = bar - NUM_STEPS + 1;
+    stepLedsDirty = true;
+    needsRedraw = true;
+}
+
+/* Jog click on the chord/instrument tracks: edit the bar under the cursor --
+ * the chord picker, or the instrument's per-bar menu. */
+function openChordCursorEditor() {
+    const secIndex = chordDisplaySectionIndex();
+    const sec = currentSong ? currentSong.sections[secIndex] : null;
+    if (!sec) return;
+    const bar = Math.max(0, Math.min(sectionChordBars(sec) - 1, chordCursorBar));
+    chordCursorBar = bar;
+    if (builderTrack === TRACK_CHORD) openChordPick(bar);
+    else openInstrumentBarMenu(builderTrack, secIndex, bar);
 }
 
 /* Handle a step-button press while in the chord or instrument track. The step
@@ -8779,6 +8838,9 @@ function handleBuilderInput(cc, value) {
             } else {
                 changeBuilderPage(delta);
             }
+        } else if (builderTrack !== TRACK_DRUM) {
+            /* Chord/instrument tracks: step between bars with something set. */
+            jogChordCursor(delta);
         } else {
             moveCursor(delta);
         }
@@ -8793,6 +8855,11 @@ function handleBuilderInput(cc, value) {
     } else if (cc === MoveMainButton && value > 0) {
         if (shiftHeld) {
             openSongSettings();
+            return;
+        }
+        if (builderTrack !== TRACK_DRUM) {
+            /* Chord/instrument tracks: edit the bar under the jog cursor. */
+            openChordCursorEditor();
             return;
         }
         /* Use the displayed section (the auto-followed/jumped one during
@@ -12912,7 +12979,9 @@ function footerHints() {
                 return [["PAD", "ADD"], ["T1", "CHORD"], ["CLK", "TRIM"]];
             }
             if (shiftHeld) return [["PLAY", "SONG"], ["BACK", "OUT"]];
-            return [["STEP", "BAR"], ["T1", "DRUM"], ["MENU", "SET"]];
+            /* The jog steps between bars with something set; the click
+             * edits the one under the cursor (as a step press does). */
+            return [["CLK", "EDIT"], ["T1", "DRUM"], ["MENU", "SET"]];
         case VIEW_PERFORMANCE:
             /* The knob feedback panel covers the footer rows while it shows. */
             if (perfKnobFeedbackVisible()) return null;
