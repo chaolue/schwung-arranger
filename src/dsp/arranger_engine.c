@@ -2688,14 +2688,17 @@ static void emit_instruments_at_tick(engine_t *e, uint32_t tick) {
              * a bar that's merely holding a carried-forward chord does not
              * retrigger. */
             if (!chord_unchanged || chord_explicit_here) {
-                if (chord_unchanged) {
-                    /* Same chord, but a fresh explicit attack: cut the
-                     * still-sounding note off first so this is a clean
-                     * retrigger rather than an unmatched overlapping
-                     * note-on (no off would otherwise be scheduled here --
-                     * the note-off scheduling below only fires ahead of an
-                     * upcoming chord CHANGE, not an explicit repeat). */
+                if (e->last_inst_chord_set[i]) {
+                    /* Release whatever is still sounding first. For a same-
+                     * chord explicit retrigger nothing else would (the
+                     * note-off scheduling below only fires ahead of a chord
+                     * CHANGE). For a change, its scheduled off normally fired
+                     * already -- but not after a seek (a Perform section
+                     * jump), where it was scheduled for the old position, so
+                     * the old chord was left hanging under the new one. */
                     emit_instrument_chord_off(e, &e->last_inst_resolved[i], &e->last_inst_chord[i]);
+                    e->last_inst_chord_set[i] = 0;
+                    e->pending_off_set[i] = 0;
                 }
                 emit_instrument_chord(e, &resolved, ch, 100);
                 e->last_inst_chord[i] = *ch;
@@ -4989,6 +4992,9 @@ static void advance_playhead(engine_t *e, int frames, int sample_rate) {
         /* Seek to the target: the start of a section, which need not be on
          * a whole bar. */
         (void)seek_bar;
+        /* Instrument notes sounding at the jump: release them, as their
+         * scheduled note-offs belong to the old position (see play_from_bar). */
+        emit_instruments_all_off(e);
         e->playhead_tick = e->pending_seek_target_tick;
         e->event_cursor = 0;
         while (e->event_cursor < e->live_slot.event_count &&
@@ -5148,7 +5154,7 @@ static void engine_clear_error(engine_t *e) {
 
 /* DSP build version stamp. Keep in sync with UI_BUILD_VERSION in ui.js so the
  * running dsp.so can be confirmed from .dsp_log on module load. */
-static const char *const DSP_BUILD_VERSION = "arranger-dsp-2026-10-05-partialbar";
+static const char *const DSP_BUILD_VERSION = "arranger-dsp-2026-10-05-seekrelease";
 
 static void* arr_create_instance(const char *module_dir, const char *config_json) {
     (void)module_dir;
@@ -5437,6 +5443,15 @@ static void play_from_top(engine_t *e) {
     e->tick_remainder = 0.0;
     e->last_bar = 0;
     e->last_bc_tick = 0;
+    /* Release what the instruments are sounding before forgetting it:
+
+     * from Perform this runs mid-play (a section jump), and wiping the
+
+     * bookkeeping without note-offs left those notes hanging until Stop.
+
+     * Found live on Inst 1. */
+
+    emit_instruments_all_off(e);
     for (int i = 0; i < MAX_INSTRUMENTS; i++) {
         e->last_inst_chord_set[i] = 0;
         e->pending_off_set[i] = 0;
@@ -5870,6 +5885,15 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
         e->tick_remainder = 0.0;
         e->last_bar = e->playhead_tick / e->ticks_per_bar;
         e->last_bc_tick = e->playhead_tick;
+        /* Release what the instruments are sounding before forgetting it:
+
+         * from Perform this runs mid-play (a section jump), and wiping the
+
+         * bookkeeping without note-offs left those notes hanging until Stop.
+
+         * Found live on Inst 1. */
+
+        emit_instruments_all_off(e);
         for (int i = 0; i < MAX_INSTRUMENTS; i++) {
             e->last_inst_chord_set[i] = 0;
             e->pending_off_set[i] = 0;
@@ -5922,6 +5946,7 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
         } else {
             bar = 0.0;
         }
+        emit_instruments_all_off(e); /* see play_from_bar */
         e->playhead_tick = (uint32_t)(bar * (double)e->ticks_per_bar + 0.5);
         e->event_cursor = 0;
         while (e->event_cursor < e->live_slot.event_count &&
