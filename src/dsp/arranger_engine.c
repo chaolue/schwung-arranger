@@ -768,6 +768,9 @@ typedef struct engine {
      * route (external/move/schwung) and channel -- see
      * emit_instrument_notes_release. */
     uint8_t inst_notes_on[3][16][128];
+    /* Drum notes currently sounding, per route and channel (0/1) -- see
+     * emit_drum_notes_release. */
+    uint8_t drum_notes_on[3][16][128];
 
     /* Channel override of the most recently drained event, used by
      * emit_direct_event when a per-clip channel (e.g. a dedicated click
@@ -1025,6 +1028,13 @@ static void emit_direct_event(engine_t *e, uint8_t status, uint8_t d1, uint8_t d
     if (override >= 0 && override <= 15) ch = (uint8_t)override;
 
     uint8_t msg[4] = { (cable << 4) | cin, high | ch, d1, d2 };
+    /* Note which drum notes are sounding, on the route and channel they
+     * actually went out on -- see emit_drum_notes_release. */
+    {
+        int t = (e->output_target >= 0 && e->output_target <= 2) ? e->output_target : 0;
+        if (high == 0x90 && d2 > 0) e->drum_notes_on[t][ch][d1 & 0x7F] = 1;
+        else if (high == 0x80 || high == 0x90) e->drum_notes_on[t][ch][d1 & 0x7F] = 0;
+    }
     int sent = 0;
     const char *route = "external";
     if (e->output_target == OUTPUT_TARGET_SCHWUNG) {
@@ -1065,7 +1075,31 @@ static int event_cmp(const void *a, const void *b) {
     return 0;
 }
 
+static void send_instrument_raw(int target, uint8_t ch, uint8_t high, uint8_t note, uint8_t vel);
+
+/* Send a note-off for every drum note still sounding, on the route and
+ * channel it went out on. All Notes Off (CC 123, below) alone wasn't enough:
+ * a Schwung chain synth needn't honour it, and emit_direct_event sends it on
+ * the drum channel only. A drum note stopped mid-sound never gets its own
+ * note-off (that comes later in the timeline), and with Drop Note-Offs on
+ * the offs are withheld on purpose -- found live: notes left sounding after
+ * pressing Play to stop in Perform. */
+static int emit_drum_notes_release(engine_t *e) {
+    int sent = 0;
+    for (int t = 0; t < 3; t++)
+        for (int c = 0; c < 16; c++)
+            for (int n = 0; n < 128; n++)
+                if (e->drum_notes_on[t][c][n]) {
+                    send_instrument_raw(t, (uint8_t)c, 0x80, (uint8_t)n, 0);
+                    e->drum_notes_on[t][c][n] = 0;
+                    sent++;
+                }
+    return sent;
+}
+
 static void emit_all_notes_off(engine_t *e) {
+    int drums = emit_drum_notes_release(e);
+    if (drums) dsp_log_enqueue_worker("STOP released %d drum note(s)", drums);
     /* A clip may use a per-clip channel override (e.g. the count-in click on
      * a dedicated channel). Sending CC 123 only on the primary output_channel
      * leaves stale notes sounding on those override channels, so the next
@@ -2324,14 +2358,19 @@ static void emit_instrument_chord_off(engine_t *e, const inst_voice_t *inst,
  * mid-note) would otherwise hang until the module closed. Instrument routes
  * don't get the drums' CC 123, and a Schwung chain synth needn't honour it. */
 static void emit_instrument_notes_release(engine_t *e) {
+    int sent = 0;
     for (int t = 0; t < 3; t++)
         for (int c = 0; c < 16; c++)
             for (int n = 0; n < 128; n++)
                 while (e->inst_notes_on[t][c][n] > 0) {
                     send_instrument_raw(t, (uint8_t)c, 0x80, (uint8_t)n, 0);
                     e->inst_notes_on[t][c][n]--;
+                    sent++;
                 }
     e->click_sounding = 0; /* released above along with everything else */
+    /* Logged so a note heard hanging after Stop can be checked against what
+     * the engine still thought was sounding. */
+    if (sent) dsp_log_enqueue_worker("STOP released %d instrument/click note(s)", sent);
 }
 
 /* Find the per-bar override entry for a section/bar, or NULL if that bar has
