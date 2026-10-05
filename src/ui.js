@@ -8,7 +8,7 @@
  * confirmed from the logs (see init()/playCurrentSong()) instead of guessing
  * whether a new file actually loaded. Keep the DSP dsp_build_version in
  * arranger_engine.c in sync so both sides are verifiable. */
-const UI_BUILD_VERSION = "arranger-ui-2026-10-05-multichord";
+const UI_BUILD_VERSION = "arranger-ui-2026-10-05-chordjog2";
 
 /* Lit white buttons at full brightness (127). Schwung's WhiteLedBright is 124. */
 const WhiteLedFull = 127;
@@ -9051,12 +9051,14 @@ function handleBuilderInput(cc, value) {
         return;
     }
     /* The Chord and Instrument tracks don't use the clip-editing controls
-     * (main knob/button, delete, copy, loop, page up/down) or Record
-     * (changing the source folder is a Drum-track concept) — only section
-     * navigation, the settings menu, and transport apply there. */
+     * (Shift+jog, delete, copy, loop, page up/down) or Record (changing the
+     * source folder is a Drum-track concept) — only section navigation, the
+     * jog cursor and its click (see jogChordCursor), the settings menu, and
+     * transport apply there. */
     if (builderTrack !== TRACK_DRUM) {
         const allowed = cc === MoveLeft || cc === MoveRight || cc === MoveMenu ||
-            cc === MoveBack || cc === MovePlay || cc === MoveShift;
+            cc === MoveBack || cc === MovePlay || cc === MoveShift ||
+            (!shiftHeld && (cc === MoveMainKnob || cc === MoveMainButton));
         if (!allowed) return;
     }
     if (cc === MoveMainKnob) {
