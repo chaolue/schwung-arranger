@@ -3915,7 +3915,11 @@ function showMissingClipOverlay() {
 
 function stopPlayback() {
     logTiming("STOP t=" + Date.now());
-    if (typeof host_module_set_param === "function") {
+    /* Blocking, so the next parameter write can't overwrite "stop" in the
+     * shared slot before the DSP has read it. */
+    if (typeof host_module_set_param_blocking === "function") {
+        host_module_set_param_blocking("stop", "1", 100);
+    } else if (typeof host_module_set_param === "function") {
         host_module_set_param("stop", "1");
     }
     playbackState = "stopped";
