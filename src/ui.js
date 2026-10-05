@@ -40,6 +40,10 @@ import {
 } from '/data/UserData/schwung/shared/overlay_card.mjs';
 
 import {
+    drawFooter
+} from '/data/UserData/schwung/shared/param_pages/render_page_movy.mjs';
+
+import {
     createTextScroller
 } from '/data/UserData/schwung/shared/text_scroll.mjs';
 
@@ -12769,6 +12773,76 @@ function tickPopup() {
     }
 }
 
+/* Button-hint footer: up to three [button, action] pairs for the screen's
+ * most important controls, drawn with Schwung's chain-editor footer
+ * (drawFooter: the button in a pill, BACK pinned right) in rows 56-63, below
+ * where every list and display stops. Shift swaps in the Shift actions. Each
+ * set is checked to fit the 128px bar -- drawFooter silently drops a pair
+ * that doesn't. */
+const footerCtx = {
+    fillRect: (x, y, w, h, c) => fill_rect(x, y, w, h, c),
+    print: (x, y, t, c) => print(x, y, t, c),
+    textWidth: (t) => (typeof text_width === "function") ? text_width(String(t)) : String(t).length * 6
+};
+
+const HINTS_LIST = [["JOG", "SEL"], ["CLK", "OPEN"], ["BACK", "OUT"]];
+
+/* Browse/edit menus: what the jog and click do depends on the mode. */
+function editMenuHints(editing) {
+    return editing
+        ? [["JOG", "ADJ"], ["CLK", "DONE"], ["BACK", "OUT"]]
+        : [["JOG", "SEL"], ["CLK", "EDIT"], ["BACK", "OUT"]];
+}
+
+function footerHints() {
+    const playing = playbackState === "playing";
+    switch (currentView) {
+        case VIEW_ROOT:
+            return [["JOG", "SEL"], ["CLK", "OPEN"], ["BACK", "EXIT"]];
+        case VIEW_SONG_BANK:
+        case VIEW_SETLIST_BANK:
+            return shiftHeld ? [["JOG", "SEL"], ["CLK", "NAME"], ["BACK", "OUT"]] : HINTS_LIST;
+        case VIEW_SONG_BACKUPS:
+            return [["JOG", "SEL"], ["CLK", "LOAD"], ["BACK", "OUT"]];
+        case VIEW_FOLDER_LIST: case VIEW_SETLIST_EDIT: case VIEW_SETLIST_PICK:
+        case VIEW_SECTION_PICK: case VIEW_PERF_SETLIST: case VIEW_JAM_FOLDER:
+        case VIEW_KNOB_MAP: case VIEW_KNOB_PICK:
+            return HINTS_LIST;
+        case VIEW_OPTIONS: return editMenuHints(optionsEditing);
+        case VIEW_OPTIONS_DRUMS: case VIEW_OPTIONS_INST: case VIEW_OPTIONS_CLICK:
+        case VIEW_OPTIONS_CHAINS:
+            return editMenuHints(optionsSubEditing);
+        case VIEW_SONG_SETTINGS: return editMenuHints(songSettingsEditing);
+        case VIEW_TRIM: return editMenuHints(trimEditing);
+        case VIEW_INSTRUMENT: return editMenuHints(instrumentEditing);
+        case VIEW_INSTRUMENT_BAR: return editMenuHints(instrumentBarEditing);
+        case VIEW_SETLIST_CLICK: return editMenuHints(clickSettingsEditing);
+        case VIEW_JAM_INSTRUMENT: return editMenuHints(jamInstrumentEditing);
+        case VIEW_BUILDER:
+            if (builderTrack === TRACK_DRUM) {
+                if (shiftHeld) return [["CLK", "SET"], ["PLAY", "SONG"], ["BACK", "OUT"]];
+                return [["PAD", "ADD"], ["PLAY", playing ? "STOP" : "CLIP"], ["BACK", "OUT"]];
+            }
+            if (shiftHeld) return [["PLAY", "SONG"], ["BACK", "OUT"]];
+            return [["STEP", "BAR"], ["MENU", "SET"], ["BACK", "OUT"]];
+        case VIEW_PERFORMANCE:
+            return [["PLAY", perfPlaying ? "STOP" : "PLAY"], ["REC", perfRecording ? "END" : "REC"], ["BACK", "OUT"]];
+        case VIEW_JAM:
+            if (shiftHeld) return [["JOG", "KEY"], ["TRK", "INST"], ["BACK", "OUT"]];
+            return jamPlaying
+                ? [["PAD", "CUE"], ["PLAY", "STOP"], ["BACK", "OUT"]]
+                : [["PAD", "PLAY"], ["TRK", "MUTE"], ["BACK", "OUT"]];
+        default:
+            /* The Chord Picker uses the footer rows for its chord line. */
+            return null;
+    }
+}
+
+function drawFooterHints() {
+    const hints = footerHints();
+    if (hints) drawFooter(footerCtx, hints);
+}
+
 function drawPopup() {
     if (!popupActive()) return;
     drawOverlayCard(null, { title: popupTitle, lines: popupLines });
@@ -13108,6 +13182,7 @@ globalThis.tick = function() {
                 case VIEW_JAM_INSTRUMENT: drawJamInstrumentMenu(); break;
             }
         }
+        if (!confirmState) drawFooterHints();
         drawPopup();
         needsRedraw = false;
     }
@@ -13227,6 +13302,7 @@ globalThis.onMidiMessageInternal = function(data) {
         if (cc === MoveShift) {
             shiftHeld = value > 0;
             if (!shiftHeld) jamApplyKeyChangeOnShiftRelease();
+            needsRedraw = true; /* the footer shows the Shift actions */
             return;
         }
         if (cc === MoveBack) {

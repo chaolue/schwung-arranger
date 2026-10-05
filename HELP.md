@@ -5,8 +5,10 @@ Controls are shown as they appear on Ableton Move.
 
 Button LED legend:
 - **White buttons** (Back, Menu, Capture, Loop, Mute, Delete, Copy, Undo, Shift, arrows): lit bright when they do something on the current screen; dim when they only work with Shift held; off when inactive.
-- **RGB buttons** (Play, Record/Sample): green means the action will start/add something; red means Play will stop playback.
+- **Play**: white when stopped, green while playing. **Record** (Perform): red while recording, white otherwise.
 - Hold **Shift** to see the alternate action LEDs brighten.
+
+**Footer:** the bottom line of the display shows up to three of the current screen's most important buttons and what they do (e.g. `JOG SEL  CLK OPEN  BACK EXIT`). Hold **Shift** to see the Shift actions instead.
 
 **Anywhere in the module:**
 
