@@ -789,6 +789,12 @@ typedef struct engine {
     /* Audio frames left until that All Notes Off goes out (0 = none due) --
      * see schedule_notes_off_cc. */
     uint32_t notes_off_cc_frames;
+    /* Audio frames left of the after-Stop hold on instrument notes (0 = not
+     * holding) -- see begin_stop_tail. */
+    uint32_t inst_hold_frames;
+    /* Set while Stop clears the instruments' chord bookkeeping, so their
+     * note-offs are held back instead of sent -- see emit_instrument_event. */
+    uint8_t inst_hold_suppress;
 
     /* Channel override of the most recently drained event, used by
      * emit_direct_event when a per-clip channel (e.g. a dedicated click
@@ -1146,30 +1152,88 @@ static void emit_notes_off_cc(engine_t *e) {
     }
 }
 
-/* Stop sends its note-offs at once but holds All Notes Off back this long:
+/* All Notes Off is held back this long after the note-offs it backs up:
  * many synths take CC 123 as an instant cut, skipping their release, so
- * sending it with the note-offs stopped every note dead instead of letting
- * it ring out (found live). */
+ * sending it with the note-offs stopped every note dead (found live). */
 #define NOTES_OFF_CC_DELAY_MS 2000
+/* Stop lets instrument notes that are sounding ring on this long before their
+ * note-offs go out -- asked for: notes should ring out after Stop rather
+ * than end with it. Drums and the click still stop at once. */
+#define STOP_INST_HOLD_MS 10000
 
-static void schedule_notes_off_cc(engine_t *e) {
+static uint32_t ms_to_frames(uint32_t ms) {
     int sr = (g_host && g_host->sample_rate > 0) ? g_host->sample_rate : 44100;
-    e->notes_off_cc_frames = (uint32_t)((uint64_t)sr * NOTES_OFF_CC_DELAY_MS / 1000);
+    return (uint32_t)((uint64_t)sr * ms / 1000);
 }
 
-/* Send a pending All Notes Off now. Called before any new note-on, so the
- * delayed one can never cut a note that started after the stop. */
+static void schedule_notes_off_cc(engine_t *e) {
+    e->notes_off_cc_frames = ms_to_frames(NOTES_OFF_CC_DELAY_MS);
+}
+
+static void emit_instrument_notes_release(engine_t *e);
+
+/* End the hold on instrument notes now: their note-offs go out. */
+static void end_inst_hold(engine_t *e) {
+    if (!e->inst_hold_frames) return;
+    e->inst_hold_frames = 0;
+    emit_instrument_notes_release(e);
+    schedule_notes_off_cc(e);
+}
+
+/* Before any new note-on: release held notes and send a pending All Notes
+ * Off now, so neither can cut a note that started after the stop. */
 static void flush_notes_off_cc(engine_t *e) {
+    if (e->inst_hold_frames) {
+        e->inst_hold_frames = 0;
+        emit_instrument_notes_release(e);
+        e->notes_off_cc_frames = 1; /* due now */
+    }
     if (!e->notes_off_cc_frames) return;
     e->notes_off_cc_frames = 0;
     emit_notes_off_cc(e);
 }
 
-/* Count down to a pending All Notes Off; run every audio block. */
+/* Count down the instrument hold, then the All Notes Off after it; run every
+ * audio block. */
 static void tick_notes_off_cc(engine_t *e, int frames) {
-    if (!e->notes_off_cc_frames || frames <= 0) return;
+    if (frames <= 0) return;
+    if (e->inst_hold_frames) {
+        if ((uint32_t)frames >= e->inst_hold_frames) end_inst_hold(e);
+        else e->inst_hold_frames -= (uint32_t)frames;
+        return;
+    }
+    if (!e->notes_off_cc_frames) return;
     if ((uint32_t)frames >= e->notes_off_cc_frames) flush_notes_off_cc(e);
     else e->notes_off_cc_frames -= (uint32_t)frames;
+}
+
+static void emit_instruments_all_off(engine_t *e);
+static void emit_jam_instruments_all_off(engine_t *e);
+static void click_release(engine_t *e);
+
+/* What Stop (or the song's end) does to sounding notes: drums are released
+ * at once; instrument notes ring on for STOP_INST_HOLD_MS, then get their
+ * note-offs; All Notes Off follows NOTES_OFF_CC_DELAY_MS after that. */
+static void begin_stop_tail(engine_t *e) {
+    emit_all_notes_off(e);
+    click_release(e);
+    e->inst_hold_suppress = 1;
+    emit_instruments_all_off(e);
+    emit_jam_instruments_all_off(e);
+    e->inst_hold_suppress = 0;
+    e->notes_off_cc_frames = 0;
+    e->inst_hold_frames = ms_to_frames(STOP_INST_HOLD_MS);
+    /* Nothing to hold: go straight to the All Notes Off delay. */
+    int any = 0;
+    for (int t = 0; t < 3 && !any; t++)
+        for (int c = 0; c < 16 && !any; c++)
+            for (int n = 0; n < 128; n++)
+                if (e->inst_notes_on[t][c][n]) { any = 1; break; }
+    if (!any) {
+        e->inst_hold_frames = 0;
+        emit_instrument_notes_release(e); /* anything a lost note-off left */
+        schedule_notes_off_cc(e);
+    }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -2313,6 +2377,10 @@ static void emit_instrument_event(engine_t *e, const inst_voice_t *inst,
     int target = (inst->output_target >= 0 && inst->output_target <= 2) ? inst->output_target : 0;
     uint8_t ch = (uint8_t)(inst->channel & 0x0F);
     uint8_t n = note & 0x7F;
+    /* Stop holding instrument notes: keep the note counted as sounding and
+     * let its note-off go out when the hold ends (begin_stop_tail). */
+    if (e->inst_hold_suppress && inst != &e->click_voice &&
+        (high == 0x80 || (high == 0x90 && vel == 0))) return;
     /* Count what's sounding, so stopping can release anything a lost
      * note-off left behind -- see emit_instrument_notes_release. */
     if (high == 0x90 && vel > 0) {
@@ -4781,12 +4849,7 @@ static void handle_loop_or_stop(engine_t *e, uint32_t *target) {
             } else {
                 e->running = 0;
                 e->stopped_at_end = 1;
-                emit_all_notes_off(e);
-                /* Cut off any instrument chord notes still sounding. */
-                emit_instruments_all_off(e);
-                emit_jam_instruments_all_off(e);
-                emit_instrument_notes_release(e);
-                schedule_notes_off_cc(e);
+                begin_stop_tail(e);
                 if (e->playhead_tick > e->live_slot.end_tick) e->playhead_tick = e->live_slot.end_tick;
             }
         }
@@ -5054,7 +5117,7 @@ static void engine_clear_error(engine_t *e) {
 
 /* DSP build version stamp. Keep in sync with UI_BUILD_VERSION in ui.js so the
  * running dsp.so can be confirmed from .dsp_log on module load. */
-static const char *const DSP_BUILD_VERSION = "arranger-dsp-2026-10-05-ccdelay";
+static const char *const DSP_BUILD_VERSION = "arranger-dsp-2026-10-05-stophold";
 
 static void* arr_create_instance(const char *module_dir, const char *config_json) {
     (void)module_dir;
@@ -5790,12 +5853,7 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
         e->running = 0;
         e->flash_end_tick = 0;
         queue_clear(e);
-        emit_all_notes_off(e);
-        /* Send note-offs for any instrument chords still sounding. */
-        emit_instruments_all_off(e);
-        emit_jam_instruments_all_off(e);
-        emit_instrument_notes_release(e);
-        schedule_notes_off_cc(e);
+        begin_stop_tail(e);
         /* Discard any not-yet-promoted Jam chord pick -- it was queued for
          * a future bar boundary that will now never arrive, so resuming it
          * later (see "play"'s apply_pending_jam_chord call) would be
