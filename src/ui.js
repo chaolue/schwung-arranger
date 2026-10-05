@@ -4802,7 +4802,7 @@ function updateButtonLEDs() {
                     }
                 }
                 active.set(MovePlay, perfPlaying ? PureGreen : White);
-                if (perfRecordingAvailable()) active.set(MoveRec, perfRecording ? BrightRed : White);
+                if (perfRecordingAvailable()) active.set(MoveRec, perfRecording ? PureRed : White);
                 active.set(MoveRow1, perfDrumEnabled ? TRACK_ROW_COLOUR[TRACK_DRUM] : Black);
                 active.set(MoveRow2, perfInst1Enabled ? TRACK_ROW_COLOUR[TRACK_INSTRUMENT_1] : Black);
                 active.set(MoveRow3, perfInst2Enabled ? TRACK_ROW_COLOUR[TRACK_INSTRUMENT_2] : Black);
