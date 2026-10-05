@@ -10,6 +10,9 @@
  * arranger_engine.c in sync so both sides are verifiable. */
 const UI_BUILD_VERSION = "arranger-ui-2026-10-01-loading";
 
+/* Lit white buttons at full brightness (127). Schwung's WhiteLedBright is 124. */
+const WhiteLedFull = 127;
+
 import {
     MidiNoteOn, MidiNoteOff, MidiCC,
     MoveMainKnob, MoveMainButton, MoveBack, MoveMenu, MoveShift,
@@ -20,7 +23,7 @@ import {
     MovePad1, MovePad32,
     MoveRow1, MoveRow2, MoveRow3, MoveRow4,
     Black, White, BrightRed, DarkGrey,
-    WhiteLedOff, WhiteLedDim, WhiteLedBright,
+    WhiteLedOff, WhiteLedDim,
     AzureBlue, BrightYellow, Purple,
     MovePads, MoveSteps
 } from '/data/UserData/schwung/shared/constants.mjs';
@@ -4577,16 +4580,16 @@ function updateButtonLEDs() {
     const active = new Map();
 
     if (confirmState) {
-        active.set(MoveBack, WhiteLedBright);
-        active.set(MoveMainButton, WhiteLedBright);
+        active.set(MoveBack, WhiteLedFull);
+        active.set(MoveMainButton, WhiteLedFull);
     } else {
         switch (currentView) {
             case VIEW_ROOT:
-                active.set(MoveBack, WhiteLedBright);
+                active.set(MoveBack, WhiteLedFull);
                 break;
             case VIEW_FOLDER_LIST:
-                active.set(MoveBack, WhiteLedBright);
-                active.set(MoveMainButton, WhiteLedBright);
+                active.set(MoveBack, WhiteLedFull);
+                active.set(MoveMainButton, WhiteLedFull);
                 break;
             case VIEW_BUILDER: {
                 const ledLocked = songIsLocked();
@@ -4614,8 +4617,8 @@ function updateButtonLEDs() {
                     : 0;
                 const ledHasLeftSection = !!(currentSong && ledSectionIndex > 0);
                 const ledHasRightSection = !!(currentSong && currentSong.sections && ledSectionIndex < ledTotalSections - 1);
-                active.set(MoveBack, WhiteLedBright);
-                active.set(MoveMenu, WhiteLedBright);
+                active.set(MoveBack, WhiteLedFull);
+                active.set(MoveMenu, WhiteLedFull);
                 /* Record (change source folder) is a Drum-track concept. */
                 if (!ledLocked && builderTrack === TRACK_DRUM) active.set(MoveRecord, PureBlue);
                 /* Row buttons: the selected track's row lights up in its
@@ -4636,8 +4639,8 @@ function updateButtonLEDs() {
                     active.set(TRACK_ROW_CC[t], rowColour);
                 }
                 active.set(MoveRow4, clickOn ? CLICK_ROW_COLOUR : DarkGrey);
-                if (ledHasLeftSection) active.set(MoveLeft, WhiteLedBright);
-                if (ledHasRightSection) active.set(MoveRight, WhiteLedBright);
+                if (ledHasLeftSection) active.set(MoveLeft, WhiteLedFull);
+                if (ledHasRightSection) active.set(MoveRight, WhiteLedFull);
                 /* Play is green while playing; when stopped it is white only
                  * if the current section has clips, else black (nothing to
                  * play). */
@@ -4657,38 +4660,38 @@ function updateButtonLEDs() {
                     const ledTotalPages = builderPageCount();
                     const ledHasUp = builderPage > 0;
                     const ledHasDown = builderPage < ledTotalPages - 1;
-                    active.set(MoveMainButton, WhiteLedBright);
+                    active.set(MoveMainButton, WhiteLedFull);
                     /* Loop, Copy, and Delete do nothing on a locked song, so keep
                      * them black (not added to the active map). */
                     if (!ledLocked) {
-                        if (ledOnClip) active.set(MoveCopy, WhiteLedBright);
+                        if (ledOnClip) active.set(MoveCopy, WhiteLedFull);
                         else if (ledOnSection || ledOnInsert) active.set(MoveCopy, WhiteLedDim);
                         active.set(MoveLoop, WhiteLedDim);
-                        if (ledOnClip) active.set(MoveDelete, WhiteLedBright);
+                        if (ledOnClip) active.set(MoveDelete, WhiteLedFull);
                         else if (ledOnSection || ledOnInsert) active.set(MoveDelete, WhiteLedDim);
                     }
-                    if (ledHasDown) active.set(MoveUp, WhiteLedBright);
-                    if (ledHasUp) active.set(MoveDown, WhiteLedBright);
+                    if (ledHasDown) active.set(MoveUp, WhiteLedFull);
+                    if (ledHasUp) active.set(MoveDown, WhiteLedFull);
                     if (!ledLocked) {
                         /* Shift does nothing on a locked song (all its alternate
                          * actions are blocked), so leave it black. */
                         active.set(MoveShift, WhiteLedDim);
                         if (shiftHeld) {
-                            active.set(MoveShift, WhiteLedBright);
-                            active.set(MoveMainButton, WhiteLedBright);
+                            active.set(MoveShift, WhiteLedFull);
+                            active.set(MoveMainButton, WhiteLedFull);
                             /* Shift+Copy / Shift+Delete / Shift+Loop / Shift+Left /
                              * Shift+Right act on the whole section, so they stay
                              * lit anywhere. */
-                            active.set(MoveCopy, WhiteLedBright);
-                            active.set(MoveLoop, WhiteLedBright);
-                            if (ledHasLeftSection) active.set(MoveLeft, WhiteLedBright);
-                            if (ledHasRightSection) active.set(MoveRight, WhiteLedBright);
-                            active.set(MoveDelete, WhiteLedBright);
+                            active.set(MoveCopy, WhiteLedFull);
+                            active.set(MoveLoop, WhiteLedFull);
+                            if (ledHasLeftSection) active.set(MoveLeft, WhiteLedFull);
+                            if (ledHasRightSection) active.set(MoveRight, WhiteLedFull);
+                            active.set(MoveDelete, WhiteLedFull);
                             if (playbackState !== "playing") active.set(MovePlay, White);
                         }
                     } else if (shiftHeld) {
-                        active.set(MoveShift, WhiteLedBright);
-                        active.set(MoveMainButton, WhiteLedBright);
+                        active.set(MoveShift, WhiteLedFull);
+                        active.set(MoveMainButton, WhiteLedFull);
                         /* Shift+Copy / Shift+Delete / Shift+Loop are inert on a
                          * locked song, so leave them black. Shift+Left/Right
                          * (reorder sections) are also blocked but keep their
@@ -4699,17 +4702,17 @@ function updateButtonLEDs() {
                 break;
             }
             case VIEW_TRIM:
-                active.set(MoveBack, WhiteLedBright);
-                active.set(MoveMainButton, WhiteLedBright);
+                active.set(MoveBack, WhiteLedFull);
+                active.set(MoveMainButton, WhiteLedFull);
                 break;
             case VIEW_SONG_SETTINGS:
             case VIEW_SONG_BACKUPS:
-                active.set(MoveBack, WhiteLedBright);
-                active.set(MoveMainButton, WhiteLedBright);
+                active.set(MoveBack, WhiteLedFull);
+                active.set(MoveMainButton, WhiteLedFull);
                 break;
             case VIEW_SONG_BANK:
-                active.set(MoveBack, WhiteLedBright);
-                active.set(MoveMainButton, WhiteLedBright);
+                active.set(MoveBack, WhiteLedFull);
+                active.set(MoveMainButton, WhiteLedFull);
                 if (selectedSongIndex > 0) {
                     /* A locked song cannot be deleted or renamed: leave the
                      * Delete and Shift buttons black (omit from active map).
@@ -4717,77 +4720,77 @@ function updateButtonLEDs() {
                      * always produces a new, unlocked copy. */
                     const entry = songFiles[selectedSongIndex - 1];
                     const locked = entry ? !!(readJson(entry.path)?.locked) : false;
-                    active.set(MoveCopy, WhiteLedBright);
-                    if (!locked) active.set(MoveDelete, WhiteLedBright);
+                    active.set(MoveCopy, WhiteLedFull);
+                    if (!locked) active.set(MoveDelete, WhiteLedFull);
                     if (!locked) {
                         /* Shift (rename) only applies to an existing, unlocked
                          * song — not the "+ New Song" row nor a locked one. */
                         active.set(MoveShift, WhiteLedDim);
-                        if (shiftHeld) active.set(MoveShift, WhiteLedBright);
+                        if (shiftHeld) active.set(MoveShift, WhiteLedFull);
                     }
                 }
                 break;
             case VIEW_OPTIONS:
             case VIEW_OPTIONS_CHAINS:
             case VIEW_KNOB_PICK:
-                active.set(MoveBack, WhiteLedBright);
-                active.set(MoveMainButton, WhiteLedBright);
+                active.set(MoveBack, WhiteLedFull);
+                active.set(MoveMainButton, WhiteLedFull);
                 break;
             case VIEW_KNOB_MAP:
-                active.set(MoveBack, WhiteLedBright);
-                active.set(MoveMainButton, WhiteLedBright);
-                if (knobEditMapping(knobEditFocus) || knobEditScope === "song") active.set(MoveDelete, WhiteLedBright);
+                active.set(MoveBack, WhiteLedFull);
+                active.set(MoveMainButton, WhiteLedFull);
+                if (knobEditMapping(knobEditFocus) || knobEditScope === "song") active.set(MoveDelete, WhiteLedFull);
                 break;
             case VIEW_SETLIST_BANK:
-                active.set(MoveBack, WhiteLedBright);
-                active.set(MoveMainButton, WhiteLedBright);
+                active.set(MoveBack, WhiteLedFull);
+                active.set(MoveMainButton, WhiteLedFull);
                 if (selectedSetlistIndex > 0) {
-                    active.set(MoveDelete, WhiteLedBright);
+                    active.set(MoveDelete, WhiteLedFull);
                     /* Shift (rename) only applies to an existing setlist, not
                      * the "+ New Setlist" row. */
                     active.set(MoveShift, WhiteLedDim);
-                    if (shiftHeld) active.set(MoveShift, WhiteLedBright);
+                    if (shiftHeld) active.set(MoveShift, WhiteLedFull);
                 }
                 break;
             case VIEW_SETLIST_EDIT: {
                 const songs = currentSetlist ? currentSetlist.songs : [];
                 const onAddSong = setlistSongIndex >= songs.length;
-                active.set(MoveBack, WhiteLedBright);
-                active.set(MoveMainButton, WhiteLedBright);
-                if (!onAddSong) active.set(MoveDelete, WhiteLedBright);
-                if (!onAddSong && setlistSongIndex > 0) active.set(MoveLeft, WhiteLedBright);
-                if (!onAddSong && setlistSongIndex < songs.length - 1) active.set(MoveRight, WhiteLedBright);
+                active.set(MoveBack, WhiteLedFull);
+                active.set(MoveMainButton, WhiteLedFull);
+                if (!onAddSong) active.set(MoveDelete, WhiteLedFull);
+                if (!onAddSong && setlistSongIndex > 0) active.set(MoveLeft, WhiteLedFull);
+                if (!onAddSong && setlistSongIndex < songs.length - 1) active.set(MoveRight, WhiteLedFull);
                 if (!onAddSong) {
                     /* Shift has no action on "(add song)", so leave it black. */
                     active.set(MoveShift, WhiteLedDim);
-                    if (shiftHeld) active.set(MoveShift, WhiteLedBright);
+                    if (shiftHeld) active.set(MoveShift, WhiteLedFull);
                 }
                 break;
             }
             case VIEW_SETLIST_PICK:
-                active.set(MoveBack, WhiteLedBright);
-                active.set(MoveMainButton, WhiteLedBright);
+                active.set(MoveBack, WhiteLedFull);
+                active.set(MoveMainButton, WhiteLedFull);
                 break;
             case VIEW_SETLIST_CLICK:
-                active.set(MoveBack, WhiteLedBright);
-                active.set(MoveMainButton, WhiteLedBright);
+                active.set(MoveBack, WhiteLedFull);
+                active.set(MoveMainButton, WhiteLedFull);
                 break;
             case VIEW_SECTION_PICK:
-                active.set(MoveBack, WhiteLedBright);
-                active.set(MoveMainButton, WhiteLedBright);
+                active.set(MoveBack, WhiteLedFull);
+                active.set(MoveMainButton, WhiteLedFull);
                 break;
             case VIEW_PERF_SETLIST:
-                active.set(MoveBack, WhiteLedBright);
+                active.set(MoveBack, WhiteLedFull);
                 active.set(MoveMainButton, PureGreen);
                 break;
             case VIEW_PERFORMANCE:
-                active.set(MoveBack, WhiteLedBright);
+                active.set(MoveBack, WhiteLedFull);
                 {
                     const maxRow = Math.max(0, Math.ceil(perfSongSections.length / 8) - 4);
                     const upLit = perfScrollRow < maxRow;
                     const downLit = perfScrollRow > 0;
-                    if (upLit) active.set(MoveUp, WhiteLedBright);
-                    if (downLit) active.set(MoveDown, WhiteLedBright);
+                    if (upLit) active.set(MoveUp, WhiteLedFull);
+                    if (downLit) active.set(MoveDown, WhiteLedFull);
                     /* When the pad window scrolls (auto-scroll or manual), the
                      * up/down button LEDs must reflect the new position. Force a
                      * re-send on a scroll-row change so a stale queued/deduped
@@ -4800,10 +4803,10 @@ function updateButtonLEDs() {
                          * boundaries during playback) before it flushes,
                          * leaving the up/down LEDs stuck in their old state
                          * after an auto-scroll. */
-                        setButtonLED(MoveUp, upLit ? WhiteLedBright : Black);
-                        setButtonLED(MoveDown, downLit ? WhiteLedBright : Black);
-                        lastButtonState.set(MoveUp, upLit ? WhiteLedBright : Black);
-                        lastButtonState.set(MoveDown, downLit ? WhiteLedBright : Black);
+                        setButtonLED(MoveUp, upLit ? WhiteLedFull : Black);
+                        setButtonLED(MoveDown, downLit ? WhiteLedFull : Black);
+                        lastButtonState.set(MoveUp, upLit ? WhiteLedFull : Black);
+                        lastButtonState.set(MoveDown, downLit ? WhiteLedFull : Black);
                         /* ...and drop any write still queued for them, which
                          * would otherwise land after this one and undo it. */
                         ledQueue.delete(128 + MoveUp);
@@ -4818,20 +4821,20 @@ function updateButtonLEDs() {
                 active.set(MoveRow4, clickOn ? CLICK_ROW_COLOUR : Black);
                 break;
             case VIEW_JAM_FOLDER:
-                active.set(MoveBack, WhiteLedBright);
-                active.set(MoveMainButton, WhiteLedBright);
+                active.set(MoveBack, WhiteLedFull);
+                active.set(MoveMainButton, WhiteLedFull);
                 break;
             case VIEW_JAM:
-                active.set(MoveBack, WhiteLedBright);
+                active.set(MoveBack, WhiteLedFull);
                 {
                     const maxScroll = Math.max(0, Math.ceil(jamGrooves.length / (jamGrooveCols() * 4)) - 1);
                     /* Reversed: Up scrolls down, Down scrolls up. */
-                    if (jamGrooveScroll < maxScroll) active.set(MoveUp, WhiteLedBright);
-                    if (jamGrooveScroll > 0) active.set(MoveDown, WhiteLedBright);
+                    if (jamGrooveScroll < maxScroll) active.set(MoveUp, WhiteLedFull);
+                    if (jamGrooveScroll > 0) active.set(MoveDown, WhiteLedFull);
                     const fills = jamVisibleFills();
                     const maxFillScroll = Math.max(0, Math.ceil(fills.length / (jamFillCols() * 4)) - 1);
-                    if (jamFillScroll > 0) active.set(MoveLeft, WhiteLedBright);
-                    if (jamFillScroll < maxFillScroll) active.set(MoveRight, WhiteLedBright);
+                    if (jamFillScroll > 0) active.set(MoveLeft, WhiteLedFull);
+                    if (jamFillScroll < maxFillScroll) active.set(MoveRight, WhiteLedFull);
                 }
                 active.set(MovePlay, jamPlaying ? PureGreen : Black);
                 active.set(MoveRow1, jamDrumEnabled ? TRACK_ROW_COLOUR[TRACK_DRUM] : Black);
