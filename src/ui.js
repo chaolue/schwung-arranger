@@ -12841,7 +12841,7 @@ function footerHints() {
         case VIEW_PERFORMANCE:
             /* The knob feedback panel covers the footer rows while it shows. */
             if (perfKnobFeedbackVisible()) return null;
-            return [["PAD", perfPlaying ? "JUMP" : "PICK"], ["TRK", "MUTE"], ["BACK", "OUT"]];
+            return [["PAD", perfPlaying ? "CUE" : "PICK"], ["TRK", "MUTE"], ["BACK", "OUT"]];
         case VIEW_JAM:
             if (shiftHeld) return [["JOG", "KEY"], ["TRK", "INST"]];
             return [["PAD", jamPlaying ? "CUE" : "PLAY"], ["TRK", "MUTE"], ["BACK", "OUT"]];
