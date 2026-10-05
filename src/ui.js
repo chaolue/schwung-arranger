@@ -8,7 +8,7 @@
  * confirmed from the logs (see init()/playCurrentSong()) instead of guessing
  * whether a new file actually loaded. Keep the DSP dsp_build_version in
  * arranger_engine.c in sync so both sides are verifiable. */
-const UI_BUILD_VERSION = "arranger-ui-2026-10-05-chordjog2";
+const UI_BUILD_VERSION = "arranger-ui-2026-10-06-backuplabel";
 
 /* Lit white buttons at full brightness (127). Schwung's WhiteLedBright is 124. */
 const WhiteLedFull = 127;
@@ -7992,15 +7992,28 @@ function listSongBackups(name) {
     names.sort().reverse();
     const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
     const pad = n => (n < 10 ? "0" : "") + n;
-    return names.map(file => {
+    /* "5 Oct 08:04" -- the seconds only where two backups share a minute,
+     * to leave room for the section count spelled out ("12 sections"; "sec"
+     * read as seconds). */
+    const list = names.map(file => {
         const m = file.match(/^(\d{4})-(\d\d)-(\d\d)T(\d\d)-(\d\d)-(\d\d)/);
-        let label = file.replace(/\.json$/, "");
+        let label = file.replace(/\.json$/, ""), secs = "";
         if (m) {
             const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]));
-            label = d.getDate() + " " + MONTHS[d.getMonth()] + " " + pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds());
+            label = d.getDate() + " " + MONTHS[d.getMonth()] + " " + pad(d.getHours()) + ":" + pad(d.getMinutes());
+            secs = ":" + pad(d.getSeconds());
         }
-        return { file, path: dir + "/" + file, label, sections: null };
+        return { file, path: dir + "/" + file, label, secs, sections: null };
     });
+    for (const e of list) {
+        if (e.secs && list.filter(o => o.label === e.label).length > 1) e.dup = true;
+    }
+    for (const e of list) {
+        if (e.dup) e.label += e.secs;
+        delete e.secs;
+        delete e.dup;
+    }
+    return list;
 }
 
 function openSongBackups() {
@@ -8042,7 +8055,7 @@ function drawSongBackups() {
         getLabel: (item) => item.label,
         getValue: (item) => {
             const n = songBackupSections(item);
-            return n < 0 ? "?" : n + " sec";
+            return n < 0 ? "?" : n + (n === 1 ? " section" : " sections");
         },
         valueAlignRight: true,
         labelGap: 2,
