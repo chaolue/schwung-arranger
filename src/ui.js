@@ -8,7 +8,7 @@
  * confirmed from the logs (see init()/playCurrentSong()) instead of guessing
  * whether a new file actually loaded. Keep the DSP dsp_build_version in
  * arranger_engine.c in sync so both sides are verifiable. */
-const UI_BUILD_VERSION = "arranger-ui-2026-10-05-nochord";
+const UI_BUILD_VERSION = "arranger-ui-2026-10-05-bassorder";
 
 /* Lit white buttons at full brightness (127). Schwung's WhiteLedBright is 124. */
 const WhiteLedFull = 127;
@@ -227,8 +227,16 @@ const CHORD_TYPE_LABEL = {
 /* The 12 note names, used to render a chord's root/bass. */
 const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 
-/* The 12 bass-note choices for a slash chord (C/G = C over G bass). */
-const BASS_NOTES = NOTE_NAMES;
+/* The 12 bass-note choices for a slash chord (C/G = C over G bass), in the
+ * order the picker offers them: chromatically up from the song key's tonic,
+ * so the first choice is the scale's base note rather than always C. */
+export function bassNotesForKey(key) {
+    const pc = noteSemitone(key);
+    const start = pc >= 0 ? pc : 0;
+    const out = [];
+    for (let i = 0; i < 12; i++) out.push(NOTE_NAMES[(start + i) % 12]);
+    return out;
+}
 
 /* Root-row value meaning "No Chord" (a silent bar), after the seven degrees. */
 const NO_CHORD_DEGREE = 7;
@@ -1573,7 +1581,7 @@ let chordCursorBar = 0;
 let chordPickBar = -1;
 let chordPickDegree = 0;      /* 0-based scale degree (0..6) */
 let chordPickQuality = 0;     /* index into CHORD_QUALITIES */
-let chordPickBass = -1;       /* index into BASS_NOTES, -1 = no slash bass */
+let chordPickBass = -1;       /* index into bassNotesForKey(key), -1 = no slash bass */
 let chordPickFocus = 0;       /* 0 = root, 1 = type, 2 = bass, 3 = add/delete */
 let chordPickEditing = false;
 /* Whether a chord actually exists for the bar being edited (either it was
@@ -6656,6 +6664,7 @@ function openChordPick(barIndex) {
     if (!sec) return;
     chordPickBar = barIndex;
     const existing = chordAtBar(sec, barIndex);
+    const key0 = currentSong ? (currentSong.key || DEFAULT_KEY) : DEFAULT_KEY;
     if (existing && existing.none) {
         chordPickDegree = NO_CHORD_DEGREE;
         chordPickQuality = 0;
@@ -6675,7 +6684,7 @@ function openChordPick(barIndex) {
         chordPickDegree = degree;
         const qIdx = CHORD_QUALITIES.indexOf(existing.quality);
         chordPickQuality = qIdx >= 0 ? qIdx : 0;
-        chordPickBass = existing.bass ? BASS_NOTES.indexOf(existing.bass) : -1;
+        chordPickBass = existing.bass ? bassNotesForKey(key0).indexOf(existing.bass) : -1;
     } else {
         /* Default to the key's base note (the "I" chord/tonic), not a
          * degree that climbs with the bar index. */
@@ -6699,7 +6708,7 @@ function chordPickChord() {
     const key = currentSong ? (currentSong.key || DEFAULT_KEY) : DEFAULT_KEY;
     const d = diatonicChord(key, chordPickDegree);
     const chord = { root: d.root, quality: CHORD_QUALITIES[chordPickQuality] };
-    if (chordPickBass >= 0) chord.bass = BASS_NOTES[chordPickBass];
+    if (chordPickBass >= 0) chord.bass = bassNotesForKey(key)[chordPickBass];
     return chord;
 }
 
@@ -6724,7 +6733,7 @@ function drawChordPick() {
         { key: "root", label: "Root", value: noChord ? "No Chord"
             : degreeNames[chordPickDegree] + " (" + diatonicChord(key, chordPickDegree).root + ")" },
         { key: "type", label: "Type", value: noChord ? "—" : (CHORD_TYPE_LABEL[CHORD_QUALITIES[chordPickQuality]] || "Major") },
-        { key: "bass", label: "Bass", value: !noChord && chordPickBass >= 0 ? BASS_NOTES[chordPickBass] : "—" },
+        { key: "bass", label: "Bass", value: !noChord && chordPickBass >= 0 ? bassNotesForKey(key)[chordPickBass] : "—" },
         { key: "toggle", label: "Delete Chord", value: "" }
     ] : [
         { key: "toggle", label: "Add Chord", value: "" },
@@ -6770,7 +6779,7 @@ function handleChordPickInput(cc, value) {
             } else if (chordPickFocus === 1) {
                 chordPickQuality = Math.max(0, Math.min(CHORD_QUALITIES.length - 1, chordPickQuality + delta));
             } else if (chordPickFocus === 2) {
-                chordPickBass = Math.max(-1, Math.min(BASS_NOTES.length - 1, chordPickBass + delta));
+                chordPickBass = Math.max(-1, Math.min(11, chordPickBass + delta));
             }
         } else {
             chordPickFocus = Math.max(0, Math.min(lastIndex, chordPickFocus + delta));
