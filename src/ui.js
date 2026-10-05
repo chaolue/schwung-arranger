@@ -1029,7 +1029,7 @@ function perfRecordingAvailable() {
 function perfToggleRecording() {
     if (perfRecording) { perfStopRecording(); return; }
     if (!perfRecordingAvailable()) {
-        showOverlay("Recording", "not available", 120);
+        showOverlayMs("Recording", "not available", 3000);
         needsRedraw = true;
         return;
     }
@@ -1041,7 +1041,7 @@ function perfToggleRecording() {
     host_sampler_start(path);
     perfRecording = true;
     logDebug("PERFREC start path=" + path);
-    showOverlay("Recording", name + "_" + stamp.substring(11), 120);
+    showOverlayMs("Recording", name + "_" + stamp.substring(11), 3000);
     needsRedraw = true;
 }
 
@@ -1050,7 +1050,7 @@ function perfStopRecording() {
     host_sampler_stop();
     perfRecording = false;
     logDebug("PERFREC stop");
-    showOverlay("Recording saved", "Recordings/Arranger", 150);
+    showOverlayMs("Recording saved", "Recordings/Arranger", 3000);
     needsRedraw = true;
 }
 
@@ -3279,7 +3279,7 @@ function toggleClick() {
     if (typeof host_module_set_param === "function") {
         host_module_set_param("click_enabled", clickOn ? "1" : "0");
     }
-    showOverlay("Click", clickOn ? "On" : "Off", 60);
+    showOverlayMs("Click", clickOn ? "On" : "Off", 2000);
     needsRedraw = true;
     ledDirtyAll = true;
 }
@@ -3885,7 +3885,7 @@ function persistResolvedClipFolders(built) {
  * knows which file is the problem instead of the song silently failing. The
  * overlay auto-dismisses after a few seconds (the UI does not call
  * dismissOverlayOnInput, so a finite duration is required). */
-const MISSING_CLIP_OVERLAY_TICKS = 600; /* ~10s at 60fps */
+const MISSING_CLIP_OVERLAY_MS = 10000;
 function showMissingClipOverlay() {
     if (typeof host_module_get_param !== "function") return;
     let raw = null;
@@ -3900,7 +3900,7 @@ function showMissingClipOverlay() {
     const leaf = clipName ? clipName.substring(clipName.lastIndexOf("/") + 1) : "";
     const title = "Clip not found";
     const value = leaf ? leaf : "missing file";
-    showOverlay(title, value, MISSING_CLIP_OVERLAY_TICKS);
+    showOverlayMs(title, value, MISSING_CLIP_OVERLAY_MS);
     logDebug("showMissingClipOverlay: " + raw);
 }
 
@@ -7740,7 +7740,7 @@ function restoreSongBackup(entry) {
     let obj = null;
     try { obj = text ? JSON.parse(text) : null; } catch (e) { obj = null; }
     if (!obj || !Array.isArray(obj.sections)) {
-        showOverlay("Restore failed", "unreadable backup", 180);
+        showOverlayMs("Restore failed", "unreadable backup", 3000);
         logDebug("restoreSongBackup: unreadable " + entry.path);
         return;
     }
@@ -7770,7 +7770,7 @@ function restoreSongBackup(entry) {
     stepLedsDirty = true;
     ledDirtyAll = true;
     needsRedraw = true;
-    showOverlay("Backup restored", entry.label, 180);
+    showOverlayMs("Backup restored", entry.label, 3000);
 }
 
 function handleSongBackupsInput(cc, value) {
@@ -8509,7 +8509,7 @@ function drawJamHoldOverlay() {
 /* Exiting from the root menu takes two Back presses: the first shows a popup
  * asking for the second, which must come within EXIT_CONFIRM_MS. Any other
  * input on the root menu cancels it. */
-const EXIT_CONFIRM_MS = 2000;
+const EXIT_CONFIRM_MS = 3000;
 let exitConfirmUntil = 0;
 
 function handleRootInput(cc, value) {
@@ -8543,7 +8543,7 @@ function handleRootInput(cc, value) {
          * Shift+Back, falls back to. */
         if (Date.now() >= exitConfirmUntil) {
             exitConfirmUntil = Date.now() + EXIT_CONFIRM_MS;
-            showOverlay("Press Back again", "to exit Arranger", Math.round(EXIT_CONFIRM_MS * 60 / 1000));
+            showOverlayMs("Press Back again", "to exit Arranger", EXIT_CONFIRM_MS);
             needsRedraw = true;
             return;
         }
@@ -12723,7 +12723,33 @@ globalThis.init = function() {
     needsRedraw = true;
 };
 
+/* Overlay durations are counted in ticks, but the tick rate isn't a fixed
+ * 60/s (popups timed that way vanished after about a second on the device),
+ * so measure it and convert from milliseconds -- see showOverlayMs. */
+let ticksPerSecond = 60;
+let tickRateCount = 0;
+let tickRateStart = 0;
+
+function measureTickRate() {
+    const now = Date.now();
+    if (!tickRateStart) { tickRateStart = now; return; }
+    tickRateCount++;
+    const elapsed = now - tickRateStart;
+    if (elapsed >= 2000) {
+        const rate = tickRateCount * 1000 / elapsed;
+        if (rate > 5 && rate < 1000) ticksPerSecond = rate;
+        tickRateCount = 0;
+        tickRateStart = now;
+    }
+}
+
+/* showOverlay for a duration in milliseconds. */
+function showOverlayMs(title, value, ms) {
+    showOverlay(title, value, Math.max(1, Math.round(ms * ticksPerSecond / 1000)));
+}
+
 globalThis.tick = function() {
+    measureTickRate();
     /* Chain view first: follow the co-run session's real state, then let any
      * held Track/Menu fire -- in that order, so an overlay requested by a hold
      * is opened on the NEXT tick, after shadow_ui has primed the session (see

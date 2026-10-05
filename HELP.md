@@ -29,7 +29,7 @@ Screen reached when first loading the module.
 |---------|--------|
 | Jog wheel | Scroll between Song Builder, Setlists, Perform, Jam, Options |
 | Jog click | Open the selected entry |
-| Back (tap twice) | Exit the module (return to Schwung menu). The first tap shows a popup asking for a second tap within 2 seconds |
+| Back (tap twice) | Exit the module (return to Schwung menu). The first tap shows a popup asking for a second tap within 3 seconds |
 
 ---
 
