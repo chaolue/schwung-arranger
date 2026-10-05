@@ -1087,9 +1087,14 @@ function turnPerfKnob(i, delta) {
 /* Bottom-of-screen feedback while a knob is touched or just turned: what the
  * knob drives (chain or Master FX, component and module) above the parameter
  * and its value. */
+function perfKnobFeedbackVisible() {
+    const i = knobShowIndex;
+    return i >= 0 && (Date.now() < knobShowUntil || !!knobTouched[i]);
+}
+
 function drawPerfKnobFeedback() {
     const i = knobShowIndex;
-    if (i < 0 || (Date.now() >= knobShowUntil && !knobTouched[i])) return;
+    if (!perfKnobFeedbackVisible()) return;
     const k = perfKnobs[i];
     let where;
     let what;
@@ -12796,7 +12801,6 @@ function editMenuHints(editing) {
 }
 
 function footerHints() {
-    const playing = playbackState === "playing";
     switch (currentView) {
         case VIEW_ROOT:
             return [["JOG", "SEL"], ["CLK", "OPEN"], ["BACK", "EXIT"]];
@@ -12819,20 +12823,23 @@ function footerHints() {
         case VIEW_INSTRUMENT_BAR: return editMenuHints(instrumentBarEditing);
         case VIEW_SETLIST_CLICK: return editMenuHints(clickSettingsEditing);
         case VIEW_JAM_INSTRUMENT: return editMenuHints(jamInstrumentEditing);
+        /* Where a screen has pad and track actions, those lead: Play, Record
+         * and Back are self-explanatory (and lit), so they give way. T4 is
+         * Track 4, the click. Shift shows the less obvious Shift actions. */
         case VIEW_BUILDER:
             if (builderTrack === TRACK_DRUM) {
                 if (shiftHeld) return [["CLK", "SET"], ["PLAY", "SONG"], ["BACK", "OUT"]];
-                return [["PAD", "ADD"], ["PLAY", playing ? "STOP" : "CLIP"], ["BACK", "OUT"]];
+                return [["PAD", "ADD"], ["TRK", "TRACK"], ["T4", "CLICK"]];
             }
             if (shiftHeld) return [["PLAY", "SONG"], ["BACK", "OUT"]];
-            return [["STEP", "BAR"], ["MENU", "SET"], ["BACK", "OUT"]];
+            return [["STEP", "BAR"], ["TRK", "SEL"], ["MENU", "SET"]];
         case VIEW_PERFORMANCE:
-            return [["PLAY", perfPlaying ? "STOP" : "PLAY"], ["REC", perfRecording ? "END" : "REC"], ["BACK", "OUT"]];
+            /* The knob feedback panel covers the footer rows while it shows. */
+            if (perfKnobFeedbackVisible()) return null;
+            return [["PAD", perfPlaying ? "JUMP" : "PICK"], ["TRK", "MUTE"], ["T4", "CLICK"]];
         case VIEW_JAM:
-            if (shiftHeld) return [["JOG", "KEY"], ["TRK", "INST"], ["BACK", "OUT"]];
-            return jamPlaying
-                ? [["PAD", "CUE"], ["PLAY", "STOP"], ["BACK", "OUT"]]
-                : [["PAD", "PLAY"], ["TRK", "MUTE"], ["BACK", "OUT"]];
+            if (shiftHeld) return [["JOG", "KEY"], ["TRK", "INST"]];
+            return [["PAD", jamPlaying ? "CUE" : "PLAY"], ["TRK", "MUTE"], ["T4", "CLICK"]];
         default:
             /* The Chord Picker uses the footer rows for its chord line. */
             return null;
