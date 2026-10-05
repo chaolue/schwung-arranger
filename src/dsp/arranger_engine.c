@@ -377,6 +377,14 @@ typedef struct {
     chord_t chord;
 } mid_chord_t;
 
+#define MAX_CLICK_ITEMS 128
+typedef struct {
+    uint8_t section;
+    uint8_t half_beat;
+    uint16_t bar;
+    uint8_t volume;          /* percent, 0 = silent */
+} click_item_t;
+
 typedef struct {
     char name[64];
     char source_folder[MAX_PATH_LEN];
@@ -399,6 +407,11 @@ typedef struct {
      * beat-1 chord stays in its section's chords[]. See chord_at_song_tick. */
     int mid_chord_count;
     mid_chord_t mid_chords[MAX_MID_CHORDS];
+    /* Click volume changes (Song Builder's Click track), sorted like
+     * mid_chords: each holds until the section's next, and a section starts
+     * at the engine's click_volume -- see click_volume_at. */
+    int click_item_count;
+    click_item_t click_items[MAX_CLICK_ITEMS];
 } song_t;
 
 /* -------------------------------------------------------------------------- */
@@ -494,6 +507,7 @@ static void clip_lookup_free(engine_t *e);
 static void parse_chords_and_instruments(const char *json, song_t *song);
 static void parse_section_chords(const char *arr, song_t *song, int section_idx);
 static int mid_chord_cmp(const void *a, const void *b);
+static void parse_click_items(const char *json, song_t *song);
 static void parse_instrument_bars(const char *arr, instrument_t *inst);
 static void parse_instrument_overrides(const char *arr, instrument_t *inst);
 static void parse_instrument_items(const char *arr, instrument_t *inst);
@@ -805,6 +819,10 @@ typedef struct engine {
     uint8_t click_enabled;
     inst_voice_t click_voice;      /* only output_target/channel are used */
     uint8_t click_accent_note, click_normal_note;
+    /* Click loudness, percent of its normal velocity: where a song's click
+     * items don't say otherwise (each section starts here), and always for
+     * a count-in. */
+    uint8_t click_volume;
     uint8_t click_sounding, click_sounding_note;
     uint32_t click_on_tick, click_off_tick, click_last_tick;
     uint32_t click_last_beat;      /* UINT32_MAX = none yet this playback */
@@ -3501,6 +3519,7 @@ static void parse_chords_and_instruments(const char *json, song_t *song) {
 
     if (song->mid_chord_count > 1)
         qsort(song->mid_chords, (size_t)song->mid_chord_count, sizeof song->mid_chords[0], mid_chord_cmp);
+    parse_click_items(json, song);
 
     /* --- Instruments: read the top-level "instruments" array. --- */
     const char *inst_pos = strstr(json, "\"instruments\"");
@@ -3728,6 +3747,62 @@ static void parse_section_chords(const char *arr, song_t *song, int section_idx)
     }
     sec->chord_count = bar + 1;
     if (sec->chord_count > MAX_SECTION_BARS) sec->chord_count = MAX_SECTION_BARS;
+}
+
+static int click_item_cmp(const void *a, const void *b) {
+    const click_item_t *x = a, *y = b;
+    if (x->section != y->section) return (int)x->section - (int)y->section;
+    if (x->bar != y->bar) return (int)x->bar - (int)y->bar;
+    return (int)x->half_beat - (int)y->half_beat;
+}
+
+/* The song's top-level "click_items": [{"section":0,"bar":3,"beat":1,
+ * "volume":60}, ...] (see click_item_t). */
+static void parse_click_items(const char *json, song_t *song) {
+    song->click_item_count = 0;
+    const char *k = strstr(json, "\"click_items\"");
+    if (!k) return;
+    const char *p = strchr(k + 13, '[');
+    if (!p) return;
+    int depth = 0, in_string = 0, escape = 0, sec = -1, bar = -1, vol = 100;
+    double beat = 1.0;
+    while (*p) {
+        char c = *p;
+        if (escape) { escape = 0; p++; continue; }
+        if (c == '\\') { escape = 1; p++; continue; }
+        if (c == '"') {
+            in_string = !in_string;
+            if (in_string && depth == 1) {
+                if (strncmp(p + 1, "section\"", 8) == 0) { int v; if (json_get_int_at(p, "section", &v)) sec = v; }
+                else if (strncmp(p + 1, "bar\"", 4) == 0) { int v; if (json_get_int_at(p, "bar", &v)) bar = v; }
+                else if (strncmp(p + 1, "beat\"", 5) == 0) { double v; if (json_get_double_at(p, "beat", &v)) beat = v; }
+                else if (strncmp(p + 1, "volume\"", 7) == 0) { int v; if (json_get_int_at(p, "volume", &v)) vol = v; }
+            }
+            p++;
+            continue;
+        }
+        if (in_string) { p++; continue; }
+        if (c == '{') {
+            depth++;
+            if (depth == 1) { sec = -1; bar = -1; vol = 100; beat = 1.0; }
+        } else if (c == '}') {
+            depth--;
+            if (depth == 0 && sec >= 0 && sec < MAX_SONG_SECTIONS && bar >= 0 && bar < MAX_SECTION_BARS &&
+                song->click_item_count < MAX_CLICK_ITEMS) {
+                int half = (int)((beat - 1.0) * 2.0 + 0.5);
+                click_item_t *ci = &song->click_items[song->click_item_count++];
+                ci->section = (uint8_t)sec;
+                ci->bar = (uint16_t)bar;
+                ci->half_beat = (uint8_t)(half < 0 ? 0 : (half > 255 ? 255 : half));
+                ci->volume = (uint8_t)(vol < 0 ? 0 : (vol > 100 ? 100 : vol));
+            }
+        } else if (c == ']' && depth == 0) {
+            break;
+        }
+        p++;
+    }
+    if (song->click_item_count > 1)
+        qsort(song->click_items, (size_t)song->click_item_count, sizeof song->click_items[0], click_item_cmp);
 }
 
 static int mid_chord_cmp(const void *a, const void *b) {
@@ -4575,6 +4650,9 @@ static void copy_song_used(song_t *dst, const song_t *src) {
     int nm = clamp_count(src->mid_chord_count, MAX_MID_CHORDS);
     dst->mid_chord_count = src->mid_chord_count;
     memcpy(dst->mid_chords, src->mid_chords, (size_t)nm * sizeof dst->mid_chords[0]);
+    int nc = clamp_count(src->click_item_count, MAX_CLICK_ITEMS);
+    dst->click_item_count = src->click_item_count;
+    memcpy(dst->click_items, src->click_items, (size_t)nc * sizeof dst->click_items[0]);
 
     int ni = clamp_count(src->instrument_count, MAX_INSTRUMENTS);
     dst->instrument_count = src->instrument_count;
@@ -5479,7 +5557,7 @@ static void engine_clear_error(engine_t *e) {
 
 /* DSP build version stamp. Keep in sync with UI_BUILD_VERSION in ui.js so the
  * running dsp.so can be confirmed from .dsp_log on module load. */
-static const char *const DSP_BUILD_VERSION = "arranger-dsp-2026-10-06-institems";
+static const char *const DSP_BUILD_VERSION = "arranger-dsp-2026-10-06-clickvol";
 
 static void* arr_create_instance(const char *module_dir, const char *config_json) {
     (void)module_dir;
@@ -5512,6 +5590,7 @@ static void* arr_create_instance(const char *module_dir, const char *config_json
     e->click_voice.output_target = OUTPUT_TARGET_SCHWUNG;
     e->click_voice.channel = 9;
     e->click_accent_note = 76;     /* GM Hi Wood Block */
+    e->click_volume = 100;
     e->click_normal_note = 77;     /* GM Low Wood Block */
     e->click_last_beat = UINT32_MAX;
     for (int i = 0; i < MAX_INSTRUMENTS; i++) e->inst_live_enabled[i] = 1;
@@ -5679,6 +5758,25 @@ static void click_release(engine_t *e) {
  * the song, a seek back) starts a new beat even at the same beat number. A
  * beat only clicks if the block lands in its first half, so turning the
  * click on mid-beat waits for the next one. */
+/* The click volume at a tick: the section's latest click item at or before
+ * it, else the engine default. */
+static int click_volume_at(const engine_t *e, uint32_t tick) {
+    const song_t *song = &e->live_slot.song;
+    uint32_t bar = 0, bar_start = 0;
+    int sec = song_bar_at_tick(song, tick, e->ticks_per_bar, &bar, &bar_start, NULL);
+    int vol = e->click_volume;
+    if (sec < 0) return vol;
+    uint32_t off = tick - bar_start;
+    int n = song->click_item_count > MAX_CLICK_ITEMS ? MAX_CLICK_ITEMS : song->click_item_count;
+    for (int i = 0; i < n; i++) {
+        const click_item_t *c = &song->click_items[i];
+        if (c->section != (uint8_t)sec) continue;
+        if (c->bar < bar || (c->bar == bar && (uint32_t)c->half_beat * e->ticks_per_beat / 2 <= off))
+            vol = c->volume;
+    }
+    return vol;
+}
+
 static void update_click(engine_t *e) {
     const song_t *sg = &e->live_slot.song;
     int want = e->running && e->ticks_per_bar > 0 && e->time_sig_num > 0 &&
@@ -5703,7 +5801,11 @@ static void update_click(engine_t *e) {
     click_release(e);
     int accent = (tick % e->ticks_per_bar) < bt;
     uint8_t note = accent ? e->click_accent_note : e->click_normal_note;
-    emit_instrument_event(e, &e->click_voice, 0x90, note, accent ? 127 : 100);
+    int vol = sg->count_in ? e->click_volume : click_volume_at(e, tick);
+    int vel = ((accent ? 127 : 100) * vol + 50) / 100;
+    if (vel <= 0) return; /* 0%: no click here */
+    if (vel > 127) vel = 127;
+    emit_instrument_event(e, &e->click_voice, 0x90, note, (uint8_t)vel);
     e->click_sounding = 1;
     e->click_sounding_note = note;
     e->click_on_tick = tick;
@@ -6006,6 +6108,11 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
     }
     if (strcmp(key, "drop_note_offs") == 0) {
         e->drop_note_offs = atoi(val) ? 1 : 0;
+        return;
+    }
+    if (strcmp(key, "click_volume") == 0) {
+        int v = atoi(val);
+        e->click_volume = (uint8_t)(v < 0 ? 0 : (v > 100 ? 100 : v));
         return;
     }
     if (strcmp(key, "click_enabled") == 0) {
