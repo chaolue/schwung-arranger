@@ -9694,16 +9694,19 @@ function handlePerformanceInput(cc, value) {
          * Song Builder's track buttons). */
         if (cc === MoveRow1) {
             perfDrumEnabled = !perfDrumEnabled;
+            showPopup("Drums", perfDrumEnabled ? "On" : "Off", 2000);
             if (typeof host_module_set_param === "function") {
                 host_module_set_param("drum_enabled", perfDrumEnabled ? "1" : "0");
             }
         } else if (cc === MoveRow2) {
             perfInst1Enabled = !perfInst1Enabled;
+            showPopup("Inst 1", perfInst1Enabled ? "On" : "Off", 2000);
             if (typeof host_module_set_param === "function") {
                 host_module_set_param("inst1_enabled", perfInst1Enabled ? "1" : "0");
             }
         } else {
             perfInst2Enabled = !perfInst2Enabled;
+            showPopup("Inst 2", perfInst2Enabled ? "On" : "Off", 2000);
             if (typeof host_module_set_param === "function") {
                 host_module_set_param("inst2_enabled", perfInst2Enabled ? "1" : "0");
             }
@@ -10788,17 +10791,20 @@ function handleJamInput(cc, value) {
          * handleJamPad. */
         if (cc === MoveRow1) {
             jamDrumEnabled = !jamDrumEnabled;
+            showPopup("Drums", jamDrumEnabled ? "On" : "Off", 2000);
             if (typeof host_module_set_param === "function") {
                 host_module_set_param("drum_enabled", jamDrumEnabled ? "1" : "0");
             }
         } else if (cc === MoveRow2) {
             jamInst1Enabled = !jamInst1Enabled;
+            showPopup("Inst 1", jamInst1Enabled ? "On" : "Off", 2000);
             if (typeof host_module_set_param === "function") {
                 host_module_set_param("jam_inst1_enabled", jamInst1Enabled ? "1" : "0");
             }
             if (jamInst1Enabled) pushJamInstrumentRouting(0);
         } else {
             jamInst2Enabled = !jamInst2Enabled;
+            showPopup("Inst 2", jamInst2Enabled ? "On" : "Off", 2000);
             if (typeof host_module_set_param === "function") {
                 host_module_set_param("jam_inst2_enabled", jamInst2Enabled ? "1" : "0");
             }
