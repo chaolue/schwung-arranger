@@ -338,6 +338,16 @@ typedef struct {
     chord_t chords[MAX_SECTION_BARS];
 } section_t;
 
+/* A chord starting part-way through a bar: `half_beat` half-beats after the
+ * bar's start (2 = beat 2, 3 = the "and" of beat 2). */
+#define MAX_MID_CHORDS 256
+typedef struct {
+    uint8_t section;
+    uint8_t half_beat;
+    uint16_t bar;
+    chord_t chord;
+} mid_chord_t;
+
 typedef struct {
     char name[64];
     char source_folder[MAX_PATH_LEN];
@@ -355,6 +365,11 @@ typedef struct {
      * plays it instead when count_in_sound is set. See update_click. */
     uint8_t count_in;
     uint8_t count_in_sound;
+    /* Chords that start after a bar's first beat (a bar can hold several,
+     * each on its own beat), sorted by section, bar and position. A bar's
+     * beat-1 chord stays in its section's chords[]. See chord_at_song_tick. */
+    int mid_chord_count;
+    mid_chord_t mid_chords[MAX_MID_CHORDS];
 } song_t;
 
 /* -------------------------------------------------------------------------- */
@@ -448,7 +463,8 @@ static void scan_songs_into(engine_t *e, song_entry_t *songs, int *out_count);
 static const char* clip_lookup_find(engine_t *e, const char *leaf);
 static void clip_lookup_free(engine_t *e);
 static void parse_chords_and_instruments(const char *json, song_t *song);
-static void parse_section_chords(const char *arr, section_t *sec);
+static void parse_section_chords(const char *arr, song_t *song, int section_idx);
+static int mid_chord_cmp(const void *a, const void *b);
 static void parse_instrument_bars(const char *arr, instrument_t *inst);
 static void parse_instrument_overrides(const char *arr, instrument_t *inst);
 static void schedule_instrument_note_off(engine_t *e, int i, const inst_voice_t *voice,
@@ -2549,20 +2565,6 @@ static void resolve_instrument_for_bar(const instrument_t *inst, int section, in
     if (ov->inversion >= 0) out->inversion = (uint8_t)ov->inversion;
 }
 
-/* Find the chord active at a given bar within a section. A chord set on an
- * earlier bar carries forward until the next chord (or the section end). A
- * "No Chord" bar ends it: NULL, so the bar (and the unset bars it carries
- * into) is silent. */
-static const chord_t *chord_at_bar(const section_t *sec, uint32_t bar) {
-    if (!sec) return NULL;
-    const chord_t *last = NULL;
-    for (int b = 0; b < sec->chord_count && b < MAX_SECTION_BARS; b++) {
-        if (sec->chords[b].set) last = &sec->chords[b];
-        if ((uint32_t)b == bar) break;
-    }
-    return (last && last->none) ? NULL : last;
-}
-
 /* Song ticks a section spans: its assembled length, or whole bars for a song
  * that was never assembled. */
 static uint32_t section_span_ticks(const section_t *sec, uint32_t ticks_per_bar) {
@@ -2604,6 +2606,61 @@ static int tick_to_section_bar(const song_t *song, uint32_t tick,
     return song_bar_at_tick(song, tick, ticks_per_bar, out_bar, NULL, NULL);
 }
 
+/* The chord sounding at a tick, and the span it sounds over. */
+typedef struct {
+    const chord_t *chord;   /* NULL: no chord yet, or No Chord */
+    int explicit_here;      /* a chord is set where this span starts */
+    uint32_t seg_end;       /* tick of the next chord change point: the bar's
+                             * next mid-bar chord, else the bar's end */
+    uint32_t seg;           /* which span of its bar (0 = from the bar start) */
+} chord_pos_t;
+
+/* Find the chord sounding at `tick`: the latest chord at or before it in its
+ * section -- a mid-bar chord in this bar, else this bar's own chord, else
+ * the last chord of an earlier bar (a chord holds across unset bars). A No
+ * Chord ends the hold: NULL. Returns the section index (bar in *out_bar), or
+ * -1 past the song end. */
+static int chord_at_song_tick(const song_t *song, uint32_t tick, uint32_t ticks_per_bar,
+                              uint32_t ticks_per_beat, uint32_t *out_bar, chord_pos_t *cp) {
+    uint32_t bar = 0, bar_start = 0, bar_end = 0;
+    int si = song_bar_at_tick(song, tick, ticks_per_bar, &bar, &bar_start, &bar_end);
+    if (si < 0) return -1;
+    const section_t *sec = &song->sections[si];
+    uint32_t off = tick - bar_start, len = bar_end - bar_start, next_off = len;
+    const chord_t *ch = NULL;
+    int expl = 0;
+    uint32_t seg = 0;
+    int nm = song->mid_chord_count < 0 ? 0
+           : (song->mid_chord_count > MAX_MID_CHORDS ? MAX_MID_CHORDS : song->mid_chord_count);
+    for (int i = 0; i < nm; i++) {
+        const mid_chord_t *m = &song->mid_chords[i];
+        if (m->section != (uint8_t)si || m->bar != bar) continue;
+        uint32_t mo = (uint32_t)m->half_beat * ticks_per_beat / 2;
+        if (mo >= len) continue; /* past a short last bar's end */
+        if (mo <= off) { ch = &m->chord; expl = 1; seg++; }
+        else if (mo < next_off) next_off = mo;
+    }
+    if (!ch && bar < (uint32_t)sec->chord_count && bar < MAX_SECTION_BARS && sec->chords[bar].set) {
+        ch = &sec->chords[bar];
+        expl = 1;
+    }
+    for (int b = (int)bar - 1; b >= 0 && !ch; b--) {
+        for (int i = nm - 1; i >= 0; i--) { /* sorted: the bar's last mid-bar chord */
+            const mid_chord_t *m = &song->mid_chords[i];
+            if (m->section == (uint8_t)si && m->bar == (uint16_t)b) { ch = &m->chord; break; }
+        }
+        if (!ch && b < sec->chord_count && sec->chords[b].set) ch = &sec->chords[b];
+    }
+    if (out_bar) *out_bar = bar;
+    if (cp) {
+        cp->chord = (ch && !ch->none) ? ch : NULL;
+        cp->explicit_here = expl;
+        cp->seg_end = bar_start + next_off;
+        cp->seg = seg;
+    }
+    return si;
+}
+
 /* Compare two chords for equality (both null = equal; both set with the same
  * root/quality/bass = equal). */
 static int chord_equal(const chord_t *a, const chord_t *b) {
@@ -2624,16 +2681,17 @@ static int chord_equal(const chord_t *a, const chord_t *b) {
  * `note_gap` before the next chord change (or the song end). */
 static void emit_instruments_at_tick(engine_t *e, uint32_t tick) {
     if (!e || e->live_slot.song.instrument_count == 0) return;
-    uint32_t bar = 0, bar_end_tick = 0;
-    int sec_idx = song_bar_at_tick(&e->live_slot.song, tick, e->ticks_per_bar, &bar, NULL, &bar_end_tick);
+    uint32_t bar = 0;
+    chord_pos_t cp;
+    int sec_idx = chord_at_song_tick(&e->live_slot.song, tick, e->ticks_per_bar, e->ticks_per_beat, &bar, &cp);
     if (sec_idx < 0) return;
-    section_t *sec = &e->live_slot.song.sections[sec_idx];
-    const chord_t *ch = chord_at_bar(sec, bar);
-    /* The chord at the next bar (or NULL past the song end). */
-    uint32_t next_bar = 0;
-    int next_sec = song_bar_at_tick(&e->live_slot.song, bar_end_tick, e->ticks_per_bar, &next_bar, NULL, NULL);
-    const chord_t *next_ch = next_sec >= 0
-        ? chord_at_bar(&e->live_slot.song.sections[next_sec], next_bar) : NULL;
+    const chord_t *ch = cp.chord;
+    /* Where this chord's span ends: the next chord in the bar, else the bar's
+     * end. The chord there (NULL past the song end). */
+    uint32_t bar_end_tick = cp.seg_end;
+    chord_pos_t np;
+    const chord_t *next_ch = chord_at_song_tick(&e->live_slot.song, bar_end_tick, e->ticks_per_bar,
+                                                e->ticks_per_beat, NULL, &np) >= 0 ? np.chord : NULL;
     dsp_log_enqueue_worker("EMIT_INST tick=%u sec=%d bar=%u chord=%s next=%s", tick, sec_idx, bar,
             (ch && ch->set) ? ch->root : "null",
             (next_ch && next_ch->set) ? next_ch->root : "null");
@@ -2686,7 +2744,7 @@ static void emit_instruments_at_tick(engine_t *e, uint32_t tick) {
              * unset bars). An explicit chord repeated on consecutive bars is
              * a fresh attack, not a continued hold, even when it's the same
              * chord as the bar before it. */
-            int chord_explicit_here = (bar < (uint32_t)sec->chord_count) && sec->chords[bar].set;
+            int chord_explicit_here = cp.explicit_here;
             int chord_unchanged = e->last_inst_chord_set[i] && chord_equal(&e->last_inst_chord[i], ch);
             /* Emit a note-on when the chord changes, or when this bar is a
              * fresh explicit attack (chord_explicit_here) even if unchanged;
@@ -2807,20 +2865,25 @@ static void emit_instruments_follow(engine_t *e, uint8_t note, uint32_t tick) {
      * the Swap Guard window of the next bar boundary, pick up that next
      * bar's chord (and mute state) instead of holding the outgoing one a
      * beat early. Falls back to the outgoing bar past the end of the song. */
+    /* The same applies at a chord change mid-bar: a hit just ahead of it
+     * takes the new chord. */
+    chord_pos_t cp;
+    chord_at_song_tick(&e->live_slot.song, tick, e->ticks_per_bar, e->ticks_per_beat, NULL, &cp);
+    const chord_t *ch = cp.chord;
     if (e->ticks_per_bar > 0) {
-        uint32_t bar_end_tick = 0;
-        song_bar_at_tick(&e->live_slot.song, tick, e->ticks_per_bar, NULL, NULL, &bar_end_tick);
+        uint32_t bar_end_tick = cp.seg_end;
         if (bar_end_tick > tick && (bar_end_tick - tick) <= guard_ticks) {
             uint32_t next_bar = 0;
-            int next_sec = tick_to_section_bar(&e->live_slot.song, bar_end_tick, e->ticks_per_bar, &next_bar);
+            chord_pos_t np;
+            int next_sec = chord_at_song_tick(&e->live_slot.song, bar_end_tick, e->ticks_per_bar,
+                                              e->ticks_per_beat, &next_bar, &np);
             if (next_sec >= 0) {
                 sec_idx = next_sec;
                 bar = next_bar;
+                ch = np.chord;
             }
         }
     }
-    section_t *sec = &e->live_slot.song.sections[sec_idx];
-    const chord_t *ch = chord_at_bar(sec, bar);
     for (int i = 0; i < e->live_slot.song.instrument_count && i < MAX_INSTRUMENTS; i++) {
         instrument_t *inst = &e->live_slot.song.instruments[i];
         if (!inst->enabled || !e->inst_live_enabled[i]) continue;
@@ -3315,6 +3378,7 @@ static int parse_song_json(engine_t *e, const char *json, song_t *song,
  * octave, follow_note, voicing, bars:[[1,0,...],...]}. */
 static void parse_chords_and_instruments(const char *json, song_t *song) {
     /* --- Chords: walk each section object and read its "chords" array. --- */
+    song->mid_chord_count = 0;
     const char *sec_pos = strstr(json, "\"sections\"");
     if (sec_pos) {
         const char *arr_start = strchr(sec_pos, '[');
@@ -3337,7 +3401,7 @@ static void parse_chords_and_instruments(const char *json, song_t *song) {
                         strncmp(p, "\"chords\"", 8) == 0) {
                         const char *ch_arr = strchr(p + 8, '[');
                         if (ch_arr) {
-                            parse_section_chords(ch_arr, &song->sections[section_idx]);
+                            parse_section_chords(ch_arr, song, section_idx);
                         }
                     }
                     p++;
@@ -3357,6 +3421,9 @@ static void parse_chords_and_instruments(const char *json, song_t *song) {
             }
         }
     }
+
+    if (song->mid_chord_count > 1)
+        qsort(song->mid_chords, (size_t)song->mid_chord_count, sizeof song->mid_chords[0], mid_chord_cmp);
 
     /* --- Instruments: read the top-level "instruments" array. --- */
     const char *inst_pos = strstr(json, "\"instruments\"");
@@ -3472,10 +3539,36 @@ static void parse_chords_and_instruments(const char *json, song_t *song) {
 }
 
 /* Parse a section's "chords" array: [ {root,quality,bass}, null, ... ]. */
-static void parse_section_chords(const char *arr, section_t *sec) {
-    if (!arr || !sec) return;
-    int depth = 0, in_string = 0, escape = 0;
+/* Place one parsed chord: on beat 1 it is the bar's chord (chords[bar]);
+ * later in the bar it joins the song's mid-bar chords. */
+static void place_parsed_chord(song_t *song, int section_idx, section_t *sec, int bar,
+                               const chord_t *ch, double beat) {
+    if (bar < 0 || bar >= MAX_SECTION_BARS) return;
+    int half = (int)((beat - 1.0) * 2.0 + 0.5);
+    if (half <= 0) {
+        sec->chords[bar] = *ch;
+        return;
+    }
+    if (song->mid_chord_count >= MAX_MID_CHORDS || half > 255) return;
+    mid_chord_t *m = &song->mid_chords[song->mid_chord_count++];
+    m->section = (uint8_t)section_idx;
+    m->bar = (uint16_t)bar;
+    m->half_beat = (uint8_t)half;
+    m->chord = *ch;
+}
+
+/* A section's "chords" array: one entry per bar -- null (holds the previous
+ * chord), a chord object, or an array of chord objects for a bar with several
+ * chords. A chord object may carry "beat" (1-based, halves allowed: 2.5 is
+ * the "and" of beat 2); without it, beat 1. */
+static void parse_section_chords(const char *arr, song_t *song, int section_idx) {
+    if (!arr || !song || section_idx < 0 || section_idx >= MAX_SONG_SECTIONS) return;
+    section_t *sec = &song->sections[section_idx];
+    int depth = 0, adepth = 0, in_string = 0, escape = 0;
     int bar = -1;
+    chord_t cur;
+    double cur_beat = 1.0;
+    memset(&cur, 0, sizeof cur);
     const char *p = arr;
     while (*p) {
         char c = *p;
@@ -3484,7 +3577,7 @@ static void parse_section_chords(const char *arr, section_t *sec) {
         if (c == '"') {
             in_string = !in_string;
             if (in_string && depth == 1 && bar >= 0 && bar < MAX_SECTION_BARS) {
-                chord_t *ch = &sec->chords[bar];
+                chord_t *ch = &cur;
                 if (strncmp(p + 1, "root", 4) == 0) {
                     char v[8];
                     if (json_get_string_at(p, "root", v, sizeof(v))) copy_trunc(ch->root, sizeof(ch->root), v);
@@ -3494,6 +3587,8 @@ static void parse_section_chords(const char *arr, section_t *sec) {
                 } else if (strncmp(p + 1, "bass", 4) == 0) {
                     char v[8];
                     if (json_get_string_at(p, "bass", v, sizeof(v))) copy_trunc(ch->bass, sizeof(ch->bass), v);
+                } else if (strncmp(p + 1, "beat\"", 5) == 0) {
+                    double v; if (json_get_double_at(p, "beat", &v)) cur_beat = v;
                 } else if (strncmp(p + 1, "degree\"", 7) == 0) {
                     int v; if (json_get_int_at(p, "degree", &v)) ch->degree = (int8_t)((v >= 0 && v <= 7) ? v : -1);
                 } else if (strncmp(p + 1, "key\"", 4) == 0) {
@@ -3510,23 +3605,39 @@ static void parse_section_chords(const char *arr, section_t *sec) {
         if (c == '{') {
             depth++;
             if (depth == 1) {
-                bar++;
-                if (bar >= MAX_SECTION_BARS) break;
-                chord_t *ch = &sec->chords[bar];
-                memset(ch, 0, sizeof(*ch));
-                ch->set = 1;
-                ch->degree = -1;
-                ch->key_pc = -1;
-                copy_trunc(ch->quality, sizeof(ch->quality), "maj");
+                /* A chord object: its own bar, unless inside a bar's array. */
+                if (adepth <= 1) bar++;
+                memset(&cur, 0, sizeof cur);
+                cur.set = 1;
+                cur.degree = -1;
+                cur.key_pc = -1;
+                copy_trunc(cur.quality, sizeof(cur.quality), "maj");
+                cur_beat = 1.0;
             }
             p++;
             continue;
         }
-        if (c == '}') { depth--; p++; continue; }
-        if (c == '[') { p++; continue; }
-        if (c == ']') { if (depth == 0) break; p++; continue; }
+        if (c == '}') {
+            depth--;
+            if (depth == 0) place_parsed_chord(song, section_idx, sec, bar, &cur, cur_beat);
+            p++;
+            continue;
+        }
+        if (c == '[') {
+            adepth++;
+            /* A bar's array of chords. */
+            if (adepth == 2) bar++;
+            p++;
+            continue;
+        }
+        if (c == ']') {
+            adepth--;
+            if (adepth <= 0) break;
+            p++;
+            continue;
+        }
         /* A null entry advances the bar index without setting a chord. */
-        if (c == 'n' && depth == 0 && strncmp(p, "null", 4) == 0) {
+        if (c == 'n' && depth == 0 && adepth == 1 && strncmp(p, "null", 4) == 0) {
             bar++;
             p += 4;
             continue;
@@ -3534,6 +3645,14 @@ static void parse_section_chords(const char *arr, section_t *sec) {
         p++;
     }
     sec->chord_count = bar + 1;
+    if (sec->chord_count > MAX_SECTION_BARS) sec->chord_count = MAX_SECTION_BARS;
+}
+
+static int mid_chord_cmp(const void *a, const void *b) {
+    const mid_chord_t *x = a, *y = b;
+    if (x->section != y->section) return (int)x->section - (int)y->section;
+    if (x->bar != y->bar) return (int)x->bar - (int)y->bar;
+    return (int)x->half_beat - (int)y->half_beat;
 }
 
 /* Parse an instrument's "bars" array: [[1,0,...], [1,1,...], ...]. Each inner
@@ -4286,6 +4405,10 @@ static void copy_song_used(song_t *dst, const song_t *src) {
                (size_t)clamp_count(ss->chord_count, MAX_SECTION_BARS) * sizeof ds->chords[0]);
     }
 
+    int nm = clamp_count(src->mid_chord_count, MAX_MID_CHORDS);
+    dst->mid_chord_count = src->mid_chord_count;
+    memcpy(dst->mid_chords, src->mid_chords, (size_t)nm * sizeof dst->mid_chords[0]);
+
     int ni = clamp_count(src->instrument_count, MAX_INSTRUMENTS);
     dst->instrument_count = src->instrument_count;
     for (int i = 0; i < ni; i++) {
@@ -4919,12 +5042,24 @@ static void engine_swap_to_staging(engine_t *e, const timeline_slot_t *src) {
  * (including a loop wrap, where the bar number goes backwards, and seeks).
  * The UI uses this monotonic counter to detect boundaries authoritatively
  * instead of inferring them from bar/beat deltas in JS. */
-/* The section and chord bar at a tick, as one comparable key. */
+/* The section, chord bar and chord span within it at a tick, as one
+ * comparable key: it changes wherever a chord can change. */
 static uint32_t inst_bar_key_at(engine_t *e, uint32_t tick) {
-    uint32_t bar = 0;
-    int sec = tick_to_section_bar(&e->live_slot.song, tick, e->ticks_per_bar, &bar);
+    /* Runs every block: count the bar's mid-bar chords already reached
+     * rather than resolving the chord (which can walk back across bars). */
+    const song_t *song = &e->live_slot.song;
+    uint32_t bar = 0, bar_start = 0, bar_end = 0;
+    int sec = song_bar_at_tick(song, tick, e->ticks_per_bar, &bar, &bar_start, &bar_end);
     if (sec < 0) return 0xFFFFFFFFu;
-    return ((uint32_t)sec << 16) | (bar & 0xFFFF);
+    uint32_t off = tick - bar_start, len = bar_end - bar_start, seg = 0;
+    int nm = song->mid_chord_count > MAX_MID_CHORDS ? MAX_MID_CHORDS : song->mid_chord_count;
+    for (int i = 0; i < nm; i++) {
+        const mid_chord_t *m = &song->mid_chords[i];
+        if (m->section != (uint8_t)sec || m->bar != bar) continue;
+        uint32_t mo = (uint32_t)m->half_beat * e->ticks_per_beat / 2;
+        if (mo < len && mo <= off) seg++;
+    }
+    return ((uint32_t)sec << 20) | ((bar & 0xFFF) << 8) | (seg & 0xFF);
 }
 
 static void update_bar_counter(engine_t *e) {
@@ -5161,7 +5296,7 @@ static void engine_clear_error(engine_t *e) {
 
 /* DSP build version stamp. Keep in sync with UI_BUILD_VERSION in ui.js so the
  * running dsp.so can be confirmed from .dsp_log on module load. */
-static const char *const DSP_BUILD_VERSION = "arranger-dsp-2026-10-05-nochord";
+static const char *const DSP_BUILD_VERSION = "arranger-dsp-2026-10-05-multichord";
 
 static void* arr_create_instance(const char *module_dir, const char *config_json) {
     (void)module_dir;
