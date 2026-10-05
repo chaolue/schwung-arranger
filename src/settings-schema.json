@@ -99,6 +99,14 @@
             "default": 77
         },
         {
+            "key": "click_volume",
+            "label": "Click Volume (%)",
+            "type": "int",
+            "min": 0,
+            "max": 100,
+            "default": 100
+        },
+        {
             "key": "swap_guard_fraction",
             "label": "Boundary Guard Fraction (of a beat)",
             "type": "float",

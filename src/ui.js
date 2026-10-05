@@ -8,7 +8,7 @@
  * confirmed from the logs (see init()/playCurrentSong()) instead of guessing
  * whether a new file actually loaded. Keep the DSP dsp_build_version in
  * arranger_engine.c in sync so both sides are verifiable. */
-const UI_BUILD_VERSION = "arranger-ui-2026-10-06-chordlist";
+const UI_BUILD_VERSION = "arranger-ui-2026-10-06-itemtracks";
 
 /* Lit white buttons at full brightness (127). Schwung's WhiteLedBright is 124. */
 const WhiteLedFull = 127;
@@ -169,8 +169,9 @@ const TRACK_INSTRUMENT_2 = 3;
 /* Track button per builder track: Track 1 holds both Drum and Chord (it
  * toggles between them), Track 2 = Inst 1, Track 3 = Inst 2. Track 4 is the
  * click on/off in every mode -- see toggleClick. */
-const TRACK_ROW_CC = [MoveRow1, MoveRow1, MoveRow2, MoveRow3];
-const TRACK_ROW_COLOUR = [White, AzureBlue, BrightYellow, Purple];
+const TRACK_CLICK = 4;
+const TRACK_ROW_CC = [MoveRow1, MoveRow1, MoveRow2, MoveRow3, MoveRow4];
+const TRACK_ROW_COLOUR = [White, AzureBlue, BrightYellow, Purple, 3 /* Bright Orange, CLICK_ROW_COLOUR */];
 const CLICK_ROW_COLOUR = 3; /* Bright Orange */
 
 /* The 12 major keys, in chromatic order. Each entry is the tonic note name. */
@@ -325,6 +326,9 @@ let clickOutput = "schwung";
 let clickMidiChannel = 10;  /* 1-16 */
 let clickAccentNote = 76;   /* GM Hi Wood Block */
 let clickNormalNote = 77;   /* GM Low Wood Block */
+/* Click loudness (percent of its normal velocity): each song section starts
+ * here, the Click track's items change it. */
+let clickVolume = 100;
 let clickOn = false;
 /* Instrument track output/channel, shared globally across all songs and set
  * from the Options menu (Instrument 1 / Instrument 2 submenus), not per-song. */
@@ -1610,11 +1614,6 @@ let instrumentFocus = 0;
 let instrumentEditing = false;
 /* Per-bar instrument override menu state (Octave/Follow Note/Voicing/Mute
  * for a single bar, opened by a plain step press on an instrument track). */
-let instrumentBarEditTrack = -1;
-let instrumentBarEditSection = 0;
-let instrumentBarEditBar = 0;
-let instrumentBarFocus = 0;
-let instrumentBarEditing = false;
 
 let selectedOutputIndex = 0;
 let optionsFocus = 0;      /* 0 = Drums, 1 = Instrument 1, 2 = Instrument 2, 3 = Chains, 4 = Click channel, 5 = Swap guard, 6 = Schwung clock, 7 = DSP debug */
@@ -2534,6 +2533,78 @@ export function setBarChords(sec, barIndex, list) {
     unsavedChanges = true;
 }
 
+/* Song Builder's Inst 1/2 and Click tracks keep a list of items in each
+ * section (sec.inst[0|1], sec.click), so they move with their section. An
+ * item starts at a bar/beat (beat as for chords: 1-based, halves when
+ * "adv") and holds until the section's next item; each section starts on
+ * the track's defaults. An Inst item may set mute, octave, follow_note,
+ * voicing, inversion and note_gap (unset = the track default); a Click item
+ * sets volume (percent). */
+export function sectionItems(sec, track) {
+    if (!sec) return [];
+    if (track === TRACK_CLICK) {
+        if (!Array.isArray(sec.click)) sec.click = [];
+        return sec.click;
+    }
+    const k = track === TRACK_INSTRUMENT_2 ? 1 : 0;
+    if (!Array.isArray(sec.inst)) sec.inst = [];
+    if (!Array.isArray(sec.inst[k])) sec.inst[k] = [];
+    return sec.inst[k];
+}
+
+export function sortItems(list) {
+    list.sort((a, b) => (a.bar - b.bar) || (chordBeat(a) - chordBeat(b)));
+    return list;
+}
+
+const INST_ITEM_FIELDS = ["mute", "octave", "follow_note", "voicing", "inversion", "note_gap"];
+
+/* Turn an instrument's old per-bar mutes (inst.bars) and per-bar overrides
+ * (inst.overrides), both indexed by section number, into section items that
+ * sound the same: an item wherever a bar's settings differ from the bar
+ * before, and one back to the defaults after the last. Returns true if the
+ * song changed. */
+export function migrateInstrumentItems(song) {
+    if (!song || !Array.isArray(song.instruments) || !Array.isArray(song.sections)) return false;
+    let changed = false;
+    song.instruments.forEach((inst, k) => {
+        if (!inst || k > 1) return;
+        const bars = Array.isArray(inst.bars) ? inst.bars : [];
+        const ovs = Array.isArray(inst.overrides) ? inst.overrides.filter(Boolean) : [];
+        const hasOld = bars.some(sb => Array.isArray(sb) && sb.some(b => b === false)) || ovs.length > 0;
+        if (!hasOld) return;
+        song.sections.forEach((sec, si) => {
+            if (Array.isArray(sec.inst) && Array.isArray(sec.inst[k]) && sec.inst[k].length) return;
+            const sb = Array.isArray(bars[si]) ? bars[si] : [];
+            const so = ovs.filter(o => o.section === si);
+            let n = sb.length;
+            for (const o of so) n = Math.max(n, o.bar + 1);
+            const list = [];
+            let prev = "{}";
+            for (let b = 0; b <= n; b++) {
+                const st = {};
+                if (b < n) {
+                    if (sb[b] === false) st.mute = true;
+                    const o = so.find(x => x.bar === b);
+                    if (o) for (const f of ["octave", "follow_note", "voicing", "inversion"]) {
+                        if (o[f] !== null && o[f] !== undefined) st[f] = o[f];
+                    }
+                }
+                const key = JSON.stringify(st);
+                if (key !== prev) { list.push(Object.assign({ bar: b }, st)); prev = key; }
+            }
+            if (list.length) {
+                if (!Array.isArray(sec.inst)) sec.inst = [];
+                sec.inst[k] = list;
+            }
+        });
+        inst.bars = [];
+        inst.overrides = [];
+        changed = true;
+    });
+    return changed;
+}
+
 /* The first chord of a bar (whatever starts it), or null. */
 function chordAtBar(sec, barIndex) {
     const list = barChords(sec, barIndex);
@@ -2829,7 +2900,20 @@ export function toEngineSongJson(song) {
     for (let i = 0; i < instList.length; i++) {
         const inst = instList[i];
         const g = instGlobals[i] || instGlobals[0];
+        /* Settings changes by position, from each section's items (see
+         * sectionItems); the engine then ignores bars/overrides below. */
+        const itemsOut = [];
+        (song.sections || []).forEach((sec, si) => {
+            const list = (Array.isArray(sec.inst) && Array.isArray(sec.inst[i])) ? sec.inst[i] : [];
+            for (const it of list) {
+                const o = { section: si, bar: it.bar };
+                if (chordBeat(it) !== 1) o.beat = chordBeat(it);
+                for (const f of INST_ITEM_FIELDS) if (it[f] !== null && it[f] !== undefined) o[f] = it[f];
+                itemsOut.push(o);
+            }
+        });
         instrumentsOut.push({
+            items: itemsOut,
             enabled: !!inst.enabled,
             output: g.output || "external",
             channel: (typeof g.channel === "number" && g.channel >= 1 && g.channel <= 16) ? g.channel : 1,
@@ -2879,6 +2963,12 @@ export function toEngineSongJson(song) {
         /* A Perform count-in: the click track plays it -- see clickSoundOn. */
         count_in: song.count_in ? 1 : 0,
         count_in_sound: song.count_in_sound ? 1 : 0,
+        /* Click volume changes (the Click track's items). */
+        click_items: (song.sections || []).flatMap((sec, si) => (Array.isArray(sec.click) ? sec.click : []).map(it => {
+            const o = { section: si, bar: it.bar, volume: typeof it.volume === "number" ? it.volume : 100 };
+            if (chordBeat(it) !== 1) o.beat = chordBeat(it);
+            return o;
+        })),
         sections: secOut,
         instruments: instrumentsOut
     });
@@ -2887,7 +2977,7 @@ export function toEngineSongJson(song) {
 export function toUiSong(engineLike) {
     const s = engineLike || {};
     const songFolder = s.source_folder || "";
-    return {
+    const song = {
         id: s.id || ("song-" + Date.now()),
         name: s.name || "Untitled",
         source_folder: songFolder,
@@ -2901,6 +2991,11 @@ export function toUiSong(engineLike) {
         sections: (s.sections || []).map(sec => ({
             id: sec.id || ("sec-" + Date.now()),
             name: sec.name || "Section",
+            /* The Inst 1/2 and Click tracks' items (see sectionItems). */
+            inst: Array.isArray(sec.inst)
+                ? sec.inst.map(l => (Array.isArray(l) ? l : []).filter(Boolean).map(it => Object.assign({}, it)))
+                : undefined,
+            click: Array.isArray(sec.click) ? sec.click.filter(Boolean).map(it => Object.assign({}, it)) : undefined,
             chords: (sec.chords || []).map(e => {
                 if (!e) return null;
                 const one = (c) => {
@@ -2968,6 +3063,10 @@ export function toUiSong(engineLike) {
             })
         }))
     };
+    /* Old per-bar instrument data becomes section items (see
+     * migrateInstrumentItems). */
+    migrateInstrumentItems(song);
+    return song;
 }
 
 function clipDisplayName(path) {
@@ -3214,6 +3313,8 @@ function loadSettings() {
     if (typeof can === "number") clickAccentNote = can;
     const cnn = pick("click_normal_note", "number");
     if (typeof cnn === "number") clickNormalNote = cnn;
+    const cvol = pick("click_volume", "number");
+    if (typeof cvol === "number") clickVolume = cvol;
     const sg = pick("swap_guard_fraction", "number");
     if (typeof sg === "number") swapGuardFraction = sg;
     const dd = pick("dsp_debug", "boolean");
@@ -3240,6 +3341,7 @@ function loadSettings() {
     if (clickMidiChannel > 16) clickMidiChannel = 16;
     clickAccentNote = Math.max(0, Math.min(127, clickAccentNote));
     clickNormalNote = Math.max(0, Math.min(127, clickNormalNote));
+    clickVolume = Math.max(0, Math.min(100, Math.round(clickVolume)));
     if (OUTPUT_TARGETS.indexOf(clickOutput) < 0) clickOutput = "schwung";
     if (swapGuardFraction < 0) swapGuardFraction = 0;
     if (swapGuardFraction > 1) swapGuardFraction = 1;
@@ -3302,6 +3404,7 @@ function saveOutputSettings() {
         click_midi_channel: clickMidiChannel,
         click_accent_note: clickAccentNote,
         click_normal_note: clickNormalNote,
+        click_volume: clickVolume,
         swap_guard_fraction: swapGuardFraction,
         dsp_debug: dspDebugEnabled,
         drop_note_offs: dropNoteOffs,
@@ -3351,6 +3454,7 @@ function pushClickToDsp() {
     set("click_channel", String(clickMidiChannel - 1), t); /* DSP wants 0-based */
     set("click_accent_note", String(clickAccentNote), t);
     set("click_normal_note", String(clickNormalNote), t);
+    set("click_volume", String(clickVolume), t);
     set("click_enabled", clickOn ? "1" : "0", t);
 }
 
@@ -4733,9 +4837,15 @@ function updateButtonLEDs() {
                         const trackInst = instrumentForTrack(t);
                         if (trackInst && !trackInst.enabled) rowColour = veryDarkPartner(rowColour);
                     }
-                    active.set(TRACK_ROW_CC[t], rowColour);
+                    if (t !== TRACK_CLICK) active.set(TRACK_ROW_CC[t], rowColour);
                 }
-                active.set(MoveRow4, clickOn ? CLICK_ROW_COLOUR : DarkGrey);
+                /* Track 4 (the Click track): bright when selected, dim when
+                 * not; its very-dark partner while the click is off. */
+                if (builderTrack === TRACK_CLICK) {
+                    active.set(MoveRow4, clickOn ? CLICK_ROW_COLOUR : veryDarkPartner(CLICK_ROW_COLOUR));
+                } else {
+                    active.set(MoveRow4, clickOn ? veryDarkPartner(CLICK_ROW_COLOUR) : DarkGrey);
+                }
                 if (ledHasLeftSection) active.set(MoveLeft, WhiteLedFull);
                 if (ledHasRightSection) active.set(MoveRight, WhiteLedFull);
                 /* Play is green while playing; when stopped it is white only
@@ -6360,15 +6470,27 @@ function drawChordStepLEDs(force) {
         const inBar = barChords(sec, barIndex);
         /* The bar's first sounding chord, else its No Chord, else null. */
         const chord = inBar.find(c => !c.none) || inBar[0] || null;
-        if (inst) {
+        if (builderTrack === TRACK_CLICK) {
+            /* Bars where a click item starts in the track colour; others
+             * dim while the click sounds there, dark grey where it's at 0%.
+             * The selected item's bar white. */
+            const list = sectionItems(sec, TRACK_CLICK);
+            const at = itemAtBarStart(list, barIndex);
+            const vol = at && typeof at.volume === "number" ? at.volume : clickVolume;
+            if (barIndex === chordCursorBar) stepColor(s, White, force);
+            else if (list.some(it => it.bar === barIndex)) stepColor(s, trackColour, force);
+            else stepColor(s, vol > 0 ? veryDarkPartner(trackColour) : DarkGrey, force);
+        } else if (inst) {
             /* A disabled instrument track shows every bar dimmed — none of
-             * it is actually sounding right now, regardless of per-bar
-             * chord/mute state. The jog cursor's bar shows white. */
+             * it is actually sounding right now, regardless of its items.
+             * A bar muted by an item is dimmed too. The selected item's bar
+             * shows white. */
+            const muteItem = itemAtBarStart(sectionItems(sec, builderTrack), barIndex);
             if (barIndex === chordCursorBar) {
                 stepColor(s, White, force);
             } else if (!chord || chord.none) {
                 stepColor(s, DarkGrey, force);
-            } else if (inst.enabled && instrumentBarOn(inst, secIndex, barIndex)) {
+            } else if (inst.enabled && !(muteItem && muteItem.mute)) {
                 stepColor(s, trackColour, force);
             } else {
                 stepColor(s, veryDarkPartner(trackColour), force);
@@ -6507,7 +6629,7 @@ function drawFolderList() {
 function drawBuilder() {
     /* The chord and instrument tracks have their own displays. */
     if (builderTrack === TRACK_CHORD) { drawChordTrack(); return; }
-    if (builderTrack === TRACK_INSTRUMENT_1 || builderTrack === TRACK_INSTRUMENT_2) { drawInstrumentTrack(); return; }
+    if (isItemTrack(builderTrack)) { drawItemTrack(); return; }
     const playingIdx = (playbackState === "playing" && builderDisplaySection >= 0) ? builderDisplaySection : playbackSectionIndex;
     /* builderPlayingFromTemp: currentSong is a song sliced to start at
      * currentSectionIndex while playCurrentSong's async build/play is still
@@ -6789,32 +6911,6 @@ function chordListDuplicate() {
     needsRedraw = true;
 }
 
-/* Draw the instrument track display (mirrors the chord track, with per-bar
- * on/off toggles). */
-function drawInstrumentTrack() {
-    const secIndex = chordDisplaySectionIndex();
-    const sec = currentSong ? currentSong.sections[secIndex] : null;
-    const inst = instrumentForTrack(builderTrack);
-    const key = currentSong ? (currentSong.key || DEFAULT_KEY) : DEFAULT_KEY;
-    const label = builderTrack === TRACK_INSTRUMENT_1 ? "Inst 1" : "Inst 2";
-    drawMenuHeader(scrollHeader(label + ": " + (currentSong ? shortSongName(currentSong.name) : ""), 22), inst && inst.enabled ? "ON" : "OFF");
-    if (!sec) {
-        print(2, LIST_TOP_Y, "No section.", 1);
-        drawOverlay();
-        return;
-    }
-    const totalBars = sectionChordBars(sec);
-    const curEv = chordCursorNowNext(sec).cur;
-    const curChord = curEv ? curEv.chord : null;
-    const on = inst ? instrumentBarOn(inst, secIndex, chordCursorBar) : true;
-    const channel = builderTrack === TRACK_INSTRUMENT_1 ? inst1Channel : inst2Channel;
-    print(2, LIST_TOP_Y, "Sec: " + (sec.name || "Section"), 1);
-    print(2, LIST_TOP_Y + 9, "Now: " + (curChord ? chordLabel(curChord) : "—"), 1);
-    print(2, LIST_TOP_Y + 18, "Bar " + (chordCursorBar + 1) + "/" + totalBars + "  " + (on ? "Send" : "Mute"), 1);
-    print(2, LIST_TOP_Y + 27, "Key " + key + "  Ch " + channel, 1);
-    drawOverlay();
-}
-
 /* Every chord of a section in play order: {bar, idx, beat, chord}. */
 function sectionChordEvents(sec) {
     const out = [];
@@ -6830,90 +6926,10 @@ function beatSuffix(ev) {
     return ev && ev.beat !== 1 ? " @" + formatBeat(ev.beat) : "";
 }
 
-/* The chord under the jog cursor (else the last before it -- a held chord
- * carries forward) and the one after it. */
-function chordCursorNowNext(sec) {
-    const evs = sectionChordEvents(sec);
-    let ci = -1;
-    for (let i = 0; i < evs.length; i++) {
-        const e = evs[i];
-        if (e.bar < chordCursorBar || (e.bar === chordCursorBar && e.idx <= chordCursorIdx)) ci = i;
-    }
-    if (ci >= 0) return { cur: evs[ci], next: evs[ci + 1] || null };
-    return { cur: null, next: evs.find(e => e.bar > chordCursorBar) || null };
-}
-
-/* Where the jog wheel stops on the chord or an instrument track, as
- * [bar, idx]: each chord (or No Chord) -- a bar with several has a stop for
- * each -- and on an instrument track also bars with their own per-bar
- * settings or muted. */
-function chordTrackStops(sec, secIndex) {
-    const total = sectionChordBars(sec);
-    const inst = (builderTrack === TRACK_INSTRUMENT_1 || builderTrack === TRACK_INSTRUMENT_2)
-        ? instrumentForTrack(builderTrack) : null;
-    const out = [];
-    for (let b = 0; b < total; b++) {
-        const n = barChords(sec, b).length;
-        if (n > 0) {
-            for (let i = 0; i < n; i++) out.push([b, i]);
-        } else if (inst && (instrumentBarOverride(inst, secIndex, b) || !instrumentBarOn(inst, secIndex, b))) {
-            out.push([b, 0]);
-        }
-    }
-    return out;
-}
-
-/* Jog on the chord/instrument tracks: move the cursor to the next (or
- * previous) stop -- or bar by bar when nothing is set yet -- keeping it in
- * the step window. */
-function jogChordCursor(delta) {
-    const secIndex = chordDisplaySectionIndex();
-    const sec = currentSong ? currentSong.sections[secIndex] : null;
-    if (!sec || delta === 0) return;
-    const total = sectionChordBars(sec);
-    const stops = chordTrackStops(sec, secIndex);
-    let bar = Math.max(0, Math.min(total - 1, chordCursorBar));
-    let idx = chordCursorIdx;
-    const before = (s) => s[0] < bar || (s[0] === bar && s[1] < idx);
-    const after = (s) => s[0] > bar || (s[0] === bar && s[1] > idx);
-    for (let n = Math.abs(delta); n > 0; n--) {
-        let to;
-        if (stops.length === 0) {
-            to = [Math.max(0, Math.min(total - 1, bar + Math.sign(delta))), 0];
-        } else if (delta > 0) {
-            to = stops.find(after);
-        } else {
-            to = stops.filter(before).pop();
-        }
-        if (!to) break;
-        bar = to[0];
-        idx = to[1];
-    }
-    chordCursorBar = bar;
-    chordCursorIdx = idx;
-    if (bar < stepScrollOffset) stepScrollOffset = bar;
-    else if (bar >= stepScrollOffset + NUM_STEPS) stepScrollOffset = bar - NUM_STEPS + 1;
-    stepLedsDirty = true;
-    needsRedraw = true;
-}
-
-/* Jog click on the chord/instrument tracks: edit the bar under the cursor --
- * the chord picker, or the instrument's per-bar menu. */
-function openChordCursorEditor() {
-    const secIndex = chordDisplaySectionIndex();
-    const sec = currentSong ? currentSong.sections[secIndex] : null;
-    if (!sec) return;
-    const bar = Math.max(0, Math.min(sectionChordBars(sec) - 1, chordCursorBar));
-    chordCursorBar = bar;
-    if (builderTrack === TRACK_CHORD) openChordPick(bar, chordCursorIdx);
-    else openInstrumentBarMenu(builderTrack, secIndex, bar);
-}
-
-/* Handle a step-button press while in the chord or instrument track. The step
+/* Handle a step-button press on the Chord, Inst or Click track. The step
  * buttons map to the section's bars (with the same scroll window as the drum
- * track). In the chord track, pressing a step opens the chord picker for that
- * bar. In an instrument track, pressing a step toggles the chord on/off for
- * that bar. */
+ * track); the list is the editor, so a step just selects that bar's first
+ * chord or item in it. */
 function handleStepPress(stepIndex, velocity) {
     if (velocity === 0) return;
     if (currentView !== VIEW_BUILDER && currentView !== VIEW_CHORD_PICK && currentView !== VIEW_INSTRUMENT_BAR) return;
@@ -6935,22 +6951,8 @@ function handleStepPress(stepIndex, velocity) {
         }
         return;
     }
-    chordCursorBar = barIndex;
-    chordCursorIdx = 0;
-    if (currentView === VIEW_INSTRUMENT_BAR) {
-        /* Switching bars from within the per-bar menu: jump straight to the
-         * newly pressed bar's own menu. */
-        openInstrumentBarMenu(builderTrack, secIndex, barIndex);
-    } else if (shiftHeld) {
-        /* Instrument track, Shift+step: toggle the chord on/off for this bar. */
-        const inst = instrumentForTrack(builderTrack);
-        if (inst) toggleInstrumentBar(inst, secIndex, barIndex);
-        stepLedsDirty = true;
-        needsRedraw = true;
-    } else {
-        /* Instrument track, plain step: open the per-bar settings menu
-         * (Octave/Follow Note/Voicing/Mute for just this bar). */
-        openInstrumentBarMenu(builderTrack, secIndex, barIndex);
+    if (isItemTrack(builderTrack)) {
+        if (currentView === VIEW_BUILDER) itemListSelectBar(barIndex);
     }
 }
 
@@ -7330,47 +7332,293 @@ export function cycleOptionalInt(cur, delta, min, max) {
     return v < min ? null : v;
 }
 
-function openInstrumentBarMenu(track, sectionIndex, barIndex) {
-    instrumentBarEditTrack = track;
-    instrumentBarEditSection = sectionIndex;
-    instrumentBarEditBar = barIndex;
-    instrumentBarFocus = 0;
-    instrumentBarEditing = false;
-    /* If the menu is already open (switching bars via a step press from
-     * inside it), reuse the current view/menu frame instead of pushing a
-     * new one -- same convention as openChordPick. */
-    if (currentView !== VIEW_INSTRUMENT_BAR) {
-        currentView = VIEW_INSTRUMENT_BAR;
-        menuStack.push({ title: (track === TRACK_INSTRUMENT_1 ? "Inst 1" : "Inst 2") + " Bar " + (barIndex + 1), selectedIndex: 0 });
-    }
-    needsRedraw = true;
+/* ── Inst/Click track items ─────────────────────────────────────────── */
+
+/* The Inst 1/2 and Click tracks are edited like the Drum track: a list of
+ * the section's items (see sectionItems), each starting at a bar/beat and
+ * holding until the next. The list's selection: -1 = the section row,
+ * 0..n-1 = items, n = "+ Add". */
+let itemListCursor = 0;
+/* The item settings page (VIEW_INSTRUMENT_BAR): which track/section, the
+ * item being edited (null for a new one) and a working copy of it. */
+let itemEditTrack = -1;
+let itemEditSec = -1;
+let itemEditOrig = null;
+let itemWork = null;
+let itemFocus = 0;
+let itemEditing = false;
+
+function itemTrackName(track) {
+    return track === TRACK_CLICK ? "Click" : (track === TRACK_INSTRUMENT_1 ? "Inst 1" : "Inst 2");
 }
 
-function drawInstrumentBarMenu() {
-    const inst = instrumentForTrack(instrumentBarEditTrack);
-    const label = (instrumentBarEditTrack === TRACK_INSTRUMENT_1 ? "Inst 1" : "Inst 2") + " · Bar " + (instrumentBarEditBar + 1);
-    const on = inst ? instrumentBarOn(inst, instrumentBarEditSection, instrumentBarEditBar) : true;
-    drawMenuHeader(label, on ? "Send" : "Mute");
-    const ov = inst ? instrumentBarOverride(inst, instrumentBarEditSection, instrumentBarEditBar) : null;
-    const octVal = ov && ov.octave !== null && ov.octave !== undefined ? ov.octave : null;
-    const followVal = ov && ov.follow_note !== null && ov.follow_note !== undefined ? ov.follow_note : null;
-    const voicingVal = ov && ov.voicing !== null && ov.voicing !== undefined ? ov.voicing : null;
-    const inversionVal = ov && ov.inversion !== null && ov.inversion !== undefined ? ov.inversion : null;
-    const items = [
-        { key: "mute", label: "Mute", value: on ? "Off" : "On" },
-        { key: "octave", label: "Octave", value: octVal !== null ? String(octVal) : "Default (" + (inst ? inst.octave : 3) + ")" },
-        { key: "follow", label: "Follow Note", value: followVal !== null ? (followVal > 0 ? String(followVal) : "Off") : "Default (" + (inst && inst.follow_note > 0 ? inst.follow_note : "Off") + ")" },
-        { key: "voicing", label: "Voicing", value: voicingVal ? (voicingVal === "chord" ? "Chord" : "Bass") : "Default (" + (inst && inst.voicing === "chord" ? "Chord" : "Bass") + ")" },
-        { key: "inversion", label: "Inversion", value: inversionVal !== null ? inversionLabel(inversionVal) : "Default (" + inversionLabel(inst ? inst.inversion : 0) + ")" }
-    ];
+function isItemTrack(track) {
+    return track === TRACK_INSTRUMENT_1 || track === TRACK_INSTRUMENT_2 || track === TRACK_CLICK;
+}
+
+/* A short summary of an item for its list row. */
+function itemLabel(track, it) {
+    if (track === TRACK_CLICK) return "Volume " + (typeof it.volume === "number" ? it.volume : 100) + "%";
+    if (it.mute) return "Mute";
+    const parts = [];
+    if (typeof it.octave === "number") parts.push("Oct " + it.octave);
+    if (typeof it.follow_note === "number") parts.push(it.follow_note > 0 ? "Fol " + it.follow_note : "Fol Off");
+    if (it.voicing) parts.push(it.voicing === "chord" ? "Chord" : "Bass");
+    if (typeof it.inversion === "number") parts.push(inversionLabel(it.inversion));
+    if (typeof it.note_gap === "number") parts.push("Gap " + noteGapLabel(it.note_gap));
+    return parts.length ? parts.join(" ") : "Defaults";
+}
+
+/* Whether a bar/beat is free of the list's other items. */
+function itemPosFree(list, bar, beat, ignore) {
+    return !list.some(it => it !== ignore && it.bar === bar && chordBeat(it) === beat);
+}
+
+function freeItemBeats(list, bar, adv, ignore) {
+    const out = [];
+    for (let b = 1; b <= beatsPerBar(); b += adv ? 0.5 : 1) {
+        if (itemPosFree(list, bar, b, ignore)) out.push(b);
+    }
+    return out;
+}
+
+/* The section's item state at the start of a bar: its latest item at or
+ * before it (or null: the defaults). */
+function itemAtBarStart(list, bar) {
+    let last = null;
+    for (const it of list) if (it.bar < bar || (it.bar === bar && chordBeat(it) === 1)) last = it;
+    return last;
+}
+
+function itemTrackSection() {
+    const secIndex = chordDisplaySectionIndex();
+    return { secIndex, sec: currentSong ? currentSong.sections[secIndex] : null };
+}
+
+/* Keep the step-LED cursor (chordCursorBar) on the selected item. */
+function syncItemCursorBar(list) {
+    const it = list[itemListCursor];
+    chordCursorBar = it ? it.bar : -1;
+    if (it) {
+        if (it.bar < stepScrollOffset) stepScrollOffset = it.bar;
+        else if (it.bar >= stepScrollOffset + NUM_STEPS) stepScrollOffset = it.bar - NUM_STEPS + 1;
+    }
+    stepLedsDirty = true;
+}
+
+function drawItemTrack() {
+    const { secIndex, sec } = itemTrackSection();
+    const track = builderTrack;
+    let right;
+    if (track === TRACK_CLICK) right = clickOn ? "ON" : "OFF";
+    else { const inst = instrumentForTrack(track); right = inst && inst.enabled ? "ON" : "OFF"; }
+    drawMenuHeader(scrollHeader(itemTrackName(track) + ": " + (currentSong ? shortSongName(currentSong.name) : ""), 22), right);
+    if (!sec) {
+        print(2, LIST_TOP_Y, "No section.", 1);
+        drawOverlay();
+        return;
+    }
+    const list = sortItems(sectionItems(sec, track));
+    if (itemListCursor > list.length) itemListCursor = list.length;
+    const items = [{ type: "section" }];
+    for (const it of list) items.push({ type: "item", it });
+    items.push({ type: "add" });
     drawMenuList({
         labelX: 3,
         items,
-        selectedIndex: instrumentBarFocus,
+        selectedIndex: itemListCursor + 1,
+        getLabel: (row) => {
+            if (row.type === "section") return sec.name || "Section";
+            if (row.type === "item") return itemLabel(track, row.it);
+            return "+ Add";
+        },
+        getValue: (row) => {
+            if (row.type === "section") return (secIndex + 1) + "/" + currentSong.sections.length;
+            if (row.type === "item") return chordPosLabel(row.it.bar, chordBeat(row.it));
+            return "";
+        },
+        valueAlignRight: true,
+        valueX: 44,
+        labelGap: 1,
+        listArea: { topY: LIST_TOP_Y, bottomY: LIST_INDICATOR_BOTTOM_Y }
+    });
+    drawOverlay();
+}
+
+function itemListJog(delta) {
+    const { sec } = itemTrackSection();
+    if (!sec) return;
+    const list = sortItems(sectionItems(sec, builderTrack));
+    itemListCursor = Math.max(-1, Math.min(list.length, itemListCursor + delta));
+    syncItemCursorBar(list);
+    needsRedraw = true;
+}
+
+/* Shift+jog: move the selected item a beat (half in Advanced), between its
+ * neighbours and the section's ends. */
+function itemListNudge(delta) {
+    const { sec } = itemTrackSection();
+    if (!sec || delta === 0) return;
+    const list = sortItems(sectionItems(sec, builderTrack));
+    const it = list[itemListCursor];
+    if (!it) return;
+    const step = it.adv ? 0.5 : 1;
+    const bpb = beatsPerBar();
+    const total = sectionChordBars(sec);
+    const posOf = (x) => x.bar * bpb + (chordBeat(x) - 1);
+    const prev = list[itemListCursor - 1], next = list[itemListCursor + 1];
+    const lo = prev ? posOf(prev) + step : 0;
+    const hi = next ? posOf(next) - step : total * bpb - step;
+    const pos = Math.max(lo, Math.min(hi, posOf(it) + delta * step));
+    const bar = Math.floor(pos / bpb), beat = pos - bar * bpb + 1;
+    it.bar = bar;
+    if (beat !== 1) it.beat = beat; else delete it.beat;
+    sortItems(list);
+    itemListCursor = list.indexOf(it);
+    syncItemCursorBar(list);
+    unsavedChanges = true;
+    needsRedraw = true;
+}
+
+/* The next free bar after `fromBar` (same beat if free, else its first free
+ * beat), or null. */
+function nextFreeItemPos(list, sec, fromBar, beat) {
+    const total = sectionChordBars(sec);
+    for (let bar = fromBar + 1; bar < total; bar++) {
+        const free = freeItemBeats(list, bar, false, null);
+        if (free.includes(beat)) return { bar, beat };
+        if (free.length) return { bar, beat: free[0] };
+    }
+    return null;
+}
+
+/* Jog click: the section row renames, an item opens its settings, "+ Add"
+ * adds one after the last (the next bar) and opens it. */
+function itemListClick() {
+    const { secIndex, sec } = itemTrackSection();
+    if (!sec) return;
+    const list = sortItems(sectionItems(sec, builderTrack));
+    if (itemListCursor < 0) { renameSectionPrompt(sec); return; }
+    const it = list[itemListCursor];
+    if (it) { openItemEdit(builderTrack, secIndex, it); return; }
+    if (songIsLocked()) return;
+    const last = list[list.length - 1];
+    const pos = !last ? { bar: 0, beat: 1 } : nextFreeItemPos(list, sec, last.bar, 1);
+    if (!pos) { showPopup(itemTrackName(builderTrack), "No free bar after the last item", 2000); return; }
+    const fresh = builderTrack === TRACK_CLICK
+        ? { volume: last && typeof last.volume === "number" ? last.volume : clickVolume } : {};
+    fresh.bar = pos.bar;
+    if (pos.beat !== 1) fresh.beat = pos.beat;
+    openItemEdit(builderTrack, secIndex, null, fresh);
+}
+
+function itemListDelete() {
+    const { sec } = itemTrackSection();
+    if (!sec) return;
+    const list = sortItems(sectionItems(sec, builderTrack));
+    if (!list[itemListCursor]) return;
+    list.splice(itemListCursor, 1);
+    itemListCursor = Math.min(itemListCursor, list.length);
+    syncItemCursorBar(list);
+    unsavedChanges = true;
+    needsRedraw = true;
+}
+
+function itemListDuplicate() {
+    const { sec } = itemTrackSection();
+    if (!sec) return;
+    const list = sortItems(sectionItems(sec, builderTrack));
+    const it = list[itemListCursor];
+    if (!it) return;
+    const pos = nextFreeItemPos(list, sec, it.bar, chordBeat(it));
+    if (!pos) { showPopup(itemTrackName(builderTrack), "No free bar after this item", 2000); return; }
+    const copy = Object.assign({}, it, { bar: pos.bar });
+    if (pos.beat !== 1) copy.beat = pos.beat; else delete copy.beat;
+    list.push(copy);
+    sortItems(list);
+    itemListCursor = list.indexOf(copy);
+    syncItemCursorBar(list);
+    unsavedChanges = true;
+    needsRedraw = true;
+}
+
+/* A step press on these tracks selects that bar's first item. */
+function itemListSelectBar(bar) {
+    const { sec } = itemTrackSection();
+    if (!sec) return;
+    const list = sortItems(sectionItems(sec, builderTrack));
+    const i = list.findIndex(it => it.bar === bar);
+    if (i < 0) return;
+    itemListCursor = i;
+    syncItemCursorBar(list);
+    needsRedraw = true;
+}
+
+/* ── Item settings page ─────────────────────────────────────────────── */
+
+function openItemEdit(track, secIndex, item, fresh) {
+    itemEditTrack = track;
+    itemEditSec = secIndex;
+    itemEditOrig = item;
+    itemWork = Object.assign({}, item || fresh || {});
+    itemFocus = 0;
+    itemEditing = false;
+    currentView = VIEW_INSTRUMENT_BAR;
+    menuStack.push({ title: itemTrackName(track), selectedIndex: 0 });
+    needsRedraw = true;
+}
+
+function itemEditList() {
+    const sec = currentSong ? currentSong.sections[itemEditSec] : null;
+    return sec ? sectionItems(sec, itemEditTrack) : [];
+}
+
+/* "Default (3)": an unset field shows the track default it falls back to. */
+function itemDefault(v, label) {
+    return v === null || v === undefined ? "Default (" + label + ")" : null;
+}
+
+function itemEditRows() {
+    const w = itemWork;
+    const rows = [
+        { key: "bar", label: "Bar", value: String(w.bar + 1) },
+        { key: "beat", label: "Beat", value: formatBeat(chordBeat(w)) }
+    ];
+    if (itemEditTrack === TRACK_CLICK) {
+        rows.push({ key: "volume", label: "Volume", value: (typeof w.volume === "number" ? w.volume : 100) + "%" });
+    } else {
+        const inst = instrumentForTrack(itemEditTrack);
+        rows.push({ key: "mute", label: "Sound", value: w.mute ? "Mute" : "Play" });
+        rows.push({ key: "octave", label: "Octave",
+            value: itemDefault(w.octave, inst ? inst.octave : 3) || String(w.octave) });
+        rows.push({ key: "follow", label: "Follow Note",
+            value: itemDefault(w.follow_note, inst && inst.follow_note > 0 ? inst.follow_note : "Off") ||
+                (w.follow_note > 0 ? String(w.follow_note) : "Off") });
+        rows.push({ key: "voicing", label: "Voicing",
+            value: itemDefault(w.voicing, inst && inst.voicing === "chord" ? "Chord" : "Bass") ||
+                (w.voicing === "chord" ? "Chord" : "Bass") });
+        rows.push({ key: "inversion", label: "Inversion",
+            value: itemDefault(w.inversion, inversionLabel(inst ? inst.inversion : 0)) || inversionLabel(w.inversion) });
+        rows.push({ key: "gap", label: "Note Gap",
+            value: itemDefault(w.note_gap, noteGapLabel(inst ? inst.note_gap : 0.25)) || noteGapLabel(w.note_gap) });
+    }
+    rows.push({ key: "adv", label: "Advanced", value: w.adv ? "On" : "Off" });
+    rows.push({ key: "delete", label: "Delete", value: "" });
+    return rows;
+}
+
+function drawInstrumentBarMenu() {
+    drawMenuHeader(itemTrackName(itemEditTrack), chordPosLabel(itemWork.bar, chordBeat(itemWork)));
+    const rows = itemEditRows();
+    if (itemFocus >= rows.length) itemFocus = rows.length - 1;
+    drawMenuList({
+        labelX: 3,
+        items: rows,
+        selectedIndex: itemFocus,
         getLabel: (item) => item.label,
         getValue: (item) => item.value,
         valueAlignRight: true,
-        editMode: instrumentBarEditing,
+        editMode: itemEditing,
         labelGap: 2,
         prioritizeSelectedValue: true,
         selectedMinLabelChars: 6,
@@ -7378,55 +7626,120 @@ function drawInstrumentBarMenu() {
     });
 }
 
+/* Save the page's item: it replaces the original (or joins the list), the
+ * list is re-sorted, and the Song Builder list selects it. */
+function commitItemEdit() {
+    const list = itemEditList();
+    const w = Object.assign({}, itemWork);
+    for (const k of Object.keys(w)) if (w[k] === null || w[k] === undefined) delete w[k];
+    if (chordBeat(w) === 1) delete w.beat;
+    if (!w.adv) delete w.adv;
+    if (!w.mute) delete w.mute;
+    const i = itemEditOrig ? list.indexOf(itemEditOrig) : -1;
+    if (i >= 0) list[i] = w; else list.push(w);
+    sortItems(list);
+    itemListCursor = list.indexOf(w);
+    syncItemCursorBar(list);
+    unsavedChanges = true;
+}
+
+function closeItemEdit() {
+    menuStack.pop();
+    currentView = VIEW_BUILDER;
+    stepLedsDirty = true;
+    needsRedraw = true;
+}
+
 function handleInstrumentBarMenuInput(cc, value) {
-    const inst = instrumentForTrack(instrumentBarEditTrack);
-    if (!inst) return;
-    const sec = instrumentBarEditSection, bar = instrumentBarEditBar;
+    const rows = itemEditRows();
+    const row = rows[Math.max(0, Math.min(rows.length - 1, itemFocus))];
+    const w = itemWork;
+    const list = itemEditList();
+    const sec = currentSong ? currentSong.sections[itemEditSec] : null;
     if (cc === MoveMainKnob) {
         const delta = decodeDelta(value);
-        if (instrumentBarEditing) {
-            if (instrumentBarFocus === 0) {
-                toggleInstrumentBar(inst, sec, bar);
-                stepLedsDirty = true;
-            } else if (instrumentBarFocus === 1) {
-                const ov = instrumentBarOverride(inst, sec, bar);
-                const cur = ov && ov.octave !== null && ov.octave !== undefined ? ov.octave : null;
-                setInstrumentBarOverrideField(inst, sec, bar, "octave", cycleOptionalInt(cur, delta, -1, 8));
-            } else if (instrumentBarFocus === 2) {
-                const ov = instrumentBarOverride(inst, sec, bar);
-                const cur = ov && ov.follow_note !== null && ov.follow_note !== undefined ? ov.follow_note : null;
-                setInstrumentBarOverrideField(inst, sec, bar, "follow_note", cycleOptionalInt(cur, delta, 0, 127));
-            } else if (instrumentBarFocus === 3) {
-                const ov = instrumentBarOverride(inst, sec, bar);
-                const cur = ov && ov.voicing !== null && ov.voicing !== undefined ? ov.voicing : null;
+        if (itemEditing && sec) {
+            if (row.key === "bar") {
+                const total = sectionChordBars(sec);
+                let bar = w.bar;
+                for (let n = 0; n < total; n++) {
+                    bar += Math.sign(delta);
+                    if (bar < 0 || bar >= total) { bar = w.bar; break; }
+                    const free = freeItemBeats(list, bar, !!w.adv, itemEditOrig);
+                    if (free.length) {
+                        const b = chordBeat(w);
+                        const nb = free.includes(b) ? b : free.reduce((a, x) => Math.abs(x - b) < Math.abs(a - b) ? x : a);
+                        if (nb !== 1) w.beat = nb; else delete w.beat;
+                        break;
+                    }
+                }
+                w.bar = bar;
+            } else if (row.key === "beat") {
+                const opts = freeItemBeats(list, w.bar, !!w.adv, itemEditOrig);
+                let i = opts.indexOf(chordBeat(w));
+                if (i < 0) i = 0;
+                if (opts.length) {
+                    const nb = opts[Math.max(0, Math.min(opts.length - 1, i + delta))];
+                    if (nb !== 1) w.beat = nb; else delete w.beat;
+                }
+            } else if (row.key === "volume") {
+                w.volume = Math.max(0, Math.min(100, (typeof w.volume === "number" ? w.volume : 100) + delta * 5));
+            } else if (row.key === "mute") {
+                w.mute = !w.mute;
+            } else if (row.key === "octave") {
+                w.octave = cycleOptionalInt(w.octave, delta, -1, 8);
+            } else if (row.key === "follow") {
+                w.follow_note = cycleOptionalInt(w.follow_note, delta, 0, 127);
+            } else if (row.key === "voicing") {
                 const states = [null, "bass", "chord"];
-                const idx = ((states.indexOf(cur) + delta) % states.length + states.length) % states.length;
-                setInstrumentBarOverrideField(inst, sec, bar, "voicing", states[idx]);
-            } else if (instrumentBarFocus === 4) {
-                const ov = instrumentBarOverride(inst, sec, bar);
-                const cur = ov && ov.inversion !== null && ov.inversion !== undefined ? ov.inversion : null;
-                setInstrumentBarOverrideField(inst, sec, bar, "inversion", cycleOptionalInt(cur, delta, 0, INVERSION_AUTO));
+                const cur = states.indexOf(w.voicing === undefined ? null : w.voicing);
+                w.voicing = states[((cur + delta) % 3 + 3) % 3];
+            } else if (row.key === "inversion") {
+                w.inversion = cycleOptionalInt(w.inversion, delta, 0, INVERSION_AUTO);
+            } else if (row.key === "gap") {
+                const steps = [null, 0, 0.0625, 0.125, 0.25, 0.5, 1.0];
+                const cur = steps.indexOf(w.note_gap === undefined ? null : w.note_gap);
+                w.note_gap = steps[Math.max(0, Math.min(steps.length - 1, (cur < 0 ? 0 : cur) + delta))];
             }
         } else {
-            instrumentBarFocus = Math.max(0, Math.min(4, instrumentBarFocus + delta));
+            itemFocus = Math.max(0, Math.min(rows.length - 1, itemFocus + delta));
         }
         needsRedraw = true;
     } else if (cc === MoveMainButton && value > 0) {
-        if (instrumentBarFocus === 0) {
-            toggleInstrumentBar(inst, sec, bar);
-            stepLedsDirty = true;
-        } else {
-            instrumentBarEditing = !instrumentBarEditing;
+        if (row.key === "adv") {
+            w.adv = !w.adv;
+            /* Off: back onto a whole beat (the nearest free one). */
+            if (!w.adv && !Number.isInteger(chordBeat(w))) {
+                const free = freeItemBeats(list, w.bar, false, itemEditOrig);
+                if (free.length) {
+                    const b = chordBeat(w);
+                    const nb = free.reduce((a, x) => Math.abs(x - b) < Math.abs(a - b) ? x : a);
+                    if (nb !== 1) w.beat = nb; else delete w.beat;
+                } else {
+                    w.adv = true;
+                }
+            }
+            needsRedraw = true;
+            return;
         }
+        if (row.key === "mute") { w.mute = !w.mute; needsRedraw = true; return; }
+        if (row.key === "delete") {
+            const i = itemEditOrig ? list.indexOf(itemEditOrig) : -1;
+            if (i >= 0) { list.splice(i, 1); unsavedChanges = true; }
+            itemListCursor = Math.min(itemListCursor, list.length);
+            syncItemCursorBar(list);
+            closeItemEdit();
+            return;
+        }
+        itemEditing = !itemEditing;
         needsRedraw = true;
     } else if (cc === MoveBack && value > 0) {
-        if (instrumentBarEditing) {
-            instrumentBarEditing = false;
+        if (itemEditing) {
+            itemEditing = false;
             needsRedraw = true;
         } else {
-            menuStack.pop();
-            currentView = VIEW_BUILDER;
-            needsRedraw = true;
+            commitItemEdit();
+            closeItemEdit();
         }
     }
 }
@@ -8365,7 +8678,8 @@ function drawOptionsClick() {
         { key: "output", label: "Output", value: OUTPUT_LABELS[clickOutput] || clickOutput },
         { key: "channel", label: "MIDI Channel", value: String(clickMidiChannel) },
         { key: "accent", label: "Accent Note", value: midiNoteLabel(clickAccentNote) },
-        { key: "normal", label: "Normal Note", value: midiNoteLabel(clickNormalNote) }
+        { key: "normal", label: "Normal Note", value: midiNoteLabel(clickNormalNote) },
+        { key: "volume", label: "Volume", value: clickVolume + "%" }
     ];
     drawMenuList({
         labelX: 3,
@@ -8393,13 +8707,15 @@ function handleOptionsClickInput(cc, value) {
                 clickMidiChannel = Math.max(1, Math.min(16, clickMidiChannel + delta));
             } else if (optionsSubFocus === 2) {
                 clickAccentNote = Math.max(0, Math.min(127, clickAccentNote + delta));
-            } else {
+            } else if (optionsSubFocus === 3) {
                 clickNormalNote = Math.max(0, Math.min(127, clickNormalNote + delta));
+            } else {
+                clickVolume = Math.max(0, Math.min(100, clickVolume + delta * 5));
             }
             saveOutputSettings();
             pushClickToDsp();
         } else {
-            const newIdx = Math.max(0, Math.min(3, optionsSubFocus + delta));
+            const newIdx = Math.max(0, Math.min(4, optionsSubFocus + delta));
             if (newIdx !== optionsSubFocus) optionsSubFocus = newIdx;
         }
         needsRedraw = true;
@@ -9158,6 +9474,8 @@ function handleBuilderInput(cc, value) {
             if (builderTrack === TRACK_CHORD) { chordCursorBar = 0; chordCursorIdx = 0; chordListCursor = 0; }
         } else {
             builderTrack = (cc === MoveRow2) ? TRACK_INSTRUMENT_1 : TRACK_INSTRUMENT_2;
+            itemListCursor = 0;
+            chordCursorBar = -1;
         }
         stepLedsDirty = true;
         ledDirtyAll = true;
@@ -9165,23 +9483,45 @@ function handleBuilderInput(cc, value) {
         return;
     }
     if (cc === MoveRow4 && value > 0) {
-        toggleClick();
+        /* Track 4 selects the Click track; pressed again there, it turns the
+         * click on or off. */
+        if (builderTrack === TRACK_CLICK) {
+            toggleClick();
+        } else {
+            builderTrack = TRACK_CLICK;
+            itemListCursor = 0;
+            chordCursorBar = -1;
+            stepLedsDirty = true;
+            ledDirtyAll = true;
+            needsRedraw = true;
+        }
         return;
     }
-    /* The Chord and Instrument tracks don't use the clip-editing controls
-     * (Shift+jog, delete, copy, loop, page up/down) or Record (changing the
-     * source folder is a Drum-track concept) — only section navigation, the
-     * jog cursor and its click (see jogChordCursor), the settings menu, and
-     * transport apply there. */
+    /* The Chord, Inst and Click tracks don't use the Drum track's other
+     * clip-editing controls (loop, page up/down) or Record (changing the
+     * source folder is a Drum-track concept) — only section navigation,
+     * their item lists (see chordListJog/itemListJog), the settings menu,
+     * and transport apply there. */
     if (builderTrack !== TRACK_DRUM) {
         const allowed = cc === MoveLeft || cc === MoveRight || cc === MoveMenu ||
             cc === MoveBack || cc === MovePlay || cc === MoveShift ||
             (!shiftHeld && (cc === MoveMainKnob || cc === MoveMainButton)) ||
-            /* The Chord track's list edits like the Drum track's: Shift+jog
-             * nudges, Delete removes, Copy duplicates. */
-            (builderTrack === TRACK_CHORD && (cc === MoveMainKnob ||
-                (!shiftHeld && (cc === MoveDelete || cc === MoveCopy))));
+            /* The Chord, Inst and Click tracks' lists edit like the Drum
+             * track's: Shift+jog nudges, Delete removes, Copy duplicates. */
+            cc === MoveMainKnob || (!shiftHeld && (cc === MoveDelete || cc === MoveCopy));
         if (!allowed) return;
+    }
+    if (isItemTrack(builderTrack)) {
+        /* The Inst and Click tracks' lists edit like the Chord track's. */
+        if (cc === MoveMainKnob) {
+            const delta = decodeDelta(value);
+            if (shiftHeld) { if (!locked) itemListNudge(delta); }
+            else itemListJog(delta);
+            return;
+        }
+        if (cc === MoveMainButton && value > 0) { itemListClick(); return; }
+        if (cc === MoveDelete && value > 0) { if (!locked) itemListDelete(); return; }
+        if (cc === MoveCopy && value > 0) { if (!locked) itemListDuplicate(); return; }
     }
     if (builderTrack === TRACK_CHORD) {
         if (cc === MoveMainKnob) {
@@ -9203,9 +9543,6 @@ function handleBuilderInput(cc, value) {
             } else {
                 changeBuilderPage(delta);
             }
-        } else if (builderTrack !== TRACK_DRUM) {
-            /* Chord/instrument tracks: step between bars with something set. */
-            jogChordCursor(delta);
         } else {
             moveCursor(delta);
         }
@@ -9220,11 +9557,6 @@ function handleBuilderInput(cc, value) {
     } else if (cc === MoveMainButton && value > 0) {
         if (shiftHeld) {
             openSongSettings();
-            return;
-        }
-        if (builderTrack !== TRACK_DRUM) {
-            /* Chord/instrument tracks: edit the bar under the jog cursor. */
-            openChordCursorEditor();
             return;
         }
         /* Use the displayed section (the auto-followed/jumped one during
@@ -9330,6 +9662,7 @@ function handleBuilderInput(cc, value) {
                 currentSectionIndex = navBase - 1;
                 builderCursor = 0;
                 chordListCursor = 0;
+                itemListCursor = 0;
                 stepScrollOffset = 0;
                 builderDisplaySection = playbackState === "playing" ? currentSectionIndex : -1;
                 stepLedsDirty = true;
@@ -9348,6 +9681,7 @@ function handleBuilderInput(cc, value) {
                 currentSectionIndex = navBase + 1;
                 builderCursor = 0;
                 chordListCursor = 0;
+                itemListCursor = 0;
                 stepScrollOffset = 0;
                 builderDisplaySection = playbackState === "playing" ? currentSectionIndex : -1;
                 stepLedsDirty = true;
@@ -13335,7 +13669,7 @@ function footerHints() {
         case VIEW_SONG_SETTINGS: return editMenuHints(songSettingsEditing);
         case VIEW_TRIM: return editMenuHints(trimEditing);
         case VIEW_INSTRUMENT: return editMenuHints(instrumentEditing);
-        case VIEW_INSTRUMENT_BAR: return editMenuHints(instrumentBarEditing);
+        case VIEW_INSTRUMENT_BAR: return editMenuHints(itemEditing);
         case VIEW_SETLIST_CLICK: return editMenuHints(clickSettingsEditing);
         case VIEW_JAM_INSTRUMENT: return editMenuHints(jamInstrumentEditing);
         /* Where a screen has pad and track actions, those lead: Play, Record
@@ -13348,9 +13682,10 @@ function footerHints() {
                 if (shiftHeld) return [["CLK", "SET"], ["PLAY", "SONG"], ["BACK", "OUT"]];
                 return [["PAD", "ADD"], ["T1", "CHORD"], ["CLK", "TRIM"]];
             }
-            if (shiftHeld) return [["PLAY", "SONG"], ["BACK", "OUT"]];
-            /* The jog steps between bars with something set; the click
-             * edits the one under the cursor (as a step press does). */
+            if (shiftHeld) return [["JOG", "MOVE"], ["PLAY", "SONG"]];
+            /* The click edits the selected item; on the Click track T4
+             * turns the click on or off. */
+            if (builderTrack === TRACK_CLICK) return [["CLK", "EDIT"], ["T4", clickOn ? "OFF" : "ON"], ["T1", "DRUM"]];
             return [["CLK", "EDIT"], ["T1", "DRUM"], ["MENU", "SET"]];
         case VIEW_PERFORMANCE:
             /* The knob feedback panel covers the footer rows while it shows. */

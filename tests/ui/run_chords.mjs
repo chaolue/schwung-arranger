@@ -55,5 +55,39 @@ const tr = M.transposeChord(sec2.chords[0], 2);
 check(Array.isArray(tr) && tr[0].root === "E" && tr[1].root === "A" && tr[1].beat === 3,
       "a key change transposes every chord in a bar and keeps beats: " + JSON.stringify(tr));
 
+
+/* Inst items: old per-bar mutes/overrides (indexed by section number) turn
+ * into section items that sound the same. */
+const old = {
+    name: "O", key: "C", time_sig_num: 4, time_sig_den: 4, source_folder: "F",
+    sections: [{ name: "A", clips: [{ source: "x.mid", start_bar: 0, end_bar: 4 }] },
+               { name: "B", clips: [{ source: "x.mid", start_bar: 0, end_bar: 4 }] }],
+    instruments: [
+        { enabled: true, octave: 3, bars: [[true, false, false, true], []],
+          overrides: [{ section: 0, bar: 3, octave: 5 }, { section: 1, bar: 0, voicing: "chord" }] },
+        { enabled: true, octave: 3, bars: [], overrides: [] }
+    ]
+};
+const ui = M.toUiSong(old);
+check(JSON.stringify(ui.sections[0].inst[0]) === '[{"bar":1,"mute":true},{"bar":3,"octave":5},{"bar":4}]',
+      "section A: muted bars 2-3, octave 5 on bar 4, then defaults: " + JSON.stringify(ui.sections[0].inst[0]));
+check(JSON.stringify(ui.sections[1].inst[0]) === '[{"bar":0,"voicing":"chord"},{"bar":1}]',
+      "section B: chord voicing on bar 1 only: " + JSON.stringify(ui.sections[1].inst[0]));
+check(ui.instruments[0].bars.length === 0 && ui.instruments[0].overrides.length === 0, "old per-bar data cleared");
+check(!ui.sections[0].inst[1] || ui.sections[0].inst[1].length === 0, "Inst 2 had nothing: no items");
+const again = M.toUiSong(JSON.parse(JSON.stringify(ui)));
+check(JSON.stringify(again.sections[0].inst) === JSON.stringify(ui.sections[0].inst), "items survive a save/load round trip");
+
+/* The engine gets each instrument's items with section numbers, and the
+ * Click track's items as click_items. */
+ui.sections[1].click = [{ bar: 2, volume: 40 }, { bar: 3, beat: 2.5, adv: true, volume: 0 }];
+const eng = JSON.parse(M.toEngineSongJson(ui));
+check(JSON.stringify(eng.instruments[0].items) ===
+      '[{"section":0,"bar":1,"mute":true},{"section":0,"bar":3,"octave":5},{"section":0,"bar":4},{"section":1,"bar":0,"voicing":"chord"},{"section":1,"bar":1}]',
+      "engine items: " + JSON.stringify(eng.instruments[0].items));
+check(Array.isArray(eng.instruments[1].items) && eng.instruments[1].items.length === 0, "Inst 2 sends an empty item list");
+check(JSON.stringify(eng.click_items) === '[{"section":1,"bar":2,"volume":40},{"section":1,"bar":3,"volume":0,"beat":2.5}]',
+      "engine click_items: " + JSON.stringify(eng.click_items));
+
 console.log(passes + " passed, " + failures + " failed");
 process.exit(failures ? 1 : 0);
