@@ -413,8 +413,6 @@ let chainViewMfxPending = false;     /* open the overlay on the next tick */
 let chainViewOpenPending = -1;       /* open this slot on the next tick (fresh session) */
 let chainViewRepaintTicks = 0;       /* frames to force a redraw for, after a session */
 let lastChainSlot = 0;               /* which chain a Master FX session sits over */
-let chainNoticeText = "";            /* why a chain view did not open, while shown */
-let chainNoticeUntil = 0;
 
 function chainViewActive() {
     return chainViewSlot >= 0;
@@ -491,27 +489,12 @@ function chainViewOwnsEvent(status, d1) {
     return false;
 }
 
-/* Why a chain view did not open. Drawn by Arranger itself on every screen --
- * the shared overlay is only drawn by the Builder and Perform screens -- and
- * with drawing primitives only, so it needs no import an older Schwung's
- * menu_layout might lack (a missing export fails the whole module load). */
+/* Why a chain view did not open, as a popup (drawn on every screen). */
 function chainViewNotice(line) {
-    chainNoticeText = line;
-    chainNoticeUntil = Date.now() + CHAIN_NOTICE_MS;
-    needsRedraw = true;
+    showPopup("Schwung chains", line, CHAIN_NOTICE_MS);
     logDebug("chain view: " + line);
 }
 
-function drawChainNotice() {
-    if (!chainNoticeText) return;
-    fill_rect(4, 18, 120, 30, 0);
-    fill_rect(4, 18, 120, 2, 1);
-    fill_rect(4, 46, 120, 2, 1);
-    fill_rect(4, 18, 2, 30, 1);
-    fill_rect(122, 18, 2, 30, 1);
-    print(10, 23, "Schwung chains", 1);
-    print(10, 35, chainNoticeText, 1);
-}
 
 /* A session began: nothing Arranger was in the middle of may finish under the
  * editor, out of sight. */
@@ -1663,9 +1646,6 @@ let padPreviewScheduled = false; /* true once preview has been triggered */
 let padPreviewStopping = false;  /* true for a few ticks after a pad preview is released */
 /* Custom scrolling overlay for the builder pad preview, so long clip names
  * marquee instead of being hard-truncated by the shared drawOverlay(). */
-let builderPreviewScroller = createTextScroller({ scrollInterval: 8, delayFrames: 12 });
-let builderPreviewName = "";
-let builderPreviewBars = 0;
 let wasTextEntryActive = false;  /* previous tick's text-entry state, to detect close */
 let stepScrollOffset = 0;   /* bar offset for the step-LED window when a section has more than NUM_STEPS bars */
 let stepRedrawAll = false;  /* true for one tick after a section change, to force a full step redraw */
@@ -1895,8 +1875,6 @@ let jamHoldTriggerTime = 0;         /* when the jam hold-overlay pad press happe
 let jamHoldOverlayShown = false;    /* true once the hold-overlay has been shown */
 /* Custom scrolling overlay for the jam hold, so long clip names marquee
  * instead of being hard-truncated by the shared drawOverlay(). */
-let jamHoldScroller = createTextScroller({ scrollInterval: 8, delayFrames: 12 });
-let jamHoldName = "";
 /* Chord pad being held (degree 0-7, -1 = none) and when it was pressed.
  * Chord pads act on release: a quick tap selects the chord, a hold past
  * PAD_PREVIEW_DELAY_MS only shows its name in the hold overlay (same as
@@ -1904,7 +1882,6 @@ let jamHoldName = "";
 let jamChordHoldDegree = -1;
 let jamChordHoldTime = 0;
 let jamChordHoldShown = false;
-let jamHoldBars = 1;
 
 /* Dedicated marquee scroller for the Jam header (folder name). */
 const jamHeaderScroller = createTextScroller();
@@ -4286,7 +4263,7 @@ function updateDspState() {
     if (jamPreviewScheduled && jamPreviewObservedRunning &&
         ((lastDspState && !lastDspState.running) || (lastDspTransport && !lastDspTransport.running))) {
         logJam("PREVIEW finished on its own");
-        hideOverlay();
+        hideHoldPopup();
         jamPreviewPad = -1;
         jamPreviewClip = null;
         jamPreviewScheduled = false;
@@ -6493,38 +6470,12 @@ function drawBuilder() {
     const bpm = currentSong ? currentSong.tempo_bpm : 120;
     const num = currentSong ? currentSong.time_sig_num : 4;
     const den = currentSong ? currentSong.time_sig_den : 4;
-    drawBuilderPreviewOverlay();
     /* Draw any active overlay (e.g. a missing-clip warning) on top of the
      * builder display. */
     drawOverlay();
 }
 
-/* Shared scrolling overlay: draws the centered 120x28 box with a marquee-
- * scrolling clip name and a value line. Used by both the Song Builder pad
- * preview and the Jam hold overlay, so long names aren't hard-truncated. */
-function drawScrollingOverlay(scroller, name, bars) {
-    if (!name) return;
-    const boxX = (SCREEN_WIDTH - 120) / 2;
-    const boxY = (SCREEN_HEIGHT - 28) / 2;
-    fill_rect(boxX, boxY, 120, 28, 0);
-    fill_rect(boxX, boxY, 120, 1, 1);
-    fill_rect(boxX, boxY + 27, 120, 1, 1);
-    fill_rect(boxX, boxY, 1, 28, 1);
-    fill_rect(boxX + 119, boxY, 1, 28, 1);
-    scroller.tick();
-    let display = name;
-    if (display.length > 18) display = scroller.getScrolledText(display, 18);
-    print(boxX + 4, boxY + 2, display, 1);
-    const sub = (typeof bars === "string") ? bars : "Value: " + bars + " bar" + (bars > 1 ? "s" : "");
-    print(boxX + 4, boxY + 14, sub, 1);
-}
 
-/* Custom overlay for the Song Builder pad preview, using the shared scrolling
- * overlay helper. */
-function drawBuilderPreviewOverlay() {
-    if (!padPreviewScheduled || !builderPreviewName) return;
-    drawScrollingOverlay(builderPreviewScroller, builderPreviewName, builderPreviewBars);
-}
 
 /* ── Chord track display ────────────────────────────────────────────── */
 
@@ -8517,16 +8468,8 @@ function drawJam() {
         }
         print(2, LIST_TOP_Y + 36, "Key: " + jamKey + "  Chord: " + chordText, 1);
     }
-    drawJamHoldOverlay();
 }
 
-/* Draw a centered overlay showing the held jam clip's name, marquee-scrolling
- * long names instead of hard-truncating them. Uses the shared scrolling
- * overlay helper. */
-function drawJamHoldOverlay() {
-    if (!jamHoldOverlayShown || !jamHoldName) return;
-    drawScrollingOverlay(jamHoldScroller, jamHoldName, jamHoldBars);
-}
 
 /* ── Input handling ─────────────────────────────────────────────────── */
 
@@ -10757,7 +10700,7 @@ function handleJamInput(cc, value) {
             jamChordPendingDegree = -1;
             jamLastBarCounterForChord = -1;
             jamLastSwapCounterForChord = -1;
-            hideOverlay();
+            hideHoldPopup();
             stopPlayback();
             needsRedraw = true;
             stepLedsDirty = true;
@@ -10830,7 +10773,7 @@ function handleJamInput(cc, value) {
         jamHoldClip = null;
         jamHoldTriggerTime = 0;
         jamHoldOverlayShown = false;
-        hideOverlay();
+        hideHoldPopup();
         stopPlayback();
         menuStack.pop();
         currentView = VIEW_JAM_FOLDER;
@@ -10874,9 +10817,7 @@ function handleJamChordPad(row, col, velocity) {
     if (wasShown) {
         /* Held: the name was shown, so don't select the chord. */
         jamHoldOverlayShown = false;
-        jamHoldName = "";
-        hideOverlay();
-        needsRedraw = true;
+        hideHoldPopup();
         return;
     }
     jamSelectChordDegree(degree);
@@ -11029,7 +10970,7 @@ function handleJamPad(padIndex, velocity) {
     /* Pad released. */
     if (jamPreviewClip) {
         const heldMs = jamPreviewStartTime ? Date.now() - jamPreviewStartTime : 0;
-        hideOverlay();
+        hideHoldPopup();
         if (jamPreviewScheduled) {
             /* Preview was playing: stop it (one-shot released). */
             logJam("PREVIEW release clip=" + (jamPreviewClip.name || "?") + " heldMs=" + heldMs);
@@ -11048,7 +10989,7 @@ function handleJamPad(padIndex, velocity) {
     if (jamHoldPad === padIndex) {
         /* A held pad during playback: hide the hold-overlay. If it was a quick
          * press (released before the hold delay), queue the clip normally. */
-        hideOverlay();
+        hideHoldPopup();
         if (!jamHoldOverlayShown) {
             if (isGroovePad) jamQueueGroove(clip);
             else jamQueueFill(clip);
@@ -11342,7 +11283,7 @@ function handleBuilderPad(note, velocity) {
         padColor(padIndex, dimColour, true);
         stepLedsDirty = true;
     } else {
-        hideOverlay();
+        hideHoldPopup();
         /* Restore this pad to its normal grid colour. */
         padColor(padIndex, builderPadColorForIndex(padIndex), true);
         const heldMs = previewStartTime ? Date.now() - previewStartTime : 0;
@@ -11365,8 +11306,7 @@ function handleBuilderPad(note, velocity) {
         if (padPreviewClip) {
             padPreviewClip = null;
             padPreviewBars = 0;
-            builderPreviewName = "";
-            builderPreviewBars = 0;
+            hideHoldPopup();
             stepLedsDirty = true;
         }
         padPreviewScheduled = false;
@@ -12792,11 +12732,23 @@ function wrapPopupText(text, px) {
     return lines;
 }
 
+/* `text` is a string or an array of lines, each wrapped. `ms` Infinity keeps
+ * it up until hideHoldPopup (a pad being held). */
 function showPopup(title, text, ms) {
     popupTitle = String(title || "");
-    popupLines = wrapPopupText(text || "", contentW()).slice(0, POPUP_MAX_LINES);
+    const parts = Array.isArray(text) ? text : [text || ""];
+    popupLines = [].concat(...parts.map(t => wrapPopupText(t, contentW()))).slice(0, POPUP_MAX_LINES);
     popupUntil = Date.now() + ms;
     needsRedraw = true;
+}
+
+/* End a popup shown while a pad is held, leaving a timed one alone. */
+function hideHoldPopup() {
+    if (popupUntil === Infinity) hidePopup();
+}
+
+function barsLabel(bars) {
+    return bars + " bar" + (bars === 1 ? "" : "s");
 }
 
 function hidePopup() {
@@ -12902,12 +12854,7 @@ globalThis.tick = function() {
             previewStartTime = Date.now();
             const bars = padPreviewBars;
             logDebug("preview trigger clip=" + previewingClip.name + " bars=" + bars + " elapsed=" + elapsed);
-            /* Use the custom scrolling overlay so long clip names marquee
-             * instead of being truncated by the shared drawOverlay(). */
-            builderPreviewName = clipShortName(previewingClip);
-            builderPreviewBars = bars;
-            builderPreviewScroller.setSelected(builderPreviewName);
-            showOverlay("", bars + " bar" + (bars > 1 ? "s" : ""), 0x7FFFFFFF);
+            showPopup(barsLabel(bars), clipShortName(previewingClip), Infinity);
             previewClip(previewingClip);
             stepLedsDirty = true;
         }
@@ -12949,10 +12896,8 @@ globalThis.tick = function() {
         if (elapsed >= PAD_PREVIEW_DELAY_MS) {
             jamHoldOverlayShown = true;
             const clip = jamHoldClip;
-            jamHoldName = clipShortName(clip);
-            jamHoldBars = clipPlayBars(clip);
-            jamHoldScroller.setSelected(jamHoldName);
-            logJam("HOLD overlay -> " + (clip.name || clip.path) + " bars=" + jamHoldBars);
+            showPopup(barsLabel(clipPlayBars(clip)), clipShortName(clip), Infinity);
+            logJam("HOLD overlay -> " + (clip.name || clip.path));
         }
     }
 
@@ -12964,12 +12909,10 @@ globalThis.tick = function() {
         const roman = ["I", "ii", "iii", "IV", "V", "vi", "vii", "I"][degree];
         jamChordHoldShown = true;
         jamHoldOverlayShown = true;
-        jamHoldName = chord.root + " " + (CHORD_TYPE_LABEL[chord.quality] || chord.quality) +
+        const chordName = chord.root + " " + (CHORD_TYPE_LABEL[chord.quality] || chord.quality) +
             (degree === 7 ? " +8ve" : "");
-        jamHoldBars = roman + " in key " + jamKey;
-        jamHoldScroller.setSelected(jamHoldName);
-        needsRedraw = true;
-        logJam("CHORD-HOLD overlay -> " + jamHoldName);
+        showPopup("Chord", [chordName, roman + " in key " + jamKey], Infinity);
+        logJam("CHORD-HOLD overlay -> " + chordName);
     }
 
     /* What is still loading -- see scanState. */
@@ -13101,10 +13044,6 @@ globalThis.tick = function() {
         chainViewRepaintTicks--;
         needsRedraw = true;
     }
-    if (chainNoticeText && Date.now() >= chainNoticeUntil) {
-        chainNoticeText = "";
-        needsRedraw = true;
-    }
     /* Knob values: send queued writes, save the setlist once turning stops,
      * and take the feedback down when it expires. */
     flushKnobWrites();
@@ -13170,7 +13109,6 @@ globalThis.tick = function() {
             }
         }
         drawPopup();
-        drawChainNotice();
         needsRedraw = false;
     }
 
