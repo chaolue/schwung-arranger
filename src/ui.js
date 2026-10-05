@@ -8257,9 +8257,10 @@ function drawPerformance() {
      * instead of being hard-truncated. */
     const perfLines = [songName, secName, nextSecName || "—", nextSongName || "—"];
     const perfPrefixes = ["Now:  ", " Sec:  ", " NSc:  ", "Next: "];
-    /* 12px line pitch: the 4x5 face is 5 rows tall, so 12px keeps the same
-     * 7px gap between lines the 7-row device font had at 14px. */
-    const perfYs = [2, 14, 26, 38];
+    /* 11px line pitch from row 1: five 5-row lines end on row 49, leaving a
+     * clear gap above the button-hint footer (rows 57-63). At a 12px pitch
+     * the time line ended on row 54 and sat against the footer. */
+    const perfYs = [1, 12, 23, 34];
     for (let i = 0; i < 4; i++) {
         const scroller = perfLineScrollers[i];
         scroller.setSelected(perfLines[i]);
@@ -8299,7 +8300,7 @@ function drawPerformance() {
     }
     const timeLine = "Time: " + formatTime(curSec) + "/" + formatTime(songTotal) +
         "  Set: " + formatTime(perfSetTotalSec);
-    perfPrint(2, 50, perfFitText(timeLine, SCREEN_WIDTH - 3), 1);
+    perfPrint(2, 45, perfFitText(timeLine, SCREEN_WIDTH - 3), 1);
     /* Draw any active overlay (e.g. a missing-clip warning) on top of the
      * performance display. */
     drawOverlay();
