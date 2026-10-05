@@ -36,6 +36,10 @@ import {
 } from '/data/UserData/schwung/shared/menu_layout.mjs';
 
 import {
+    drawOverlayCard, contentW
+} from '/data/UserData/schwung/shared/overlay_card.mjs';
+
+import {
     createTextScroller
 } from '/data/UserData/schwung/shared/text_scroll.mjs';
 
@@ -515,6 +519,7 @@ function startChainView() {
     backHoldActive = false;
     for (const hold of longPressHolds.values()) hold.fired = true;
     hideOverlay();
+    hidePopup();
 }
 
 /* The session is gone, however it ended. Hand the screen and LEDs back.
@@ -1029,7 +1034,7 @@ function perfRecordingAvailable() {
 function perfToggleRecording() {
     if (perfRecording) { perfStopRecording(); return; }
     if (!perfRecordingAvailable()) {
-        showOverlayMs("Recording", "not available", 3000);
+        showPopup("Recording", "Not available on this Schwung", 3000);
         needsRedraw = true;
         return;
     }
@@ -1041,7 +1046,7 @@ function perfToggleRecording() {
     host_sampler_start(path);
     perfRecording = true;
     logDebug("PERFREC start path=" + path);
-    showOverlayMs("Recording", name + "_" + stamp.substring(11), 3000);
+    showPopup("Recording", name + "_" + stamp + ".wav", 3000);
     needsRedraw = true;
 }
 
@@ -1050,7 +1055,7 @@ function perfStopRecording() {
     host_sampler_stop();
     perfRecording = false;
     logDebug("PERFREC stop");
-    showOverlayMs("Recording saved", "Recordings/Arranger", 3000);
+    showPopup("Recording saved", "In Recordings / Arranger", 3000);
     needsRedraw = true;
 }
 
@@ -3273,7 +3278,7 @@ function toggleClick() {
     if (typeof host_module_set_param === "function") {
         host_module_set_param("click_enabled", clickOn ? "1" : "0");
     }
-    showOverlayMs("Click", clickOn ? "On" : "Off", 2000);
+    showPopup("Click", clickOn ? "On" : "Off", 2000);
     needsRedraw = true;
     ledDirtyAll = true;
 }
@@ -3894,7 +3899,7 @@ function showMissingClipOverlay() {
     const leaf = clipName ? clipName.substring(clipName.lastIndexOf("/") + 1) : "";
     const title = "Clip not found";
     const value = leaf ? leaf : "missing file";
-    showOverlayMs(title, value, MISSING_CLIP_OVERLAY_MS);
+    showPopup(title, value, MISSING_CLIP_OVERLAY_MS);
     logDebug("showMissingClipOverlay: " + raw);
 }
 
@@ -7734,7 +7739,7 @@ function restoreSongBackup(entry) {
     let obj = null;
     try { obj = text ? JSON.parse(text) : null; } catch (e) { obj = null; }
     if (!obj || !Array.isArray(obj.sections)) {
-        showOverlayMs("Restore failed", "unreadable backup", 3000);
+        showPopup("Restore failed", "Unreadable backup", 3000);
         logDebug("restoreSongBackup: unreadable " + entry.path);
         return;
     }
@@ -7764,7 +7769,7 @@ function restoreSongBackup(entry) {
     stepLedsDirty = true;
     ledDirtyAll = true;
     needsRedraw = true;
-    showOverlayMs("Backup restored", entry.label, 3000);
+    showPopup("Backup restored", entry.label, 3000);
 }
 
 function handleSongBackupsInput(cc, value) {
@@ -8535,8 +8540,7 @@ function handleRootInput(cc, value) {
     const items = ["Song Builder", "Setlists", "Perform", "Jam", "Output"];
     if (value > 0 && cc !== MoveBack && exitConfirmUntil) {
         exitConfirmUntil = 0;
-        hideOverlay();
-        needsRedraw = true;
+        hidePopup();
     }
     if (cc === MoveMainKnob) {
         const delta = decodeDelta(value);
@@ -8562,12 +8566,12 @@ function handleRootInput(cc, value) {
          * Shift+Back, falls back to. */
         if (Date.now() >= exitConfirmUntil) {
             exitConfirmUntil = Date.now() + EXIT_CONFIRM_MS;
-            showOverlayMs("Press Back again", "to exit Arranger", EXIT_CONFIRM_MS);
+            showPopup("Exit Arranger?", "Press Back again to exit", EXIT_CONFIRM_MS);
             needsRedraw = true;
             return;
         }
         exitConfirmUntil = 0;
-        hideOverlay();
+        hidePopup();
         if (typeof host_exit_module === "function") {
             host_exit_module();
         } else if (typeof host_return_to_menu === "function") {
@@ -12742,33 +12746,78 @@ globalThis.init = function() {
     needsRedraw = true;
 };
 
-/* Overlay durations are counted in ticks, but the tick rate isn't a fixed
- * 60/s (popups timed that way vanished after about a second on the device),
- * so measure it and convert from milliseconds -- see showOverlayMs. */
-let ticksPerSecond = 60;
-let tickRateCount = 0;
-let tickRateStart = 0;
+/* Arranger's own popups (record, click, mutes, exit confirm, backups,
+ * missing clip): the shared multi-line card -- a title band plus the message
+ * wrapped onto up to three lines -- drawn after every redraw and timed by the
+ * clock, not by a tick countdown. The shared overlay was one band (a long
+ * value was cut off) and still vanished after about a second on the device
+ * even with tick counts scaled to a measured tick rate. */
+const POPUP_MAX_LINES = 3;
+let popupTitle = "";
+let popupLines = [];
+let popupUntil = 0;
 
-function measureTickRate() {
-    const now = Date.now();
-    if (!tickRateStart) { tickRateStart = now; return; }
-    tickRateCount++;
-    const elapsed = now - tickRateStart;
-    if (elapsed >= 2000) {
-        const rate = tickRateCount * 1000 / elapsed;
-        if (rate > 5 && rate < 1000) ticksPerSecond = rate;
-        tickRateCount = 0;
-        tickRateStart = now;
+function popupTextWidth(t) {
+    return (typeof text_width === "function") ? text_width(String(t)) : String(t).length * 6;
+}
+
+/* Word-wrap `text` to `px` pixels; a word wider than a line is broken. */
+function wrapPopupText(text, px) {
+    const lines = [];
+    let cur = "";
+    for (const word of String(text).split(/\s+/).filter(w => w)) {
+        let w = word;
+        while (popupTextWidth(w) > px) {
+            let n = w.length - 1;
+            while (n > 1 && popupTextWidth(w.substring(0, n)) > px) n--;
+            if (cur) { lines.push(cur); cur = ""; }
+            lines.push(w.substring(0, n));
+            w = w.substring(n);
+        }
+        const next = cur ? cur + " " + w : w;
+        if (popupTextWidth(next) <= px) {
+            cur = next;
+        } else {
+            lines.push(cur);
+            cur = w;
+        }
+    }
+    if (cur) lines.push(cur);
+    return lines;
+}
+
+function showPopup(title, text, ms) {
+    popupTitle = String(title || "");
+    popupLines = wrapPopupText(text || "", contentW()).slice(0, POPUP_MAX_LINES);
+    popupUntil = Date.now() + ms;
+    needsRedraw = true;
+}
+
+function hidePopup() {
+    if (!popupUntil) return;
+    popupUntil = 0;
+    needsRedraw = true;
+}
+
+function popupActive() {
+    return popupUntil > 0 && Date.now() < popupUntil;
+}
+
+/* Called every tick: clear an expired popup off the screen. */
+function tickPopup() {
+    if (popupUntil && Date.now() >= popupUntil) {
+        popupUntil = 0;
+        needsRedraw = true;
     }
 }
 
-/* showOverlay for a duration in milliseconds. */
-function showOverlayMs(title, value, ms) {
-    showOverlay(title, value, Math.max(1, Math.round(ms * ticksPerSecond / 1000)));
+function drawPopup() {
+    if (!popupActive()) return;
+    drawOverlayCard(null, { title: popupTitle, lines: popupLines });
 }
 
 globalThis.tick = function() {
-    measureTickRate();
+    tickPopup();
     /* Chain view first: follow the co-run session's real state, then let any
      * held Track/Menu fire -- in that order, so an overlay requested by a hold
      * is opened on the NEXT tick, after shadow_ui has primed the session (see
@@ -13114,6 +13163,7 @@ globalThis.tick = function() {
                 case VIEW_JAM_INSTRUMENT: drawJamInstrumentMenu(); break;
             }
         }
+        drawPopup();
         drawChainNotice();
         needsRedraw = false;
     }
