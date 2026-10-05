@@ -275,6 +275,24 @@ typedef struct {
     int8_t  inversion;
 } instrument_bar_override_t;
 
+/* A change to an instrument's settings starting at a section/bar/beat (a
+ * Song Builder "item"): it holds until the section's next item, and each
+ * section starts on the track defaults. A field left at its sentinel uses
+ * the track default: octave -128, follow_note/voicing/inversion -1,
+ * note_gap < 0. */
+#define MAX_INST_ITEMS 128
+typedef struct {
+    uint8_t section;
+    uint8_t half_beat;       /* half-beats after the bar's start */
+    uint16_t bar;
+    int8_t mute;             /* 1 = muted from here */
+    int8_t octave;
+    int16_t follow_note;
+    int8_t voicing;
+    int8_t inversion;
+    float note_gap;
+} inst_item_t;
+
 /* An instrument track: emits chord-derived notes on its own output/channel. */
 typedef struct {
     uint8_t enabled;
@@ -295,6 +313,12 @@ typedef struct {
     /* Sparse per-bar overrides of octave/follow_note/voicing/inversion. */
     instrument_bar_override_t overrides[MAX_INSTRUMENT_OVERRIDES];
     int override_count;
+    /* Settings changes by position (see inst_item_t). A song that sends
+     * "items" uses these instead of bars[]/overrides[] above, which remain
+     * for songs that don't. */
+    uint8_t uses_items;
+    int item_count;
+    inst_item_t items[MAX_INST_ITEMS];
 } instrument_t;
 
 /* The part of an instrument a note emission actually reads: its route and
@@ -313,6 +337,11 @@ typedef struct {
     uint8_t inversion;
     double note_gap;
 } inst_voice_t;
+
+static int voice_equal(const inst_voice_t *a, const inst_voice_t *b) {
+    return a->output_target == b->output_target && a->channel == b->channel &&
+           a->octave == b->octave && a->voicing == b->voicing && a->inversion == b->inversion;
+}
 
 static void inst_voice_from(const instrument_t *inst, inst_voice_t *out) {
     out->output_target = inst->output_target;
@@ -467,6 +496,7 @@ static void parse_section_chords(const char *arr, song_t *song, int section_idx)
 static int mid_chord_cmp(const void *a, const void *b);
 static void parse_instrument_bars(const char *arr, instrument_t *inst);
 static void parse_instrument_overrides(const char *arr, instrument_t *inst);
+static void parse_instrument_items(const char *arr, instrument_t *inst);
 static void schedule_instrument_note_off(engine_t *e, int i, const inst_voice_t *voice,
                                          uint32_t tick);
 static void fire_pending_instrument_notes_off(engine_t *e, uint32_t tick);
@@ -2565,6 +2595,36 @@ static void resolve_instrument_for_bar(const instrument_t *inst, int section, in
     if (ov->inversion >= 0) out->inversion = (uint8_t)ov->inversion;
 }
 
+/* An instrument's settings at a position (section, bar, ticks into the bar):
+ * the track defaults with the section's latest item at or before it applied
+ * -- items hold until the next, and each section starts on the defaults.
+ * Songs without items use the per-bar map and overrides. Sets *muted. */
+static void resolve_instrument_at(const instrument_t *inst, int section, uint32_t bar, uint32_t off,
+                                  uint32_t ticks_per_beat, inst_voice_t *out, int *muted) {
+    if (!inst->uses_items) {
+        resolve_instrument_for_bar(inst, section, (int)bar, out);
+        *muted = (section >= 0 && section < MAX_SONG_SECTIONS && bar < MAX_SECTION_BARS &&
+                  inst->bars[section][bar] == 0);
+        return;
+    }
+    inst_voice_from(inst, out);
+    *muted = 0;
+    const inst_item_t *last = NULL;
+    int n = inst->item_count > MAX_INST_ITEMS ? MAX_INST_ITEMS : inst->item_count;
+    for (int i = 0; i < n; i++) {
+        const inst_item_t *it = &inst->items[i];
+        if (it->section != (uint8_t)section) continue;
+        if (it->bar < bar || (it->bar == bar && (uint32_t)it->half_beat * ticks_per_beat / 2 <= off)) last = it;
+    }
+    if (!last) return;
+    *muted = last->mute ? 1 : 0;
+    if (last->octave != -128) out->octave = last->octave;
+    if (last->follow_note >= 0) out->follow_note = (uint8_t)last->follow_note;
+    if (last->voicing >= 0) out->voicing = (uint8_t)last->voicing;
+    if (last->inversion >= 0) out->inversion = (uint8_t)last->inversion;
+    if (last->note_gap >= 0.0f) out->note_gap = last->note_gap;
+}
+
 /* Song ticks a section spans: its assembled length, or whole bars for a song
  * that was never assembled. */
 static uint32_t section_span_ticks(const section_t *sec, uint32_t ticks_per_bar) {
@@ -2604,6 +2664,13 @@ static int song_bar_at_tick(const song_t *song, uint32_t tick, uint32_t ticks_pe
 static int tick_to_section_bar(const song_t *song, uint32_t tick,
                                uint32_t ticks_per_bar, uint32_t *out_bar) {
     return song_bar_at_tick(song, tick, ticks_per_bar, out_bar, NULL, NULL);
+}
+
+/* Ticks from the start of `tick`'s chord bar to it. */
+static uint32_t bar_offset_at(const song_t *song, uint32_t tick, uint32_t ticks_per_bar) {
+    uint32_t bar_start = 0;
+    if (song_bar_at_tick(song, tick, ticks_per_bar, NULL, &bar_start, NULL) < 0) return 0;
+    return tick - bar_start;
 }
 
 /* The chord sounding at a tick, and the span it sounds over. */
@@ -2699,7 +2766,9 @@ static void emit_instruments_at_tick(engine_t *e, uint32_t tick) {
         instrument_t *inst = &e->live_slot.song.instruments[i];
         if (!inst->enabled || !e->inst_live_enabled[i]) continue;
         inst_voice_t resolved;
-        resolve_instrument_for_bar(inst, sec_idx, (int)bar, &resolved);
+        int muted = 0;
+        resolve_instrument_at(inst, sec_idx, bar, bar_offset_at(&e->live_slot.song, tick, e->ticks_per_bar),
+                              e->ticks_per_beat, &resolved, &muted);
         if (resolved.follow_note > 0) {
             /* This bar is follow-note (track default, or a per-bar override
              * switching it on): the drum-hit path (emit_instruments_follow)
@@ -2727,7 +2796,7 @@ static void emit_instruments_at_tick(engine_t *e, uint32_t tick) {
             continue;
         }
         /* Respect the per-bar mute map (1 = send, 0 = muted). */
-        if (bar < MAX_SECTION_BARS && inst->bars[sec_idx][bar] == 0) {
+        if (muted) {
             /* Muted: cut off any sounding note, using the resolved config it
              * was actually turned on with. */
             if (e->last_inst_chord_set[i]) {
@@ -2746,6 +2815,10 @@ static void emit_instruments_at_tick(engine_t *e, uint32_t tick) {
              * chord as the bar before it. */
             int chord_explicit_here = cp.explicit_here;
             int chord_unchanged = e->last_inst_chord_set[i] && chord_equal(&e->last_inst_chord[i], ch);
+            /* An item that changes the instrument's settings mid-chord
+             * (octave, voicing...) re-voices it there. */
+            if (chord_unchanged && inst->uses_items && !voice_equal(&e->last_inst_resolved[i], &resolved))
+                chord_unchanged = 0;
             /* Emit a note-on when the chord changes, or when this bar is a
              * fresh explicit attack (chord_explicit_here) even if unchanged;
              * a bar that's merely holding a carried-forward chord does not
@@ -2870,6 +2943,7 @@ static void emit_instruments_follow(engine_t *e, uint8_t note, uint32_t tick) {
     chord_pos_t cp;
     chord_at_song_tick(&e->live_slot.song, tick, e->ticks_per_bar, e->ticks_per_beat, NULL, &cp);
     const chord_t *ch = cp.chord;
+    uint32_t eval_tick = tick; /* where the instrument's settings are read */
     if (e->ticks_per_bar > 0) {
         uint32_t bar_end_tick = cp.seg_end;
         if (bar_end_tick > tick && (bar_end_tick - tick) <= guard_ticks) {
@@ -2881,16 +2955,19 @@ static void emit_instruments_follow(engine_t *e, uint8_t note, uint32_t tick) {
                 sec_idx = next_sec;
                 bar = next_bar;
                 ch = np.chord;
+                eval_tick = bar_end_tick;
             }
         }
     }
+    uint32_t eval_off = bar_offset_at(&e->live_slot.song, eval_tick, e->ticks_per_bar);
     for (int i = 0; i < e->live_slot.song.instrument_count && i < MAX_INSTRUMENTS; i++) {
         instrument_t *inst = &e->live_slot.song.instruments[i];
         if (!inst->enabled || !e->inst_live_enabled[i]) continue;
         inst_voice_t resolved;
-        resolve_instrument_for_bar(inst, sec_idx, (int)bar, &resolved);
+        int muted = 0;
+        resolve_instrument_at(inst, sec_idx, bar, eval_off, e->ticks_per_beat, &resolved, &muted);
         if (resolved.follow_note == 0 || resolved.follow_note != note) continue;
-        if (bar < MAX_SECTION_BARS && inst->bars[sec_idx][bar] == 0) continue;
+        if (muted) continue;
         if (ch && ch->set) {
             /* A second matching hit landing within the guard window of the
              * one that's already sounding (same chord too) is the same
@@ -3482,6 +3559,11 @@ static void parse_chords_and_instruments(const char *json, song_t *song) {
                     /* "overrides": [{"section":0,"bar":3,"octave":5,...}, ...] */
                     const char *ov_arr = strchr(p + 9, '[');
                     if (ov_arr) parse_instrument_overrides(ov_arr, inst);
+                } else if (strncmp(p + 1, "items\"", 6) == 0) {
+                    /* "items": [{"section":0,"bar":3,"beat":1,"mute":false,
+                     * "octave":2,...}, ...] -- see inst_item_t. */
+                    const char *it_arr = strchr(p + 6, '[');
+                    if (it_arr) parse_instrument_items(it_arr, inst);
                 }
             }
             p++;
@@ -3771,6 +3853,91 @@ static void parse_instrument_overrides(const char *arr, instrument_t *inst) {
         if (c == ']' && depth == 0) break;
         p++;
     }
+}
+
+static int inst_item_cmp(const void *a, const void *b) {
+    const inst_item_t *x = a, *y = b;
+    if (x->section != y->section) return (int)x->section - (int)y->section;
+    if (x->bar != y->bar) return (int)x->bar - (int)y->bar;
+    return (int)x->half_beat - (int)y->half_beat;
+}
+
+/* Parse an instrument's "items" array (see inst_item_t). Fields left out
+ * keep the track default. */
+static void parse_instrument_items(const char *arr, instrument_t *inst) {
+    if (!arr || !inst) return;
+    inst->uses_items = 1;
+    inst->item_count = 0;
+    int depth = 0, in_string = 0, escape = 0;
+    inst_item_t cur;
+    int sec = -1, bar = -1;
+    double beat = 1.0;
+    memset(&cur, 0, sizeof cur);
+    const char *p = arr;
+    while (*p) {
+        char c = *p;
+        if (escape) { escape = 0; p++; continue; }
+        if (c == '\\') { escape = 1; p++; continue; }
+        if (c == '"') {
+            in_string = !in_string;
+            if (in_string && depth == 1) {
+                if (strncmp(p + 1, "section\"", 8) == 0) {
+                    int v; if (json_get_int_at(p, "section", &v)) sec = v;
+                } else if (strncmp(p + 1, "bar\"", 4) == 0) {
+                    int v; if (json_get_int_at(p, "bar", &v)) bar = v;
+                } else if (strncmp(p + 1, "beat\"", 5) == 0) {
+                    double v; if (json_get_double_at(p, "beat", &v)) beat = v;
+                } else if (strncmp(p + 1, "mute\"", 5) == 0) {
+                    char v[16];
+                    if (json_get_string_at(p, "mute", v, sizeof(v)))
+                        cur.mute = (strcmp(v, "true") == 0 || strcmp(v, "1") == 0) ? 1 : 0;
+                } else if (strncmp(p + 1, "octave\"", 7) == 0) {
+                    int v; if (json_get_int_at(p, "octave", &v)) cur.octave = (int8_t)v;
+                } else if (strncmp(p + 1, "follow_note\"", 12) == 0) {
+                    int v; if (json_get_int_at(p, "follow_note", &v)) cur.follow_note = (int16_t)v;
+                } else if (strncmp(p + 1, "voicing\"", 8) == 0) {
+                    char v[16];
+                    if (json_get_string_at(p, "voicing", v, sizeof(v)))
+                        cur.voicing = (int8_t)((strcmp(v, "chord") == 0) ? 1 : 0);
+                } else if (strncmp(p + 1, "inversion\"", 10) == 0) {
+                    int v; if (json_get_int_at(p, "inversion", &v)) cur.inversion = (int8_t)(v < 0 ? 0 : v);
+                } else if (strncmp(p + 1, "note_gap\"", 9) == 0) {
+                    double v; if (json_get_double_at(p, "note_gap", &v)) cur.note_gap = (float)v;
+                }
+            }
+            p++;
+            continue;
+        }
+        if (in_string) { p++; continue; }
+        if (c == '{') {
+            depth++;
+            if (depth == 1) {
+                memset(&cur, 0, sizeof cur);
+                cur.octave = -128; cur.follow_note = -1; cur.voicing = -1; cur.inversion = -1;
+                cur.note_gap = -1.0f;
+                sec = -1; bar = -1; beat = 1.0;
+            }
+            p++;
+            continue;
+        }
+        if (c == '}') {
+            depth--;
+            if (depth == 0 && sec >= 0 && sec < MAX_SONG_SECTIONS && bar >= 0 && bar < MAX_SECTION_BARS &&
+                inst->item_count < MAX_INST_ITEMS) {
+                int half = (int)((beat - 1.0) * 2.0 + 0.5);
+                cur.section = (uint8_t)sec;
+                cur.bar = (uint16_t)bar;
+                cur.half_beat = (uint8_t)(half < 0 ? 0 : (half > 255 ? 255 : half));
+                inst->items[inst->item_count++] = cur;
+            }
+            p++;
+            continue;
+        }
+        if (c == ']' && depth == 0) break;
+        p++;
+    }
+    if (inst->item_count > 1)
+        qsort(inst->items, (size_t)inst->item_count, sizeof inst->items[0], inst_item_cmp);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -4426,6 +4593,10 @@ static void copy_song_used(song_t *dst, const song_t *src) {
         di->override_count = si->override_count;
         memcpy(di->overrides, si->overrides,
                (size_t)clamp_count(si->override_count, MAX_INSTRUMENT_OVERRIDES) * sizeof di->overrides[0]);
+        di->uses_items = si->uses_items;
+        di->item_count = si->item_count;
+        memcpy(di->items, si->items,
+               (size_t)clamp_count(si->item_count, MAX_INST_ITEMS) * sizeof di->items[0]);
     }
 }
 
@@ -5059,6 +5230,18 @@ static uint32_t inst_bar_key_at(engine_t *e, uint32_t tick) {
         uint32_t mo = (uint32_t)m->half_beat * e->ticks_per_beat / 2;
         if (mo < len && mo <= off) seg++;
     }
+    /* Instrument items starting mid-bar are change points too. */
+    for (int k = 0; k < song->instrument_count && k < MAX_INSTRUMENTS; k++) {
+        const instrument_t *inst = &song->instruments[k];
+        if (!inst->uses_items) continue;
+        int ni = inst->item_count > MAX_INST_ITEMS ? MAX_INST_ITEMS : inst->item_count;
+        for (int i = 0; i < ni; i++) {
+            const inst_item_t *it = &inst->items[i];
+            if (it->section != (uint8_t)sec || it->bar != bar || it->half_beat == 0) continue;
+            uint32_t mo = (uint32_t)it->half_beat * e->ticks_per_beat / 2;
+            if (mo < len && mo <= off) seg++;
+        }
+    }
     return ((uint32_t)sec << 20) | ((bar & 0xFFF) << 8) | (seg & 0xFF);
 }
 
@@ -5296,7 +5479,7 @@ static void engine_clear_error(engine_t *e) {
 
 /* DSP build version stamp. Keep in sync with UI_BUILD_VERSION in ui.js so the
  * running dsp.so can be confirmed from .dsp_log on module load. */
-static const char *const DSP_BUILD_VERSION = "arranger-dsp-2026-10-05-multichord";
+static const char *const DSP_BUILD_VERSION = "arranger-dsp-2026-10-06-institems";
 
 static void* arr_create_instance(const char *module_dir, const char *config_json) {
     (void)module_dir;
