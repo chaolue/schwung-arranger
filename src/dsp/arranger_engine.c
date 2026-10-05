@@ -252,6 +252,9 @@ typedef struct {
     int8_t degree;
     int8_t key_pc;           /* key's pitch class 0-11, -1 if unknown */
     int8_t octave_shift;     /* extra octaves for this chord (Jam pads climbing past C) */
+    /* "No Chord": a silent bar. It stops the previous chord carrying forward
+     * (an unset bar holds it) -- see chord_at_bar. */
+    uint8_t none;
 } chord_t;
 
 /* MAX_INSTRUMENT_OVERRIDES is sparse (one entry per bar that actually
@@ -2547,7 +2550,9 @@ static void resolve_instrument_for_bar(const instrument_t *inst, int section, in
 }
 
 /* Find the chord active at a given bar within a section. A chord set on an
- * earlier bar carries forward until the next chord (or the section end). */
+ * earlier bar carries forward until the next chord (or the section end). A
+ * "No Chord" bar ends it: NULL, so the bar (and the unset bars it carries
+ * into) is silent. */
 static const chord_t *chord_at_bar(const section_t *sec, uint32_t bar) {
     if (!sec) return NULL;
     const chord_t *last = NULL;
@@ -2555,7 +2560,7 @@ static const chord_t *chord_at_bar(const section_t *sec, uint32_t bar) {
         if (sec->chords[b].set) last = &sec->chords[b];
         if ((uint32_t)b == bar) break;
     }
-    return last;
+    return (last && last->none) ? NULL : last;
 }
 
 /* Song ticks a section spans: its assembled length, or whole bars for a song
@@ -3458,9 +3463,9 @@ static void parse_chords_and_instruments(const char *json, song_t *song) {
         arr_log("PARSE_CHORD section=%d chord_count=%d", s, sec->chord_count);
         for (int b = 0; b < sec->chord_count && b < MAX_SECTION_BARS; b++) {
             if (sec->chords[b].set) {
-                arr_log("PARSE_CHORD[%d][%d] root=%s quality=%s bass=%s",
+                arr_log("PARSE_CHORD[%d][%d] root=%s quality=%s bass=%s%s",
                         s, b, sec->chords[b].root, sec->chords[b].quality,
-                        sec->chords[b].bass);
+                        sec->chords[b].bass, sec->chords[b].none ? " none" : "");
             }
         }
     }
@@ -3494,6 +3499,8 @@ static void parse_section_chords(const char *arr, section_t *sec) {
                 } else if (strncmp(p + 1, "key\"", 4) == 0) {
                     char v[8];
                     if (json_get_string_at(p, "key", v, sizeof(v))) ch->key_pc = (int8_t)note_name_semitone(v);
+                } else if (strncmp(p + 1, "none\"", 5) == 0) {
+                    ch->none = 1; /* only ever sent as "none":true */
                 }
             }
             p++;
@@ -5154,7 +5161,7 @@ static void engine_clear_error(engine_t *e) {
 
 /* DSP build version stamp. Keep in sync with UI_BUILD_VERSION in ui.js so the
  * running dsp.so can be confirmed from .dsp_log on module load. */
-static const char *const DSP_BUILD_VERSION = "arranger-dsp-2026-10-05-seekrelease";
+static const char *const DSP_BUILD_VERSION = "arranger-dsp-2026-10-05-nochord";
 
 static void* arr_create_instance(const char *module_dir, const char *config_json) {
     (void)module_dir;

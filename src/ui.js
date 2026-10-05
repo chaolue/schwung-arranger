@@ -8,7 +8,7 @@
  * confirmed from the logs (see init()/playCurrentSong()) instead of guessing
  * whether a new file actually loaded. Keep the DSP dsp_build_version in
  * arranger_engine.c in sync so both sides are verifiable. */
-const UI_BUILD_VERSION = "arranger-ui-2026-10-05-partialbar";
+const UI_BUILD_VERSION = "arranger-ui-2026-10-05-nochord";
 
 /* Lit white buttons at full brightness (127). Schwung's WhiteLedBright is 124. */
 const WhiteLedFull = 127;
@@ -229,6 +229,9 @@ const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", 
 
 /* The 12 bass-note choices for a slash chord (C/G = C over G bass). */
 const BASS_NOTES = NOTE_NAMES;
+
+/* Root-row value meaning "No Chord" (a silent bar), after the seven degrees. */
+const NO_CHORD_DEGREE = 7;
 
 /* Default key for a new song. */
 const DEFAULT_KEY = "C";
@@ -2460,8 +2463,9 @@ function chordVoicingMidi(chord, octave) {
 }
 
 /* Render a chord object as a display string, e.g. "C", "Dm", "C/G", "Dm7". */
-function chordLabel(chord) {
+export function chordLabel(chord) {
     if (!chord) return "";
+    if (chord.none) return "N.C.";
     const root = chord.root || "C";
     const q = CHORD_QUALITY_LABEL[chord.quality] || "";
     let s = root + q;
@@ -2494,8 +2498,9 @@ function setChordAtBar(sec, barIndex, chord) {
 
 /* Transpose a chord object by a number of semitones (used when the song key
  * changes so existing chords follow the new key). */
-function transposeChord(chord, semitones) {
+export function transposeChord(chord, semitones) {
     if (!chord) return null;
+    if (chord.none) return { none: true };
     const out = { quality: chord.quality || "maj" };
     const rootPc = noteSemitone(chord.root);
     if (rootPc >= 0) out.root = NOTE_NAMES[((rootPc + semitones) % 12 + 12) % 12];
@@ -2740,6 +2745,9 @@ export function toEngineSongJson(song) {
         if (sec.chords && sec.chords.length > 0) {
             for (let i = 0; i < sec.chords.length; i++) {
                 const ch = sec.chords[i];
+                /* No Chord: a silent bar that stops the previous chord
+                 * carrying forward (an empty bar holds it). */
+                if (ch && ch.none) { chordsOut.push({ none: true }); continue; }
                 chordsOut.push(ch ? {
                     root: ch.root || "C",
                     quality: ch.quality || "maj",
@@ -2838,11 +2846,11 @@ export function toUiSong(engineLike) {
         sections: (s.sections || []).map(sec => ({
             id: sec.id || ("sec-" + Date.now()),
             name: sec.name || "Section",
-            chords: (sec.chords || []).map(c => (c ? {
+            chords: (sec.chords || []).map(c => (c ? (c.none ? { none: true } : {
                 root: c.root || "C",
                 quality: c.quality || "maj",
                 bass: c.bass || ""
-            } : null)),
+            }) : null)),
             clips: (sec.clips || []).map(c => {
                 const src = c.source || c.path || "";
                 /* Backfill a clip's source_folder for existing songs whose
@@ -6290,7 +6298,7 @@ function drawChordStepLEDs(force) {
             /* A disabled instrument track shows every bar dimmed — none of
              * it is actually sounding right now, regardless of per-bar
              * chord/mute state. */
-            if (!chord) {
+            if (!chord || chord.none) {
                 stepColor(s, DarkGrey, force);
             } else if (inst.enabled && instrumentBarOn(inst, secIndex, barIndex)) {
                 stepColor(s, trackColour, force);
@@ -6299,6 +6307,10 @@ function drawChordStepLEDs(force) {
             }
         } else if (barIndex === chordCursorBar) {
             stepColor(s, White, force);
+        } else if (chord && chord.none) {
+            /* No Chord: set, but silent -- dimmer than a chord, unlike an
+             * empty bar (which holds the previous chord). */
+            stepColor(s, veryDarkPartner(trackColour), force);
         } else if (chord) {
             stepColor(s, trackColour, force);
         } else {
@@ -6644,7 +6656,11 @@ function openChordPick(barIndex) {
     if (!sec) return;
     chordPickBar = barIndex;
     const existing = chordAtBar(sec, barIndex);
-    if (existing) {
+    if (existing && existing.none) {
+        chordPickDegree = NO_CHORD_DEGREE;
+        chordPickQuality = 0;
+        chordPickBass = -1;
+    } else if (existing) {
         /* Map the existing chord back to a scale degree + quality + bass. */
         const key = currentSong ? (currentSong.key || DEFAULT_KEY) : DEFAULT_KEY;
         const keyPc = noteSemitone(key);
@@ -6679,6 +6695,7 @@ function openChordPick(barIndex) {
 
 /* The chord currently selected in the picker. */
 function chordPickChord() {
+    if (chordPickDegree === NO_CHORD_DEGREE) return { none: true };
     const key = currentSong ? (currentSong.key || DEFAULT_KEY) : DEFAULT_KEY;
     const d = diatonicChord(key, chordPickDegree);
     const chord = { root: d.root, quality: CHORD_QUALITIES[chordPickQuality] };
@@ -6699,15 +6716,19 @@ function drawChordPick() {
     const key = currentSong ? (currentSong.key || DEFAULT_KEY) : DEFAULT_KEY;
     drawMenuHeader("Chord (bar " + (chordPickBar + 1) + ")", key);
     const degreeNames = ["I", "ii", "iii", "IV", "V", "vi", "vii°"];
+    const noChord = chordPickDegree === NO_CHORD_DEGREE;
     /* Root/Type/Bass only make sense once a chord exists for this bar; until
-     * then the only option is to add one. */
+     * then the options are to add one, or mark the bar No Chord (silent).
+     * Turning Root past vii° also reaches No Chord. */
     const items = chordPickHasChord ? [
-        { key: "root", label: "Root", value: degreeNames[chordPickDegree] + " (" + diatonicChord(key, chordPickDegree).root + ")" },
-        { key: "type", label: "Type", value: CHORD_TYPE_LABEL[CHORD_QUALITIES[chordPickQuality]] || "Major" },
-        { key: "bass", label: "Bass", value: chordPickBass >= 0 ? BASS_NOTES[chordPickBass] : "—" },
+        { key: "root", label: "Root", value: noChord ? "No Chord"
+            : degreeNames[chordPickDegree] + " (" + diatonicChord(key, chordPickDegree).root + ")" },
+        { key: "type", label: "Type", value: noChord ? "—" : (CHORD_TYPE_LABEL[CHORD_QUALITIES[chordPickQuality]] || "Major") },
+        { key: "bass", label: "Bass", value: !noChord && chordPickBass >= 0 ? BASS_NOTES[chordPickBass] : "—" },
         { key: "toggle", label: "Delete Chord", value: "" }
     ] : [
-        { key: "toggle", label: "Add Chord", value: "" }
+        { key: "toggle", label: "Add Chord", value: "" },
+        { key: "nochord", label: "No Chord", value: "" }
     ];
     drawMenuList({
         labelX: 3,
@@ -6726,30 +6747,47 @@ function drawChordPick() {
 }
 
 function handleChordPickInput(cc, value) {
-    /* The last item is the Add/Delete Chord action row: index 0 when no
-     * chord exists yet (it's the only row), else index 3. */
+    /* The Add/Delete Chord action row: index 0 when no chord exists yet
+     * (followed by the No Chord row), else index 3. */
     const actionIndex = chordPickHasChord ? 3 : 0;
+    const lastIndex = chordPickHasChord ? 3 : 1;
+    const noChord = chordPickDegree === NO_CHORD_DEGREE;
     if (cc === MoveMainKnob) {
         const delta = decodeDelta(value);
         if (chordPickEditing) {
             if (chordPickFocus === 0) {
-                chordPickDegree = ((chordPickDegree + delta) % 7 + 7) % 7;
+                /* Seven degrees, then No Chord. */
+                chordPickDegree = ((chordPickDegree + delta) % 8 + 8) % 8;
                 /* Changing the root re-picks the diatonic default type for its
                  * place in the key and drops any slash bass, so e.g. moving
                  * off a customised Dm lands on the new root's plain default
                  * rather than carrying the old customisation over. */
                 chordPickQuality = CHORD_QUALITIES.indexOf(DIATONIC_QUALITY[chordPickDegree]);
                 chordPickBass = -1;
+                if (chordPickDegree === NO_CHORD_DEGREE) chordPickQuality = 0;
+            } else if (noChord) {
+                /* No Chord has no type or bass. */
             } else if (chordPickFocus === 1) {
                 chordPickQuality = Math.max(0, Math.min(CHORD_QUALITIES.length - 1, chordPickQuality + delta));
             } else if (chordPickFocus === 2) {
                 chordPickBass = Math.max(-1, Math.min(BASS_NOTES.length - 1, chordPickBass + delta));
             }
         } else {
-            chordPickFocus = Math.max(0, Math.min(actionIndex, chordPickFocus + delta));
+            chordPickFocus = Math.max(0, Math.min(lastIndex, chordPickFocus + delta));
         }
         needsRedraw = true;
     } else if (cc === MoveMainButton && value > 0) {
+        if (!chordPickHasChord && chordPickFocus === 1) {
+            /* No Chord: mark this bar silent and go back. */
+            const secIndex = chordDisplaySectionIndex();
+            const sec = currentSong ? currentSong.sections[secIndex] : null;
+            if (sec) setChordAtBar(sec, chordPickBar, { none: true });
+            menuStack.pop();
+            currentView = VIEW_BUILDER;
+            stepLedsDirty = true;
+            needsRedraw = true;
+            return;
+        }
         if (chordPickFocus === actionIndex) {
             if (chordPickHasChord) {
                 /* Delete the chord on this bar. */
