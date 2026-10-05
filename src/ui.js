@@ -12827,22 +12827,24 @@ function footerHints() {
         case VIEW_SETLIST_CLICK: return editMenuHints(clickSettingsEditing);
         case VIEW_JAM_INSTRUMENT: return editMenuHints(jamInstrumentEditing);
         /* Where a screen has pad and track actions, those lead: Play, Record
-         * and Back are self-explanatory (and lit), so they give way. T4 is
-         * Track 4, the click. Shift shows the less obvious Shift actions. */
+         * and Back are self-explanatory (and lit), so they give way. In Song
+         * Builder, T1 (Track 1) names the track it switches to -- Chord from
+         * the Drum track, Drum from any other. Shift shows the less obvious
+         * Shift actions. */
         case VIEW_BUILDER:
             if (builderTrack === TRACK_DRUM) {
                 if (shiftHeld) return [["CLK", "SET"], ["PLAY", "SONG"], ["BACK", "OUT"]];
-                return [["PAD", "ADD"], ["TRK", "TRACK"], ["T4", "CLICK"]];
+                return [["PAD", "ADD"], ["T1", "CHORD"], ["CLK", "TRIM"]];
             }
             if (shiftHeld) return [["PLAY", "SONG"], ["BACK", "OUT"]];
-            return [["STEP", "BAR"], ["TRK", "SEL"], ["MENU", "SET"]];
+            return [["STEP", "BAR"], ["T1", "DRUM"], ["MENU", "SET"]];
         case VIEW_PERFORMANCE:
             /* The knob feedback panel covers the footer rows while it shows. */
             if (perfKnobFeedbackVisible()) return null;
-            return [["PAD", perfPlaying ? "JUMP" : "PICK"], ["TRK", "MUTE"], ["T4", "CLICK"]];
+            return [["PAD", perfPlaying ? "JUMP" : "PICK"], ["TRK", "MUTE"], ["BACK", "OUT"]];
         case VIEW_JAM:
             if (shiftHeld) return [["JOG", "KEY"], ["TRK", "INST"]];
-            return [["PAD", jamPlaying ? "CUE" : "PLAY"], ["TRK", "MUTE"], ["T4", "CLICK"]];
+            return [["PAD", jamPlaying ? "CUE" : "PLAY"], ["TRK", "MUTE"], ["BACK", "OUT"]];
         default:
             /* The Chord Picker uses the footer rows for its chord line. */
             return null;
