@@ -140,7 +140,7 @@ static _Atomic(sem_t *) g_log_wake;
  * the engine struct and copy_trunc (they reference both). */
 static void log_ring_enqueue(log_ring_t *ring, const char *msg);
 static void log_ring_drain(log_ring_t *ring);
-static void dsp_log_enqueue_worker(const char *fmt, ...);
+static void dsp_log_enqueue_worker(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static void *arranger_worker_thread(void *arg);
 
 #define MAX_TRACKS         64
@@ -325,7 +325,12 @@ typedef struct {
     char name[64];
     int clip_count;
     section_clip_t clips[MAX_SECTION_CLIPS];
-    uint32_t bars;           /* total bars after assembly */
+    uint32_t bars;           /* chord bars after assembly; a partial last bar counts */
+    /* Where the section sits in the song, in song ticks, after assembly. Its
+     * length need not be whole bars (Advanced Trim can end a clip mid-bar),
+     * and chord bars count from its own start -- see song_bar_at_tick. */
+    uint32_t start_tick;
+    uint32_t len_ticks;
     int chord_count;         /* number of bars with a chord set */
     chord_t chords[MAX_SECTION_BARS];
 } section_t;
@@ -699,6 +704,7 @@ typedef struct engine {
     uint32_t pending_seek_tick;    /* tick at which to apply the seek */
     int pending_seek;              /* 1 if a seek is scheduled */
     uint32_t pending_seek_bar;     /* bar (0-based) to seek to */
+    uint32_t pending_seek_target_tick; /* ...as a tick: a section can start mid-bar */
     uint32_t pending_seek_guard_start; /* guard window start tick for a manual mid-section seek */
     int pending_seek_guard_active; /* 1 while the playhead is inside the seek guard window */
 
@@ -786,6 +792,9 @@ typedef struct engine {
     /* Channels (bit per channel) each route played a note on since the last
      * stop -- where emit_notes_off_cc sends All Notes Off. */
     uint16_t notes_ch_used[3];
+    /* Section and chord bar (sec << 16 | bar) the song instruments last
+     * fired at -- see update_bar_counter. */
+    uint32_t inst_bar_key;
     /* Audio frames left until that All Notes Off goes out (0 = none due) --
      * see schedule_notes_off_cc. */
     uint32_t notes_off_cc_frames;
@@ -2070,10 +2079,15 @@ static int build_timeline_targeted(engine_t *e, song_t *song, double tempo_bpm,
             cursor += clip_dur;
             if (cursor > *out_end_tick) *out_end_tick = cursor;
         }
-        /* Record the section's bar count (in song ticks) so the instrument
-         * emitter can map a playhead tick to a section/bar. */
+        /* Record where the section sits and its bar count (in song ticks) so
+         * the instrument emitter can map a playhead tick to a section/bar. A
+         * partial last bar (a clip trimmed to end mid-bar) is still a chord
+         * bar -- it used to be dropped, so every later section's chords came
+         * early by the missing fraction. Found live. */
+        sec->start_tick = sec_start_tick;
+        sec->len_ticks = cursor - sec_start_tick;
         if (ticks_per_bar > 0) {
-            sec->bars = (cursor - sec_start_tick) / ticks_per_bar;
+            sec->bars = (sec->len_ticks + ticks_per_bar - 1) / ticks_per_bar;
             if (sec->bars < 1) sec->bars = 1;
         }
     }
@@ -2544,23 +2558,45 @@ static const chord_t *chord_at_bar(const section_t *sec, uint32_t bar) {
     return last;
 }
 
-/* Map an absolute playhead tick to a (section, bar-within-section) pair.
+/* Song ticks a section spans: its assembled length, or whole bars for a song
+ * that was never assembled. */
+static uint32_t section_span_ticks(const section_t *sec, uint32_t ticks_per_bar) {
+    if (sec->len_ticks > 0) return sec->len_ticks;
+    uint32_t bars = sec->bars < 1 ? 1 : sec->bars;
+    return bars * ticks_per_bar;
+}
+
+/* Map a playhead tick to its section and chord bar. Bars count from the
+ * section's own start, and a section's last bar may be short, so this walks
+ * section spans rather than dividing the absolute tick into bars. Also gives
+ * the tick the bar starts at and the tick it ends at (the next bar or
+ * section). Returns the section index, or -1 past the song end. */
+static int song_bar_at_tick(const song_t *song, uint32_t tick, uint32_t ticks_per_bar,
+                            uint32_t *out_bar, uint32_t *out_bar_start, uint32_t *out_bar_end) {
+    if (!song || ticks_per_bar == 0) return -1;
+    uint32_t sec_start = 0;
+    for (int s = 0; s < song->section_count; s++) {
+        uint32_t span = section_span_ticks(&song->sections[s], ticks_per_bar);
+        if (tick < sec_start + span) {
+            uint32_t bar = (tick - sec_start) / ticks_per_bar;
+            uint32_t bar_start = sec_start + bar * ticks_per_bar;
+            uint32_t bar_end = bar_start + ticks_per_bar;
+            if (bar_end > sec_start + span) bar_end = sec_start + span;
+            if (out_bar) *out_bar = bar;
+            if (out_bar_start) *out_bar_start = bar_start;
+            if (out_bar_end) *out_bar_end = bar_end;
+            return s;
+        }
+        sec_start += span;
+    }
+    return -1;
+}
+
+/* Map a playhead tick to a (section, bar-within-section) pair.
  * Returns the section index, or -1 if the tick is out of range. */
 static int tick_to_section_bar(const song_t *song, uint32_t tick,
                                uint32_t ticks_per_bar, uint32_t *out_bar) {
-    if (!song || ticks_per_bar == 0) return -1;
-    uint32_t remaining = tick;
-    for (int s = 0; s < song->section_count; s++) {
-        uint32_t sec_bars = song->sections[s].bars;
-        if (sec_bars < 1) sec_bars = 1;
-        uint32_t sec_ticks = sec_bars * ticks_per_bar;
-        if (remaining < sec_ticks) {
-            if (out_bar) *out_bar = remaining / ticks_per_bar;
-            return s;
-        }
-        remaining -= sec_ticks;
-    }
-    return -1;
+    return song_bar_at_tick(song, tick, ticks_per_bar, out_bar, NULL, NULL);
 }
 
 /* Compare two chords for equality (both null = equal; both set with the same
@@ -2577,47 +2613,22 @@ static int chord_equal(const chord_t *a, const chord_t *b) {
            a->degree == b->degree && a->key_pc == b->key_pc;
 }
 
-/* Total bars across all sections of the song. */
-static uint32_t song_total_bars(const song_t *song) {
-    uint32_t total = 0;
-    for (int s = 0; s < song->section_count; s++) {
-        uint32_t sec_bars = song->sections[s].bars;
-        if (sec_bars < 1) sec_bars = 1;
-        total += sec_bars;
-    }
-    return total;
-}
-
-/* Get the chord at an absolute bar (0-based across the whole song), or NULL. */
-static const chord_t *chord_at_abs_bar(const song_t *song, uint32_t abs_bar) {
-    uint32_t remaining = abs_bar;
-    for (int s = 0; s < song->section_count; s++) {
-        uint32_t sec_bars = song->sections[s].bars;
-        if (sec_bars < 1) sec_bars = 1;
-        if (remaining < sec_bars) {
-            return chord_at_bar(&song->sections[s], remaining);
-        }
-        remaining -= sec_bars;
-    }
-    return NULL;
-}
-
 /* Emit the chord for every enabled instrument at a given absolute tick. Used
  * at bar boundaries (follow_note == 0). A chord is held across multiple bars:
  * the note-on fires only when the chord changes, and the note-off is scheduled
  * `note_gap` before the next chord change (or the song end). */
 static void emit_instruments_at_tick(engine_t *e, uint32_t tick) {
     if (!e || e->live_slot.song.instrument_count == 0) return;
-    uint32_t bar = 0;
-    int sec_idx = tick_to_section_bar(&e->live_slot.song, tick, e->ticks_per_bar, &bar);
+    uint32_t bar = 0, bar_end_tick = 0;
+    int sec_idx = song_bar_at_tick(&e->live_slot.song, tick, e->ticks_per_bar, &bar, NULL, &bar_end_tick);
     if (sec_idx < 0) return;
     section_t *sec = &e->live_slot.song.sections[sec_idx];
     const chord_t *ch = chord_at_bar(sec, bar);
-    uint32_t abs_bar = tick / e->ticks_per_bar;
-    uint32_t total_bars = song_total_bars(&e->live_slot.song);
     /* The chord at the next bar (or NULL past the song end). */
-    const chord_t *next_ch = (abs_bar + 1 < total_bars)
-        ? chord_at_abs_bar(&e->live_slot.song, abs_bar + 1) : NULL;
+    uint32_t next_bar = 0;
+    int next_sec = song_bar_at_tick(&e->live_slot.song, bar_end_tick, e->ticks_per_bar, &next_bar, NULL, NULL);
+    const chord_t *next_ch = next_sec >= 0
+        ? chord_at_bar(&e->live_slot.song.sections[next_sec], next_bar) : NULL;
     dsp_log_enqueue_worker("EMIT_INST tick=%u sec=%d bar=%u chord=%s next=%s", tick, sec_idx, bar,
             (ch && ch->set) ? ch->root : "null",
             (next_ch && next_ch->set) ? next_ch->root : "null");
@@ -2699,7 +2710,7 @@ static void emit_instruments_at_tick(engine_t *e, uint32_t tick) {
              * note being delayed. */
             if (!next_ch || !next_ch->set || !chord_equal(ch, next_ch)) {
                 uint32_t gap = (uint32_t)(resolved.note_gap * e->ticks_per_beat);
-                uint32_t off_tick = (abs_bar + 1) * e->ticks_per_bar - gap;
+                uint32_t off_tick = bar_end_tick > gap ? bar_end_tick - gap : 0;
                 if (off_tick <= tick) off_tick = tick + 1;
                 schedule_instrument_note_off(e, i, &resolved, off_tick);
             }
@@ -2789,8 +2800,8 @@ static void emit_instruments_follow(engine_t *e, uint8_t note, uint32_t tick) {
      * bar's chord (and mute state) instead of holding the outgoing one a
      * beat early. Falls back to the outgoing bar past the end of the song. */
     if (e->ticks_per_bar > 0) {
-        uint32_t abs_bar = tick / e->ticks_per_bar;
-        uint32_t bar_end_tick = (abs_bar + 1) * e->ticks_per_bar;
+        uint32_t bar_end_tick = 0;
+        song_bar_at_tick(&e->live_slot.song, tick, e->ticks_per_bar, NULL, NULL, &bar_end_tick);
         if (bar_end_tick > tick && (bar_end_tick - tick) <= guard_ticks) {
             uint32_t next_bar = 0;
             int next_sec = tick_to_section_bar(&e->live_slot.song, bar_end_tick, e->ticks_per_bar, &next_bar);
@@ -4258,6 +4269,8 @@ static void copy_song_used(song_t *dst, const song_t *src) {
         memcpy(ds->clips, ss->clips,
                (size_t)clamp_count(ss->clip_count, MAX_SECTION_CLIPS) * sizeof ds->clips[0]);
         ds->bars = ss->bars;
+        ds->start_tick = ss->start_tick;
+        ds->len_ticks = ss->len_ticks;
         ds->chord_count = ss->chord_count;
         memcpy(ds->chords, ss->chords,
                (size_t)clamp_count(ss->chord_count, MAX_SECTION_BARS) * sizeof ds->chords[0]);
@@ -4896,6 +4909,14 @@ static void engine_swap_to_staging(engine_t *e, const timeline_slot_t *src) {
  * (including a loop wrap, where the bar number goes backwards, and seeks).
  * The UI uses this monotonic counter to detect boundaries authoritatively
  * instead of inferring them from bar/beat deltas in JS. */
+/* The section and chord bar at a tick, as one comparable key. */
+static uint32_t inst_bar_key_at(engine_t *e, uint32_t tick) {
+    uint32_t bar = 0;
+    int sec = tick_to_section_bar(&e->live_slot.song, tick, e->ticks_per_bar, &bar);
+    if (sec < 0) return 0xFFFFFFFFu;
+    return ((uint32_t)sec << 16) | (bar & 0xFFFF);
+}
+
 static void update_bar_counter(engine_t *e) {
     uint32_t bar = e->live_slot.end_tick > 0
         ? (e->playhead_tick / e->ticks_per_bar)
@@ -4911,13 +4932,21 @@ static void update_bar_counter(engine_t *e) {
          * next bar's chord here left it sounding after the stop until the
          * UI's own "stop" arrived. Found live, in Jam and Perform. */
         if (e->running) {
-            /* Emit the chord for non-follow instruments at each bar boundary. */
-            emit_instruments_at_tick(e, e->playhead_tick);
             /* Promote a pending Jam chord-pad selection to live BEFORE firing
              * the once-per-bar fallback below, so a chord that just became
              * live this boundary is the one that fires. */
             apply_pending_jam_chord(e);
             emit_jam_instruments_at_tick(e, e->playhead_tick);
+        }
+    }
+    /* Song instruments change chord at each chord bar, counted from each
+     * section's own start -- not the absolute bar grid above, which drifts
+     * from the song's sections once one ends mid-bar. */
+    if (e->running && e->live_slot.song.instrument_count > 0) {
+        uint32_t key = inst_bar_key_at(e, e->playhead_tick);
+        if (key != e->inst_bar_key || wrapped) {
+            e->inst_bar_key = key;
+            emit_instruments_at_tick(e, e->playhead_tick);
         }
     }
 }
@@ -4957,8 +4986,10 @@ static void advance_playhead(engine_t *e, int frames, int sample_rate) {
          * it can detect a repeat of the current section, where the playhead
          * stays in the same section and bar_counter's bar does not change. */
         e->seek_counter++;
-        /* Seek to the start of the target bar. */
-        e->playhead_tick = seek_bar * e->ticks_per_bar;
+        /* Seek to the target: the start of a section, which need not be on
+         * a whole bar. */
+        (void)seek_bar;
+        e->playhead_tick = e->pending_seek_target_tick;
         e->event_cursor = 0;
         while (e->event_cursor < e->live_slot.event_count &&
                e->live_slot.events[e->event_cursor].tick < e->playhead_tick) {
@@ -5117,7 +5148,7 @@ static void engine_clear_error(engine_t *e) {
 
 /* DSP build version stamp. Keep in sync with UI_BUILD_VERSION in ui.js so the
  * running dsp.so can be confirmed from .dsp_log on module load. */
-static const char *const DSP_BUILD_VERSION = "arranger-dsp-2026-10-05-stophold";
+static const char *const DSP_BUILD_VERSION = "arranger-dsp-2026-10-05-partialbar";
 
 static void* arr_create_instance(const char *module_dir, const char *config_json) {
     (void)module_dir;
@@ -5414,6 +5445,7 @@ static void play_from_top(engine_t *e) {
     queue_clear(e);
     /* Emit the first bar's chord immediately (update_bar_counter only
      * fires on a bar *change*, so bar 0 would otherwise be silent). */
+    e->inst_bar_key = inst_bar_key_at(e, 0);
     emit_instruments_at_tick(e, 0);
     /* A chord picked while stopped (or still pending from just before
      * a stop) has no "current bar" to defer to -- promote it to live
@@ -5819,13 +5851,14 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
          * either way, near-instant: the actual build already happened on the
          * worker, not here. */
         activate_primary_if_published(e);
-        int bar = atoi(val);
-        if (bar < 0) bar = 0;
-        if (e->live_slot.event_count > 0 && e->live_slot.end_tick > 0) {
-            uint32_t max_bar = e->live_slot.end_tick / e->ticks_per_bar;
-            if ((uint32_t)bar > max_bar) bar = (int)max_bar;
-        }
-        e->playhead_tick = (uint32_t)bar * e->ticks_per_bar;
+        /* Fractional: a section after one that ends mid-bar starts mid-bar,
+         * and Perform jumps there by bar number. */
+        double bar = atof(val);
+        if (bar < 0.0) bar = 0.0;
+        if (e->live_slot.event_count > 0 && e->live_slot.end_tick > 0 &&
+            bar * (double)e->ticks_per_bar > (double)e->live_slot.end_tick)
+            bar = (double)e->live_slot.end_tick / (double)e->ticks_per_bar;
+        e->playhead_tick = (uint32_t)(bar * (double)e->ticks_per_bar + 0.5);
         e->event_cursor = 0;
         while (e->event_cursor < e->live_slot.event_count &&
                e->live_slot.events[e->event_cursor].tick < e->playhead_tick) {
@@ -5835,7 +5868,7 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
         e->stopped_at_end = 0;
         e->last_playhead_tick = 0;
         e->tick_remainder = 0.0;
-        e->last_bar = (uint32_t)bar;
+        e->last_bar = e->playhead_tick / e->ticks_per_bar;
         e->last_bc_tick = e->playhead_tick;
         for (int i = 0; i < MAX_INSTRUMENTS; i++) {
             e->last_inst_chord_set[i] = 0;
@@ -5844,8 +5877,9 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
         e->flash_end_tick = initial_flash_end_tick(e);
         queue_clear(e);
         /* Emit the chord for the bar playback starts on. */
+        e->inst_bar_key = inst_bar_key_at(e, e->playhead_tick);
         emit_instruments_at_tick(e, e->playhead_tick);
-        dsp_log_enqueue_worker("PLAY_FROM_BAR bar=%d playhead=%u running=1",
+        dsp_log_enqueue_worker("PLAY_FROM_BAR bar=%.3f playhead=%u running=1",
                      bar, e->playhead_tick);
         return;
     }
@@ -5879,16 +5913,16 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
         return;
     }
     if (strcmp(key, "seek_bar") == 0) {
-        int bar = atoi(val);
+        /* Fractional: a section can start mid-bar (see seek_bar_scheduled). */
+        double bar = atof(val);
         if (e->live_slot.event_count > 0 && e->live_slot.end_tick > 0) {
-            uint32_t max_bar = e->live_slot.end_tick / e->ticks_per_bar;
-            if (max_bar < 1) max_bar = 1;
-            if (bar < 0) bar = 0;
-            if ((uint32_t)bar > max_bar) bar = (int)max_bar;
+            if (bar < 0.0) bar = 0.0;
+            if (bar * (double)e->ticks_per_bar > (double)e->live_slot.end_tick)
+                bar = (double)e->live_slot.end_tick / (double)e->ticks_per_bar;
         } else {
-            bar = 0;
+            bar = 0.0;
         }
-        e->playhead_tick = (uint32_t)bar * e->ticks_per_bar;
+        e->playhead_tick = (uint32_t)(bar * (double)e->ticks_per_bar + 0.5);
         e->event_cursor = 0;
         while (e->event_cursor < e->live_slot.event_count &&
                e->live_slot.events[e->event_cursor].tick < e->playhead_tick) {
@@ -5908,12 +5942,16 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
          * truncated whole bar (which cuts the current section short) nor at
          * the next whole bar (which bleeds into the next section). */
         double bar = atof(val);
-        int target_bar = (int)bar; /* default: same bar */
+        /* The target may be fractional too: a section after one that ends
+         * mid-bar starts mid-bar. Rounding it to a whole bar landed the jump
+         * up to a bar late, skipping the section's start. */
+        double target = (double)(int)bar; /* default: same bar */
         const char *colon = strchr(val, ':');
         if (colon) {
             bar = atof(val);
-            target_bar = atoi(colon + 1);
+            target = atof(colon + 1);
         }
+        int target_bar = (int)target;
         if (e->live_slot.event_count > 0 && e->live_slot.end_tick > 0) {
             uint32_t max_bar = e->live_slot.end_tick / e->ticks_per_bar;
             if (max_bar < 1) max_bar = 1;
@@ -5939,6 +5977,10 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
         }
         e->pending_seek_tick = boundary;
         e->pending_seek_bar = (uint32_t)target_bar;
+        if (target < 0.0) target = 0.0;
+        if (e->live_slot.end_tick > 0 && target * (double)e->ticks_per_bar > (double)e->live_slot.end_tick)
+            target = (double)e->live_slot.end_tick / (double)e->ticks_per_bar;
+        e->pending_seek_target_tick = (uint32_t)(target * (double)e->ticks_per_bar + 0.5);
         e->pending_seek = 1;
         /* Compute the guard window start: the seek boundary minus the guard
          * window (fraction of a beat). Note-ons at or after this tick (and

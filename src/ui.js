@@ -8,7 +8,7 @@
  * confirmed from the logs (see init()/playCurrentSong()) instead of guessing
  * whether a new file actually loaded. Keep the DSP dsp_build_version in
  * arranger_engine.c in sync so both sides are verifiable. */
-const UI_BUILD_VERSION = "arranger-ui-2026-10-05-stoplog";
+const UI_BUILD_VERSION = "arranger-ui-2026-10-05-partialbar";
 
 /* Lit white buttons at full brightness (127). Schwung's WhiteLedBright is 124. */
 const WhiteLedFull = 127;
@@ -11989,9 +11989,10 @@ function perfQueueSection(sectionIndex) {
             ? curBar /* bar-end: seek at end of the current bar */
             : (typeof sectionEnd === "number" ? sectionEnd : curBar);
         const targetRange = perfSectionBarRange(sectionIndex);
-        /* Round the target bar UP so we don't land early and skip the start of
-         * the target section (the DSP seeks to whole bars only). */
-        const targetBar = targetRange ? Math.ceil(targetRange.startBar) : 0;
+        /* The exact (possibly fractional) section start: a section after one
+         * that ends mid-bar starts mid-bar, and the DSP seeks to fractional
+         * bars. Rounding up landed the jump late, skipping its start. */
+        const targetBar = targetRange ? targetRange.startBar : 0;
         /* seek_bar_scheduled = "<boundaryBar>:<targetBar>" (0-based bars). */
         host_module_set_param("seek_bar_scheduled", boundaryBar0 + ":" + targetBar);
         perfSeekScheduled = true;
