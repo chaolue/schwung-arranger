@@ -12826,8 +12826,13 @@ function footerHints() {
         case VIEW_ROOT:
             return [["JOG", "SEL"], ["CLK", "OPEN"], ["BACK", "EXIT"]];
         case VIEW_SONG_BANK:
-        case VIEW_SETLIST_BANK:
+        case VIEW_SETLIST_BANK: {
+            /* Row 0 is "+ New Song" / "+ New Setlist": the click creates one,
+             * and there is nothing there for Shift to rename. */
+            const onNew = (currentView === VIEW_SONG_BANK ? selectedSongIndex : selectedSetlistIndex) === 0;
+            if (onNew) return [["JOG", "SEL"], ["CLK", "NEW"], ["BACK", "OUT"]];
             return shiftHeld ? [["JOG", "SEL"], ["CLK", "NAME"], ["BACK", "OUT"]] : HINTS_LIST;
+        }
         case VIEW_SONG_BACKUPS:
             return [["JOG", "SEL"], ["CLK", "LOAD"], ["BACK", "OUT"]];
         case VIEW_FOLDER_LIST: case VIEW_SETLIST_EDIT: case VIEW_SETLIST_PICK:
