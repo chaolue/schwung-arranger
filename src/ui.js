@@ -8,7 +8,7 @@
  * confirmed from the logs (see init()/playCurrentSong()) instead of guessing
  * whether a new file actually loaded. Keep the DSP dsp_build_version in
  * arranger_engine.c in sync so both sides are verifiable. */
-const UI_BUILD_VERSION = "arranger-ui-2026-10-01-loading";
+const UI_BUILD_VERSION = "arranger-ui-2026-10-05-stoplog";
 
 /* Lit white buttons at full brightness (127). Schwung's WhiteLedBright is 124. */
 const WhiteLedFull = 127;

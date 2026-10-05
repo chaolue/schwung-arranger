@@ -130,6 +130,11 @@ typedef struct {
 
 /* SPSC logging ring: the audio thread enqueues, the worker drains. */
 static log_ring_t g_log_ring;
+/* The worker's wake semaphore, posted after each enqueued line so it is
+ * written promptly. The worker otherwise only woke for builds and library
+ * scans, so everything logged during playback -- a stop included -- sat in
+ * the ring until the next song build. Only reached with debug logging on. */
+static _Atomic(sem_t *) g_log_wake;
 
 /* Forward declarations: the ring helpers and worker thread are defined after
  * the engine struct and copy_trunc (they reference both). */
@@ -544,6 +549,8 @@ static void dsp_log_enqueue_worker(const char *fmt, ...) {
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
     log_ring_enqueue(&g_log_ring, buf);
+    sem_t *wake = atomic_load_explicit(&g_log_wake, memory_order_acquire);
+    if (wake) sem_post(wake);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -557,6 +564,11 @@ typedef struct engine {
      * two keeps the multi-byte string race-free: the audio thread never
      * writes the field the worker reads. */
     char library_root_requested[MAX_PATH_LEN];
+    /* Set (release) after library_root_requested is written; the worker takes
+     * it (acquire) and only then copies the string. The worker wakes for log
+     * lines too now, so an unconditional copy could read the string while the
+     * audio side was writing it. */
+    _Atomic(int) library_root_pending;
     char library_root[MAX_PATH_LEN];
 
     /* Loaded clips (one per unique source file referenced by current song).
@@ -2262,6 +2274,9 @@ static void emit_instrument_event(engine_t *e, const inst_voice_t *inst,
     } else if (high == 0x80 || high == 0x90) {
         if (e->inst_notes_on[target][ch][n] > 0) e->inst_notes_on[target][ch][n]--;
     }
+    dsp_log_enqueue_worker("INSTNOTE %s route=%d ch=%d note=%d tick=%u sounding=%d",
+                           (high == 0x90 && vel > 0) ? "on" : "off", target, ch, n,
+                           e->playhead_tick, e->inst_notes_on[target][ch][n]);
     send_instrument_raw(target, ch, high, n, vel);
 }
 
@@ -4229,9 +4244,12 @@ static void compute_resolved_clips(engine_t *e, const song_t *song,
  * that superseded it already posted worker_wake, so the worker's next loop
  * iteration retries against the now-current payload (rearch2.md's
  * "coalesce to latest, never drop" rule -- see file header comment). */
+static void take_library_root(engine_t *e);
+
 static void process_timeline_channel(engine_t *e, timeline_channel_t *ch, int is_primary) {
     uint32_t req = atomic_load_explicit(&ch->request_gen, memory_order_acquire);
     if (req == atomic_load_explicit(&ch->published_gen, memory_order_acquire)) return;
+    take_library_root(e); /* a root set before this request is visible now */
 
     char json[MAX_SONG_JSON_LEN];
     if (!read_request_json(ch, json, sizeof(json))) return; /* retry next wake */
@@ -4324,12 +4342,23 @@ static void process_timeline_channel(engine_t *e, timeline_channel_t *ch, int is
  * the inactive slot and flip active) and the primary/staging async timeline
  * build channels. Runs on the worker thread, so file I/O and allocation are
  * safe here. */
+/* Copy a newly requested library root into the worker's working copy. Called
+ * at the top of each wake and again right after taking a rescan or build
+ * request: set_param("library_root") marks the root pending (release) BEFORE
+ * it flags the rescan, so a worker that has just seen the request is
+ * guaranteed to see the root too. Checking only at the top could miss a root
+ * set mid-wake and scan the old one -- the worker wakes for every debug log
+ * line now, which made that window easy to hit. */
+static void take_library_root(engine_t *e) {
+    if (atomic_exchange_explicit(&e->library_root_pending, 0, memory_order_acq_rel)) {
+        copy_trunc(e->library_root, sizeof(e->library_root), e->library_root_requested);
+    }
+}
+
 static void arranger_worker_iterate(engine_t *e) {
     if (!e) return;
 
-    /* Copy the audio-thread-requested library root into the worker's working
-     * copy before any scan/build that reads it. */
-    copy_trunc(e->library_root, sizeof(e->library_root), e->library_root_requested);
+    take_library_root(e);
 
     process_timeline_channel(e, &e->primary_ch, 1);
     process_timeline_channel(e, &e->staging_ch, 0);
@@ -4348,6 +4377,7 @@ static void arranger_worker_iterate(engine_t *e) {
     atomic_store_explicit(&e->scan_busy, 1, memory_order_release);
     atomic_store_explicit(&e->songs_busy, 1, memory_order_release);
     if (atomic_exchange_explicit(&e->song_dirty, 0, memory_order_acq_rel)) {
+        take_library_root(e);
         int active = atomic_load_explicit(&e->song_active, memory_order_acquire);
         int target = 1 - active;
         e->song_count[target] = 0;
@@ -4358,6 +4388,7 @@ static void arranger_worker_iterate(engine_t *e) {
 
     atomic_store_explicit(&e->folders_busy, 1, memory_order_release);
     if (atomic_exchange_explicit(&e->folder_dirty, 0, memory_order_acq_rel)) {
+        take_library_root(e);
         int active = atomic_load_explicit(&e->folder_active, memory_order_acquire);
         int target = 1 - active;
         atomic_store_explicit(&e->folders_found, 0, memory_order_relaxed);
@@ -4974,7 +5005,7 @@ static void engine_clear_error(engine_t *e) {
 
 /* DSP build version stamp. Keep in sync with UI_BUILD_VERSION in ui.js so the
  * running dsp.so can be confirmed from .dsp_log on module load. */
-static const char *const DSP_BUILD_VERSION = "arranger-dsp-2026-10-01-loading";
+static const char *const DSP_BUILD_VERSION = "arranger-dsp-2026-10-05-stoplog";
 
 static void* arr_create_instance(const char *module_dir, const char *config_json) {
     (void)module_dir;
@@ -5047,6 +5078,7 @@ static void* arr_create_instance(const char *module_dir, const char *config_json
         free(e);
         return NULL;
     }
+    atomic_store_explicit(&g_log_wake, &e->worker_wake, memory_order_release);
     return e;
 }
 
@@ -5078,6 +5110,7 @@ static void arr_destroy_instance(void *instance) {
      * -- true for the general case, false for this module's actual teardown
      * path once the overtake carve-out is accounted for. Reverted before
      * ever reaching hardware.) */
+    atomic_store_explicit(&g_log_wake, NULL, memory_order_release);
     atomic_store_explicit(&e->worker_running, 0, memory_order_release);
     sem_post(&e->worker_wake); /* wake the worker so it observes the flag and exits */
     pthread_join(e->worker_thread, NULL);
@@ -5307,6 +5340,7 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
         /* Store the requested root on the audio thread; the worker copies it
          * into its working copy and rescans on the next wake. No I/O here. */
         snprintf(e->library_root_requested, sizeof(e->library_root_requested), "%s", val);
+        atomic_store_explicit(&e->library_root_pending, 1, memory_order_release);
         atomic_store_explicit(&e->folder_dirty, 1, memory_order_release);
         atomic_store_explicit(&e->song_dirty, 1, memory_order_release);
         sem_post(&e->worker_wake);
