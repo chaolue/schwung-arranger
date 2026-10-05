@@ -49,7 +49,7 @@ import {
 } from '/data/UserData/schwung/shared/menu_stack.mjs';
 
 import {
-    fontPrint4x5
+    fontPrint4x5, fontWidth4x5
 } from '/data/UserData/schwung/shared/param_pages/font4x5.mjs';
 
 import {
@@ -1908,12 +1908,6 @@ const jamHeaderScroller = createTextScroller();
  * NSec / Next). Kept separate from the shared menu/header scrollers so long
  * song and section names scroll in place without fighting other scrollers. */
 const perfLineScrollers = [0, 1, 2, 3].map(() => createTextScroller());
-/* Max name chars visible per line. The performance display now uses the
- * Menu Header's proportional 4x5 face, which is narrower than the device
- * 6px font, so 14 chars of name plus the widest 7-char prefix (" NSec: ")
- * always fit within the 126px usable width. The scroller scrolls the full
- * name. */
-const PERF_LINE_MAX_CHARS = 28;
 
 const PAD_PREVIEW_DELAY_MS = 250; /* delay before pad tap triggers insert preview */
 
@@ -8189,6 +8183,25 @@ function perfPrint(x, y, text, color) {
     fontPrint4x5(perfCtx, x, y, asciiFold(String(text)).toUpperCase(), color);
 }
 
+/* Pixel width of `text` as perfPrint draws it. */
+function perfTextWidth(text) {
+    return fontWidth4x5(asciiFold(String(text)).toUpperCase());
+}
+
+/* Trim `text` from the end until it fits in `px` pixels. The face is
+ * proportional (an M or W is wider than an I), so a character count alone
+ * doesn't keep a line on screen. */
+function perfFitText(text, px) {
+    let t = String(text);
+    while (t.length > 0 && perfTextWidth(t) > px) t = t.substring(0, t.length - 1);
+    return t;
+}
+
+/* How many leading characters of `text` fit in `px` pixels. */
+function perfCharsThatFit(text, px) {
+    return perfFitText(text, px).length;
+}
+
 /* Resolve the effective current song for the performance display, falling
  * back to the setlist entry when no song has been loaded yet. */
 function getPerfDisplaySong() {
@@ -8291,9 +8304,15 @@ function drawPerformance() {
         const scroller = perfLineScrollers[i];
         scroller.setSelected(perfLines[i]);
         scroller.tick();
+        /* Fit by pixels, not characters: the space left after the prefix,
+         * and when the name is wider than that, a scrolled window trimmed to
+         * fit -- the face is proportional, so a fixed character count let
+         * wide names run off the right edge, scrolled or not. */
+        const avail = SCREEN_WIDTH - 2 - perfTextWidth(perfPrefixes[i]) - 1;
         let text = perfLines[i];
-        if (text.length > PERF_LINE_MAX_CHARS) {
-            text = scroller.getScrolledText(text, PERF_LINE_MAX_CHARS);
+        if (perfTextWidth(text) > avail) {
+            const n = Math.max(1, perfCharsThatFit(text, avail));
+            text = perfFitText(scroller.getScrolledText(text, n), avail);
         }
         perfPrint(2, perfYs[i], perfPrefixes[i] + text, 1);
     }
@@ -8320,7 +8339,7 @@ function drawPerformance() {
     }
     const timeLine = "Time: " + formatTime(curSec) + "/" + formatTime(songTotal) +
         "  Set: " + formatTime(perfSetTotalSec);
-    perfPrint(2, 50, timeLine, 1);
+    perfPrint(2, 50, perfFitText(timeLine, SCREEN_WIDTH - 3), 1);
     /* Draw any active overlay (e.g. a missing-clip warning) on top of the
      * performance display. */
     drawOverlay();
