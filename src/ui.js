@@ -8,7 +8,7 @@
  * confirmed from the logs (see init()/playCurrentSong()) instead of guessing
  * whether a new file actually loaded. Keep the DSP dsp_build_version in
  * arranger_engine.c in sync so both sides are verifiable. */
-const UI_BUILD_VERSION = "arranger-ui-2026-10-06-backuplabel";
+const UI_BUILD_VERSION = "arranger-ui-2026-10-06-chordlist";
 
 /* Lit white buttons at full brightness (127). Schwung's WhiteLedBright is 124. */
 const WhiteLedFull = 127;
@@ -1585,14 +1585,19 @@ let chordPickDegree = 0;      /* 0-based scale degree (0..6) */
 let chordPickQuality = 0;     /* index into CHORD_QUALITIES */
 let chordPickBass = -1;       /* index into bassNotesForKey(key), -1 = no slash bass */
 let chordPickFocus = 0;       /* row index into chordPickItems() */
-/* The bar's chords being edited (a working copy, saved by commitChordPick),
- * which one the fields show, its beat, the bar's Advanced (half-beat
- * positions), and whether the shown chord was edited (see storePickFields). */
-let chordPickList = [];
-let chordPickIdx = 0;
+/* The chord being edited: where it started (chordPickOrigBar/Idx, -1 for a
+ * new one) and its original object, its beat, Advanced (half-beat starts),
+ * and whether its chord fields were edited (see pickResult). chordPickBar
+ * is its (possibly moved) bar. */
+let chordPickOrig = null;
+let chordPickOrigBar = -1;
+let chordPickOrigIdx = -1;
 let chordPickBeat = 1;
 let chordPickAdv = false;
 let chordPickDirty = false;
+/* The Chord track list's selection: -1 = the section row, 0..n-1 = the
+ * section's chords in order, n = the "+ Add" row. */
+let chordListCursor = 0;
 let chordPickEditing = false;
 /* Whether a chord actually exists for the bar being edited (either it was
  * already set, or the user has started setting one this session). While
@@ -2511,21 +2516,20 @@ export function barChords(sec, barIndex) {
     return list.slice().sort((a, b) => chordBeat(a) - chordBeat(b));
 }
 
-/* Set a bar's chords (an empty list clears the bar). `adv` marks the bar
- * Advanced (half-beat positions), kept on its chords. A lone chord on beat
- * 1 is stored as just that chord, as before multiple chords existed. */
-export function setBarChords(sec, barIndex, list, adv) {
+/* Set a bar's chords (an empty list clears the bar). Each chord keeps its
+ * own beat and Advanced (half-beat starts) flag. A lone chord on beat 1 is
+ * stored as just that chord, as before multiple chords existed. */
+export function setBarChords(sec, barIndex, list) {
     if (!sec) return;
     if (!sec.chords) sec.chords = [];
     const out = (list || []).filter(Boolean).map(c => {
         const o = Object.assign({}, c);
-        delete o.adv;
         if (chordBeat(o) === 1) delete o.beat;
-        if (adv) o.adv = true;
+        if (!o.adv) delete o.adv;
         return o;
     }).sort((a, b) => chordBeat(a) - chordBeat(b));
     if (out.length === 0) delete sec.chords[barIndex];
-    else if (out.length === 1 && chordBeat(out[0]) === 1 && !adv) sec.chords[barIndex] = out[0];
+    else if (out.length === 1 && chordBeat(out[0]) === 1) sec.chords[barIndex] = out[0];
     else sec.chords[barIndex] = out;
     unsavedChanges = true;
 }
@@ -6606,7 +6610,37 @@ function chordDisplaySectionIndex() {
         : currentSectionIndex;
 }
 
-/* Draw the chord track: section name, key, and the current/next chord. */
+/* "b3", "b3.2", "b3.2&": where a chord starts (bar, then beat if not 1). */
+function chordPosLabel(bar, beat) {
+    return "b" + (bar + 1) + (beat !== 1 ? "." + formatBeat(beat) : "");
+}
+
+/* Select the list row of the chord at bar/beat (after an edit moved it). */
+function selectChordListAt(sec, bar, beat) {
+    const evs = sectionChordEvents(sec);
+    const i = evs.findIndex(e => e.bar === bar && e.beat === beat);
+    chordListCursor = i >= 0 ? i : Math.min(chordListCursor, evs.length);
+    syncChordCursorBar(sec);
+}
+
+/* Keep the step-LED cursor (chordCursorBar/Idx) on the selected chord. */
+function syncChordCursorBar(sec) {
+    const evs = sectionChordEvents(sec);
+    const e = evs[chordListCursor];
+    if (e) {
+        chordCursorBar = e.bar;
+        chordCursorIdx = e.idx;
+        if (e.bar < stepScrollOffset) stepScrollOffset = e.bar;
+        else if (e.bar >= stepScrollOffset + NUM_STEPS) stepScrollOffset = e.bar - NUM_STEPS + 1;
+    } else {
+        chordCursorBar = -1;
+    }
+    stepLedsDirty = true;
+}
+
+/* Draw the chord track the way the Drum track is drawn: the section row,
+ * then the section's chords in order, each with where it starts (it holds
+ * until the next), then "+ Add". */
 function drawChordTrack() {
     const secIndex = chordDisplaySectionIndex();
     const sec = currentSong ? currentSong.sections[secIndex] : null;
@@ -6617,17 +6651,142 @@ function drawChordTrack() {
         drawOverlay();
         return;
     }
-    const totalBars = sectionChordBars(sec);
-    /* Now = the chord under the cursor (or the last before it, as a held
-     * chord carries forward); Next = the one after it. */
-    const { cur, next } = chordCursorNowNext(sec);
-    const inBar = barChords(sec, chordCursorBar).length;
-    print(2, LIST_TOP_Y, "Sec: " + (sec.name || "Section"), 1);
-    print(2, LIST_TOP_Y + 9, "Now: " + (cur ? chordLabel(cur.chord) + beatSuffix(cur) : "—"), 1);
-    print(2, LIST_TOP_Y + 18, "Next: " + (next ? chordLabel(next.chord) + " (bar " + (next.bar + 1) + beatSuffix(next) + ")" : "—"), 1);
-    print(2, LIST_TOP_Y + 27, "Bar " + (chordCursorBar + 1) + "/" + totalBars +
-          (inBar > 1 ? " " + (Math.min(chordCursorIdx, inBar - 1) + 1) + "/" + inBar : "") + "  Key " + key, 1);
+    const evs = sectionChordEvents(sec);
+    if (chordListCursor > evs.length) chordListCursor = evs.length;
+    const items = [{ type: "section" }];
+    for (const e of evs) items.push({ type: "chord", ev: e });
+    items.push({ type: "add" });
+    drawMenuList({
+        labelX: 3,
+        items,
+        selectedIndex: chordListCursor + 1,
+        getLabel: (item) => {
+            if (item.type === "section") return sec.name || "Section";
+            if (item.type === "chord") return chordLabel(item.ev.chord);
+            return "+ Add";
+        },
+        getValue: (item) => {
+            if (item.type === "section") return (secIndex + 1) + "/" + currentSong.sections.length;
+            if (item.type === "chord") return chordPosLabel(item.ev.bar, item.ev.beat);
+            return "";
+        },
+        valueAlignRight: true,
+        valueX: 44,
+        labelGap: 1,
+        listArea: { topY: LIST_TOP_Y, bottomY: LIST_INDICATOR_BOTTOM_Y }
+    });
     drawOverlay();
+}
+
+/* Chord track list: jog moves the selection, Shift+jog nudges the selected
+ * chord a beat (half in Advanced) -- across bars, stopping at its neighbours
+ * and the section's ends. */
+function chordListJog(delta) {
+    const secIndex = chordDisplaySectionIndex();
+    const sec = currentSong ? currentSong.sections[secIndex] : null;
+    if (!sec) return;
+    const n = sectionChordEvents(sec).length;
+    chordListCursor = Math.max(-1, Math.min(n, chordListCursor + delta));
+    syncChordCursorBar(sec);
+    needsRedraw = true;
+}
+
+function chordListNudge(delta) {
+    const secIndex = chordDisplaySectionIndex();
+    const sec = currentSong ? currentSong.sections[secIndex] : null;
+    if (!sec) return;
+    const evs = sectionChordEvents(sec);
+    const e = evs[chordListCursor];
+    if (!e || delta === 0) return;
+    const step = e.chord.adv ? 0.5 : 1;
+    const bpb = beatsPerBar();
+    const total = sectionChordBars(sec);
+    /* Position as beats from the section start. */
+    let pos = e.bar * bpb + (e.beat - 1);
+    const prev = evs[chordListCursor - 1], next = evs[chordListCursor + 1];
+    const lo = prev ? prev.bar * bpb + (prev.beat - 1) + step : 0;
+    const hi = next ? next.bar * bpb + (next.beat - 1) - step : total * bpb - step;
+    pos = Math.max(lo, Math.min(hi, pos + delta * step));
+    const bar = Math.floor(pos / bpb), beat = pos - bar * bpb + 1;
+    if (bar === e.bar && beat === e.beat) return;
+    removeChordEvent(sec, e.bar, e.idx);
+    const moved = Object.assign({}, e.chord);
+    delete moved.beat;
+    if (beat !== 1) moved.beat = beat;
+    insertChordEvent(sec, bar, moved);
+    selectChordListAt(sec, bar, beat);
+    needsRedraw = true;
+}
+
+/* The first free position after the selected chord (or the section's last
+ * chord, from the "+ Add" row): the next bar's same beat, else that bar's
+ * first free beat, scanning on. Null if the section is full from there. */
+function nextFreeChordPos(sec, fromBar, beat) {
+    const total = sectionChordBars(sec);
+    for (let bar = fromBar + 1; bar < total; bar++) {
+        const free = freeBeatsInBar(sec, bar, false, -1, -1);
+        if (free.includes(beat)) return { bar, beat };
+        if (free.length) return { bar, beat: free[0] };
+    }
+    return null;
+}
+
+/* Jog click: the section row renames, a chord opens its settings, "+ Add"
+ * adds a chord after the last one (the next bar) and opens it. */
+function chordListClick() {
+    const secIndex = chordDisplaySectionIndex();
+    const sec = currentSong ? currentSong.sections[secIndex] : null;
+    if (!sec) return;
+    const evs = sectionChordEvents(sec);
+    if (chordListCursor < 0) {
+        renameSectionPrompt(sec);
+        return;
+    }
+    const e = evs[chordListCursor];
+    if (e) {
+        openChordPick(e.bar, e.idx);
+        return;
+    }
+    const last = evs[evs.length - 1];
+    const pos = !last ? { bar: 0, beat: 1 } : nextFreeChordPos(sec, last.bar, 1);
+    if (!pos) {
+        showPopup("Chords", "No free bar after the last chord", 2000);
+        return;
+    }
+    openChordPick(pos.bar, -1, true, pos.beat);
+}
+
+/* Delete: remove the selected chord. */
+function chordListDelete() {
+    const secIndex = chordDisplaySectionIndex();
+    const sec = currentSong ? currentSong.sections[secIndex] : null;
+    if (!sec) return;
+    const e = sectionChordEvents(sec)[chordListCursor];
+    if (!e) return;
+    removeChordEvent(sec, e.bar, e.idx);
+    chordListCursor = Math.min(chordListCursor, sectionChordEvents(sec).length);
+    syncChordCursorBar(sec);
+    needsRedraw = true;
+}
+
+/* Copy: duplicate the selected chord onto the next free bar. */
+function chordListDuplicate() {
+    const secIndex = chordDisplaySectionIndex();
+    const sec = currentSong ? currentSong.sections[secIndex] : null;
+    if (!sec) return;
+    const e = sectionChordEvents(sec)[chordListCursor];
+    if (!e) return;
+    const pos = nextFreeChordPos(sec, e.bar, e.beat);
+    if (!pos) {
+        showPopup("Chords", "No free bar after this chord", 2000);
+        return;
+    }
+    const copy = Object.assign({}, e.chord);
+    delete copy.beat;
+    if (pos.beat !== 1) copy.beat = pos.beat;
+    insertChordEvent(sec, pos.bar, copy);
+    selectChordListAt(sec, pos.bar, pos.beat);
+    needsRedraw = true;
 }
 
 /* Draw the instrument track display (mirrors the chord track, with per-bar
@@ -6765,16 +6924,20 @@ function handleStepPress(stepIndex, velocity) {
     const totalBars = sectionChordBars(sec);
     const barIndex = stepScrollOffset + stepIndex;
     if (barIndex < 0 || barIndex >= totalBars) return;
-    if (currentView === VIEW_CHORD_PICK) {
-        /* Switching bars from within the picker: commit the bar being left
-         * (if a chord was set for it), then load the newly pressed bar. */
-        commitChordPick();
+    if (builderTrack === TRACK_CHORD) {
+        /* The list is the editor; a step selects that bar's first chord. */
+        if (currentView !== VIEW_BUILDER) return;
+        const i = sectionChordEvents(sec).findIndex(e => e.bar === barIndex);
+        if (i >= 0) {
+            chordListCursor = i;
+            syncChordCursorBar(sec);
+            needsRedraw = true;
+        }
+        return;
     }
     chordCursorBar = barIndex;
     chordCursorIdx = 0;
-    if (builderTrack === TRACK_CHORD) {
-        openChordPick(barIndex, 0);
-    } else if (currentView === VIEW_INSTRUMENT_BAR) {
+    if (currentView === VIEW_INSTRUMENT_BAR) {
         /* Switching bars from within the per-bar menu: jump straight to the
          * newly pressed bar's own menu. */
         openInstrumentBarMenu(builderTrack, secIndex, barIndex);
@@ -6793,10 +6956,16 @@ function handleStepPress(stepIndex, velocity) {
 
 /* ── Chord picker ───────────────────────────────────────────────────── */
 
-/* Map a chord back to a scale degree + quality + bass index for editing. */
+/* The chord settings page edits one chord of the section: the one the
+ * Chord track list has selected (chordListCursor), or a new one from its
+ * "+ Add" row. Root/Type/Bass are the chord; Bar/Beat where it starts (it
+ * holds until the next chord); Advanced allows half-beat starts. */
+
+/* Map a chord to the scale degree + quality + bass index being edited. */
 function loadPickFields(chord) {
     const key = currentSong ? (currentSong.key || DEFAULT_KEY) : DEFAULT_KEY;
     chordPickBeat = chordBeat(chord);
+    chordPickAdv = !!(chord && chord.adv);
     chordPickDirty = false;
     if (chord && chord.none) {
         chordPickDegree = NO_CHORD_DEGREE;
@@ -6804,7 +6973,7 @@ function loadPickFields(chord) {
         chordPickBass = -1;
         return;
     }
-    if (chord) {
+    if (chord && chord.root) {
         const keyPc = noteSemitone(key);
         const rootPc = noteSemitone(chord.root);
         const scaleSteps = [0, 2, 4, 5, 7, 9, 11];
@@ -6819,70 +6988,14 @@ function loadPickFields(chord) {
         chordPickQuality = qIdx >= 0 ? qIdx : 0;
         chordPickBass = chord.bass ? bassNotesForKey(key).indexOf(chord.bass) : -1;
     } else {
-        /* Default to the key's base note (the "I" chord/tonic), not a
-         * degree that climbs with the bar index. */
+        /* Default to the key's base note (the "I" chord/tonic). */
         chordPickDegree = 0;
         chordPickQuality = CHORD_QUALITIES.indexOf(DIATONIC_QUALITY[chordPickDegree]);
         chordPickBass = -1;
     }
 }
 
-/* Write the fields being edited back into the bar's working list. A chord
- * the user didn't touch keeps its original object (only its beat can have
- * changed), so opening the picker never rewrites a chord -- e.g. one whose
- * root isn't in the key, which the degree fields can't express. */
-function storePickFields() {
-    if (!chordPickHasChord || chordPickIdx < 0 || chordPickIdx >= chordPickList.length) return;
-    const orig = chordPickList[chordPickIdx];
-    const out = chordPickDirty || !orig ? chordPickChord() : Object.assign({}, orig);
-    delete out.beat;
-    delete out.adv;
-    if (chordPickBeat !== 1) out.beat = chordPickBeat;
-    chordPickList[chordPickIdx] = out;
-}
-
-/* Select another chord of the bar for editing. */
-function selectPickChord(idx) {
-    storePickFields();
-    chordPickIdx = Math.max(0, Math.min(chordPickList.length - 1, idx));
-    loadPickFields(chordPickList[chordPickIdx]);
-}
-
-/* The beats a chord in this bar can start on: whole beats, plus halves in
- * Advanced -- minus those the bar's other chords are on. */
-function pickBeatOptions() {
-    const bpb = (currentSong && currentSong.time_sig_num > 0) ? currentSong.time_sig_num : 4;
-    const taken = chordPickList.filter((c, i) => i !== chordPickIdx).map(chordBeat);
-    const out = [];
-    for (let b = 1; b <= bpb; b += chordPickAdv ? 0.5 : 1) {
-        if (!taken.includes(b)) out.push(b);
-    }
-    return out;
-}
-
-/* Open the chord picker for a bar, on its chord `idx` (0 = the first). If
- * the picker is already open (switching bars via a step press), reuse the
- * current view/menu frame instead of pushing a new one. */
-function openChordPick(barIndex, idx) {
-    const secIndex = chordDisplaySectionIndex();
-    const sec = currentSong ? currentSong.sections[secIndex] : null;
-    if (!sec) return;
-    chordPickBar = barIndex;
-    chordPickList = barChords(sec, barIndex).map(c => Object.assign({}, c));
-    chordPickAdv = chordPickList.some(c => c.adv);
-    chordPickIdx = Math.max(0, Math.min(chordPickList.length - 1, idx || 0));
-    loadPickFields(chordPickList[chordPickIdx] || null);
-    chordPickHasChord = chordPickList.length > 0;
-    chordPickFocus = 0;
-    chordPickEditing = false;
-    if (currentView !== VIEW_CHORD_PICK) {
-        currentView = VIEW_CHORD_PICK;
-        menuStack.push({ title: "Chord", selectedIndex: 0 });
-    }
-    needsRedraw = true;
-}
-
-/* The chord currently selected in the picker (without its beat). */
+/* The chord currently selected in the picker (without its position). */
 function chordPickChord() {
     if (chordPickDegree === NO_CHORD_DEGREE) return { none: true };
     const key = currentSong ? (currentSong.key || DEFAULT_KEY) : DEFAULT_KEY;
@@ -6892,18 +7005,100 @@ function chordPickChord() {
     return chord;
 }
 
-/* Save the picker's chords to the bar it's showing, but only if a chord
- * actually exists for it (see chordPickHasChord) — otherwise merely having
- * opened/viewed the picker would silently create one. */
+/* The chord as it will be saved. One the user didn't edit keeps its original
+ * object (only its position can have changed), so opening the page never
+ * rewrites a chord -- e.g. one whose root isn't in the key, which the degree
+ * fields can't express. */
+function pickResult() {
+    const base = (chordPickDirty || !chordPickOrig) ? chordPickChord() : Object.assign({}, chordPickOrig);
+    delete base.beat;
+    delete base.adv;
+    if (chordPickBeat !== 1) base.beat = chordPickBeat;
+    if (chordPickAdv) base.adv = true;
+    return base;
+}
+
+function beatsPerBar() {
+    return (currentSong && currentSong.time_sig_num > 0) ? currentSong.time_sig_num : 4;
+}
+
+/* Whether a bar/beat is free of other chords (ignoring the one being
+ * edited, at chordPickOrigBar/Idx). */
+function chordPosFree(sec, bar, beat, ignoreBar, ignoreIdx) {
+    return !barChords(sec, bar).some((c, i) => !(bar === ignoreBar && i === ignoreIdx) && chordBeat(c) === beat);
+}
+
+/* Beats a chord can start on in a bar: whole beats, halves in Advanced,
+ * minus those other chords use. */
+function freeBeatsInBar(sec, bar, adv, ignoreBar, ignoreIdx) {
+    const out = [];
+    for (let b = 1; b <= beatsPerBar(); b += adv ? 0.5 : 1) {
+        if (chordPosFree(sec, bar, b, ignoreBar, ignoreIdx)) out.push(b);
+    }
+    return out;
+}
+
+/* Remove / insert one chord of a section's chord list. */
+function removeChordEvent(sec, bar, idx) {
+    const list = barChords(sec, bar);
+    list.splice(idx, 1);
+    setBarChords(sec, bar, list);
+}
+function insertChordEvent(sec, bar, chord) {
+    const list = barChords(sec, bar);
+    list.push(chord);
+    setBarChords(sec, bar, list);
+    /* Its index once sorted by beat. */
+    return barChords(sec, bar).findIndex(c => c === chord || (chordBeat(c) === chordBeat(chord)));
+}
+
+/* Open the settings page for chord `idx` of `bar` (the list's selection), or
+ * for a new chord at bar/beat when `isNew`. */
+function openChordPick(barIndex, idx, isNew, newBeat) {
+    const secIndex = chordDisplaySectionIndex();
+    const sec = currentSong ? currentSong.sections[secIndex] : null;
+    if (!sec) return;
+    chordPickBar = barIndex;
+    if (isNew) {
+        chordPickOrig = null;
+        chordPickOrigBar = -1;
+        chordPickOrigIdx = -1;
+        loadPickFields(null);
+        chordPickBeat = newBeat || 1;
+        chordPickDirty = true;
+        chordPickFocus = 0;
+        chordPickEditing = true; /* straight into choosing the root */
+    } else {
+        const list = barChords(sec, barIndex);
+        const i = Math.max(0, Math.min(list.length - 1, idx || 0));
+        chordPickOrig = list[i] || null;
+        chordPickOrigBar = barIndex;
+        chordPickOrigIdx = i;
+        loadPickFields(chordPickOrig);
+        chordPickFocus = 0;
+        chordPickEditing = false;
+    }
+    chordPickHasChord = true;
+    if (currentView !== VIEW_CHORD_PICK) {
+        currentView = VIEW_CHORD_PICK;
+        menuStack.push({ title: "Chord", selectedIndex: 0 });
+    }
+    needsRedraw = true;
+}
+
+/* Save the page's chord: take the original out, put the result in at its
+ * (possibly new) position, and select it in the list. */
 function commitChordPick() {
     const secIndex = chordDisplaySectionIndex();
     const sec = currentSong ? currentSong.sections[secIndex] : null;
     if (!sec || !chordPickHasChord) return;
-    storePickFields();
-    setBarChords(sec, chordPickBar, chordPickList, chordPickAdv);
+    if (chordPickOrigBar >= 0) removeChordEvent(sec, chordPickOrigBar, chordPickOrigIdx);
+    const chord = pickResult();
+    insertChordEvent(sec, chordPickBar, chord);
+    selectChordListAt(sec, chordPickBar, chordBeat(chord));
 }
 
-/* Leave the picker for Song Builder. */
+/* Leave the page for Song Builder. */
 function closeChordPick() {
     menuStack.pop();
     currentView = VIEW_BUILDER;
@@ -6915,39 +7110,25 @@ function formatBeat(b) {
     return Number.isInteger(b) ? String(b) : (Math.floor(b) + "&");
 }
 
-/* The picker's rows. With no chord yet: add one, or mark the bar No Chord
- * (silent). With chords: the selected one's Root/Type/Bass/Beat, which of
- * the bar's chords is selected, add another, the bar's Advanced (half-beat
- * positions), and delete. Turning Root past vii° also reaches No Chord. */
 function chordPickItems() {
-    if (!chordPickHasChord) {
-        return [
-            { key: "add", label: "Add Chord", value: "" },
-            { key: "nochord", label: "No Chord", value: "" }
-        ];
-    }
     const key = currentSong ? (currentSong.key || DEFAULT_KEY) : DEFAULT_KEY;
     const degreeNames = ["I", "ii", "iii", "IV", "V", "vi", "vii°"];
     const noChord = chordPickDegree === NO_CHORD_DEGREE;
-    const items = [
+    return [
         { key: "root", label: "Root", value: noChord ? "No Chord"
             : degreeNames[chordPickDegree] + " (" + diatonicChord(key, chordPickDegree).root + ")" },
         { key: "type", label: "Type", value: noChord ? "—" : (CHORD_TYPE_LABEL[CHORD_QUALITIES[chordPickQuality]] || "Major") },
         { key: "bass", label: "Bass", value: !noChord && chordPickBass >= 0 ? bassNotesForKey(key)[chordPickBass] : "—" },
-        { key: "beat", label: "Beat", value: formatBeat(chordPickBeat) }
+        { key: "bar", label: "Bar", value: String(chordPickBar + 1) },
+        { key: "beat", label: "Beat", value: formatBeat(chordPickBeat) },
+        { key: "adv", label: "Advanced", value: chordPickAdv ? "On" : "Off" },
+        { key: "delete", label: "Delete Chord", value: "" }
     ];
-    if (chordPickList.length > 1) {
-        items.push({ key: "which", label: "Chord", value: (chordPickIdx + 1) + "/" + chordPickList.length });
-    }
-    items.push({ key: "addmore", label: "Add Chord", value: "" });
-    items.push({ key: "adv", label: "Advanced", value: chordPickAdv ? "On" : "Off" });
-    items.push({ key: "delete", label: "Delete Chord", value: "" });
-    return items;
 }
 
 function drawChordPick() {
     const key = currentSong ? (currentSong.key || DEFAULT_KEY) : DEFAULT_KEY;
-    drawMenuHeader("Chord (bar " + (chordPickBar + 1) + ")", key);
+    drawMenuHeader("Chord", key);
     const items = chordPickItems();
     if (chordPickFocus >= items.length) chordPickFocus = items.length - 1;
     drawMenuList({
@@ -6962,56 +7143,22 @@ function drawChordPick() {
         prioritizeSelectedValue: true,
         listArea: { topY: LIST_TOP_Y, bottomY: LIST_INDICATOR_BOTTOM_Y }
     });
-    /* The bar's chords at the bottom, the selected one bracketed. */
-    let line = "—";
-    if (chordPickHasChord) {
-        storePickFields();
-        line = chordPickList.map((c, i) => {
-            const l = chordLabel(c) + (chordPickList.length > 1 || chordBeat(c) !== 1 ? "@" + formatBeat(chordBeat(c)) : "");
-            return i === chordPickIdx && chordPickList.length > 1 ? "[" + l + "]" : l;
-        }).join(" ");
-    }
-    print(2, LIST_INDICATOR_BOTTOM_Y + 2, "= " + line, 1);
-}
-
-/* Turn Advanced off: snap half-beat chords onto free whole beats (in order),
- * dropping any that no longer fit. */
-function snapPickToWholeBeats() {
-    storePickFields();
-    const bpb = (currentSong && currentSong.time_sig_num > 0) ? currentSong.time_sig_num : 4;
-    const sel = chordPickList[chordPickIdx];
-    const sorted = chordPickList.slice().sort((a, b) => chordBeat(a) - chordBeat(b));
-    const used = new Set();
-    const kept = [];
-    for (const c of sorted) {
-        let b = Math.floor(chordBeat(c));
-        while (used.has(b) && b <= bpb) b++;
-        if (b > bpb) continue;
-        used.add(b);
-        const out = Object.assign({}, c);
-        delete out.beat;
-        if (b !== 1) out.beat = b;
-        kept.push(out);
-        if (c === sel) chordPickIdx = kept.length - 1;
-    }
-    chordPickList = kept;
-    chordPickIdx = Math.max(0, Math.min(kept.length - 1, chordPickIdx));
-    loadPickFields(chordPickList[chordPickIdx]);
+    print(2, LIST_INDICATOR_BOTTOM_Y + 2, "= " + chordLabel(pickResult()) + " " + chordPosLabel(chordPickBar, chordPickBeat), 1);
 }
 
 function handleChordPickInput(cc, value) {
     const items = chordPickItems();
     const item = items[Math.max(0, Math.min(items.length - 1, chordPickFocus))];
+    const secIndex = chordDisplaySectionIndex();
+    const sec = currentSong ? currentSong.sections[secIndex] : null;
     if (cc === MoveMainKnob) {
         const delta = decodeDelta(value);
-        if (chordPickEditing) {
+        if (chordPickEditing && sec) {
             const noChord = chordPickDegree === NO_CHORD_DEGREE;
             if (item.key === "root") {
                 /* Seven degrees, then No Chord. Changing the root re-picks
                  * the diatonic default type for its place in the key and
-                 * drops any slash bass, so e.g. moving off a customised Dm
-                 * lands on the new root's plain default rather than carrying
-                 * the old customisation over. */
+                 * drops any slash bass. */
                 chordPickDegree = ((chordPickDegree + delta) % 8 + 8) % 8;
                 chordPickQuality = chordPickDegree === NO_CHORD_DEGREE ? 0
                     : CHORD_QUALITIES.indexOf(DIATONIC_QUALITY[chordPickDegree]);
@@ -7025,89 +7172,49 @@ function handleChordPickInput(cc, value) {
             } else if (item.key === "bass") {
                 chordPickBass = Math.max(-1, Math.min(11, chordPickBass + delta));
                 chordPickDirty = true;
+            } else if (item.key === "bar") {
+                /* Step to the next bar with room, keeping the beat if it is
+                 * free there, else the bar's nearest free beat. */
+                const total = sectionChordBars(sec);
+                let bar = chordPickBar;
+                for (let n = 0; n < total; n++) {
+                    bar += Math.sign(delta);
+                    if (bar < 0 || bar >= total) { bar = chordPickBar; break; }
+                    const free = freeBeatsInBar(sec, bar, chordPickAdv, chordPickOrigBar, chordPickOrigIdx);
+                    if (free.length) {
+                        if (!free.includes(chordPickBeat)) {
+                            chordPickBeat = free.reduce((a, b) => Math.abs(b - chordPickBeat) < Math.abs(a - chordPickBeat) ? b : a);
+                        }
+                        break;
+                    }
+                }
+                chordPickBar = bar;
             } else if (item.key === "beat") {
-                const opts = pickBeatOptions();
+                const opts = freeBeatsInBar(sec, chordPickBar, chordPickAdv, chordPickOrigBar, chordPickOrigIdx);
                 let i = opts.indexOf(chordPickBeat);
                 if (i < 0) i = 0;
-                chordPickBeat = opts[Math.max(0, Math.min(opts.length - 1, i + delta))];
-            } else if (item.key === "which") {
-                selectPickChord(chordPickIdx + delta);
+                if (opts.length) chordPickBeat = opts[Math.max(0, Math.min(opts.length - 1, i + delta))];
             }
         } else {
             chordPickFocus = Math.max(0, Math.min(items.length - 1, chordPickFocus + delta));
         }
         needsRedraw = true;
     } else if (cc === MoveMainButton && value > 0) {
-        const secIndex = chordDisplaySectionIndex();
-        const sec = currentSong ? currentSong.sections[secIndex] : null;
-        if (item.key === "nochord") {
-            /* No Chord: mark this bar silent and go back. */
-            if (sec) setBarChords(sec, chordPickBar, [{ none: true }], false);
-            closeChordPick();
-            return;
-        }
-        if (item.key === "add") {
-            /* Materialize the default (tonic) chord for this bar and drop
-             * straight into editing its Root, so the jog wheel immediately
-             * changes the note without a second press to enter edit mode. */
-            chordPickList = [{}];
-            chordPickIdx = 0;
-            loadPickFields(null);
-            chordPickDirty = true;
-            chordPickHasChord = true;
-            chordPickFocus = 0;
-            chordPickEditing = true;
-            needsRedraw = true;
-            return;
-        }
-        if (item.key === "addmore") {
-            /* Another chord in this bar, on the first free beat after the
-             * selected one (else the first free beat), as the tonic. */
-            storePickFields();
-            const cur = chordPickBeat;
-            chordPickIdx = chordPickList.length;
-            chordPickList.push({});
-            const opts = pickBeatOptions();
-            if (opts.length === 0) {
-                chordPickList.pop();
-                chordPickIdx = Math.max(0, chordPickIdx - 1);
-                showPopup("Chord", "No free beat in this bar", 2000);
-                needsRedraw = true;
-                return;
-            }
-            const beat = opts.find(b => b > cur) || opts[0];
-            loadPickFields(null);
-            chordPickBeat = beat;
-            chordPickDirty = true;
-            storePickFields();
-            chordPickFocus = 0;
-            chordPickEditing = true;
-            needsRedraw = true;
-            return;
-        }
         if (item.key === "adv") {
-            if (chordPickAdv) {
-                chordPickAdv = false;
-                snapPickToWholeBeats();
-            } else {
-                chordPickAdv = true;
+            chordPickAdv = !chordPickAdv;
+            /* Off: back onto a whole beat (the nearest free one). */
+            if (!chordPickAdv && sec && !Number.isInteger(chordPickBeat)) {
+                const free = freeBeatsInBar(sec, chordPickBar, false, chordPickOrigBar, chordPickOrigIdx);
+                if (free.length) chordPickBeat = free.reduce((a, b) => Math.abs(b - chordPickBeat) < Math.abs(a - chordPickBeat) ? b : a);
+                else chordPickAdv = true; /* nowhere to go: stays Advanced */
             }
             needsRedraw = true;
             return;
         }
         if (item.key === "delete") {
-            /* Delete the selected chord; with none left the bar is empty
-             * again (it holds the previous chord). */
-            chordPickList.splice(chordPickIdx, 1);
-            if (chordPickList.length === 0) {
-                if (sec) setBarChords(sec, chordPickBar, [], false);
-                closeChordPick();
-                return;
-            }
-            chordPickIdx = Math.max(0, chordPickIdx - 1);
-            loadPickFields(chordPickList[chordPickIdx]);
-            chordPickFocus = 0;
-            needsRedraw = true;
+            if (sec && chordPickOrigBar >= 0) removeChordEvent(sec, chordPickOrigBar, chordPickOrigIdx);
+            chordPickHasChord = false;
+            closeChordPick();
             return;
         }
         chordPickEditing = !chordPickEditing;
@@ -7117,8 +7224,6 @@ function handleChordPickInput(cc, value) {
             chordPickEditing = false;
             needsRedraw = true;
         } else {
-            /* Commit the chords only if one was actually set for this bar,
-             * so simply opening the picker and backing out never adds one. */
             commitChordPick();
             closeChordPick();
         }
@@ -9050,7 +9155,7 @@ function handleBuilderInput(cc, value) {
     if ((cc === MoveRow1 || cc === MoveRow2 || cc === MoveRow3) && value > 0) {
         if (cc === MoveRow1) {
             builderTrack = (builderTrack === TRACK_DRUM) ? TRACK_CHORD : TRACK_DRUM;
-            if (builderTrack === TRACK_CHORD) { chordCursorBar = 0; chordCursorIdx = 0; }
+            if (builderTrack === TRACK_CHORD) { chordCursorBar = 0; chordCursorIdx = 0; chordListCursor = 0; }
         } else {
             builderTrack = (cc === MoveRow2) ? TRACK_INSTRUMENT_1 : TRACK_INSTRUMENT_2;
         }
@@ -9071,8 +9176,23 @@ function handleBuilderInput(cc, value) {
     if (builderTrack !== TRACK_DRUM) {
         const allowed = cc === MoveLeft || cc === MoveRight || cc === MoveMenu ||
             cc === MoveBack || cc === MovePlay || cc === MoveShift ||
-            (!shiftHeld && (cc === MoveMainKnob || cc === MoveMainButton));
+            (!shiftHeld && (cc === MoveMainKnob || cc === MoveMainButton)) ||
+            /* The Chord track's list edits like the Drum track's: Shift+jog
+             * nudges, Delete removes, Copy duplicates. */
+            (builderTrack === TRACK_CHORD && (cc === MoveMainKnob ||
+                (!shiftHeld && (cc === MoveDelete || cc === MoveCopy))));
         if (!allowed) return;
+    }
+    if (builderTrack === TRACK_CHORD) {
+        if (cc === MoveMainKnob) {
+            const delta = decodeDelta(value);
+            if (shiftHeld) { if (!locked) chordListNudge(delta); }
+            else chordListJog(delta);
+            return;
+        }
+        if (cc === MoveMainButton && value > 0) { chordListClick(); return; }
+        if (cc === MoveDelete && value > 0) { if (!locked) chordListDelete(); return; }
+        if (cc === MoveCopy && value > 0) { if (!locked) chordListDuplicate(); return; }
     }
     if (cc === MoveMainKnob) {
         const delta = decodeDelta(value);
@@ -9114,22 +9234,7 @@ function handleBuilderInput(cc, value) {
         if (!sec) return;
         if (builderCursor === -1) {
             /* Section header -> rename (blocked when locked). */
-            const section = sec;
-            if (section && !locked) {
-                openTextEntry({
-                    title: "Rename",
-                    initialText: section.name || "Section",
-                    onConfirm: (newName) => {
-                        const trimmed = (newName || "").trim();
-                        if (trimmed.length === 0 || !section) return;
-                        section.name = trimmed;
-                        unsavedChanges = true;
-                        needsRedraw = true;
-                    },
-                    onCancel: () => { needsRedraw = true; }
-                });
-                needsRedraw = true;
-            }
+            renameSectionPrompt(sec);
         } else if (builderCursor < sec.clips.length) {
             /* Clip -> open trim (blocked when locked). */
             if (!locked) openTrimView();
@@ -9224,6 +9329,7 @@ function handleBuilderInput(cc, value) {
             if (navBase > 0) {
                 currentSectionIndex = navBase - 1;
                 builderCursor = 0;
+                chordListCursor = 0;
                 stepScrollOffset = 0;
                 builderDisplaySection = playbackState === "playing" ? currentSectionIndex : -1;
                 stepLedsDirty = true;
@@ -9241,6 +9347,7 @@ function handleBuilderInput(cc, value) {
             if (navBase < currentSong.sections.length - 1) {
                 currentSectionIndex = navBase + 1;
                 builderCursor = 0;
+                chordListCursor = 0;
                 stepScrollOffset = 0;
                 builderDisplaySection = playbackState === "playing" ? currentSectionIndex : -1;
                 stepLedsDirty = true;
@@ -9265,6 +9372,24 @@ function handleBuilderInput(cc, value) {
         }
         needsRedraw = true;
     }
+}
+
+/* Rename a section (Song Builder's section row; blocked when locked). */
+function renameSectionPrompt(section) {
+    if (!section || songIsLocked()) return;
+    openTextEntry({
+        title: "Rename",
+        initialText: section.name || "Section",
+        onConfirm: (newName) => {
+            const trimmed = (newName || "").trim();
+            if (trimmed.length === 0 || !section) return;
+            section.name = trimmed;
+            unsavedChanges = true;
+            needsRedraw = true;
+        },
+        onCancel: () => { needsRedraw = true; }
+    });
+    needsRedraw = true;
 }
 
 function startNewSong(folderName) {
