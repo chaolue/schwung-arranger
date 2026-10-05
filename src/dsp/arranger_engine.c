@@ -786,6 +786,9 @@ typedef struct engine {
     /* Channels (bit per channel) each route played a note on since the last
      * stop -- where emit_notes_off_cc sends All Notes Off. */
     uint16_t notes_ch_used[3];
+    /* Audio frames left until that All Notes Off goes out (0 = none due) --
+     * see schedule_notes_off_cc. */
+    uint32_t notes_off_cc_frames;
 
     /* Channel override of the most recently drained event, used by
      * emit_direct_event when a per-clip channel (e.g. a dedicated click
@@ -1016,6 +1019,8 @@ static void queue_clear(engine_t *e) { e->queue_head = e->queue_tail = 0; e->que
  * for the current output target. Cable nibble matches the JS paths:
  * external=2, move=2 (injected to Move treats cable 2 as external USB),
  * schwung=0 (internal bus). */
+static void flush_notes_off_cc(engine_t *e);
+
 static void emit_direct_event(engine_t *e, uint8_t status, uint8_t d1, uint8_t d2, uint8_t len) {
     if (!g_host) return;
     uint8_t high = status & 0xF0;
@@ -1048,6 +1053,7 @@ static void emit_direct_event(engine_t *e, uint8_t status, uint8_t d1, uint8_t d
     {
         int t = (e->output_target >= 0 && e->output_target <= 2) ? e->output_target : 0;
         if (high == 0x90 && d2 > 0) {
+            flush_notes_off_cc(e);
             e->drum_notes_on[t][ch][d1 & 0x7F] = 1;
             e->notes_ch_used[t] |= (uint16_t)(1u << ch);
         }
@@ -1125,8 +1131,8 @@ static void emit_all_notes_off(engine_t *e) {
 }
 
 /* All Notes Off (CC 123) on every route and channel a note played on since
- * the last stop -- drums, instruments and click alike -- sent after their
- * explicit note-offs as a backstop. This used to go through
+ * the last stop -- drums, instruments and click alike -- as a backstop for a
+ * note-off that was lost or ignored. This used to go through
  * emit_direct_event, which ignores the channel it is given, so all 16 copies
  * landed on the drum channel and an instrument channel never got one --
  * seen in a USB capture of Stop. */
@@ -1138,6 +1144,32 @@ static void emit_notes_off_cc(engine_t *e) {
         for (int c = 0; c < 16; c++)
             if (used & (1u << c)) send_instrument_raw(t, (uint8_t)c, 0xB0, 123, 0);
     }
+}
+
+/* Stop sends its note-offs at once but holds All Notes Off back this long:
+ * many synths take CC 123 as an instant cut, skipping their release, so
+ * sending it with the note-offs stopped every note dead instead of letting
+ * it ring out (found live). */
+#define NOTES_OFF_CC_DELAY_MS 2000
+
+static void schedule_notes_off_cc(engine_t *e) {
+    int sr = (g_host && g_host->sample_rate > 0) ? g_host->sample_rate : 44100;
+    e->notes_off_cc_frames = (uint32_t)((uint64_t)sr * NOTES_OFF_CC_DELAY_MS / 1000);
+}
+
+/* Send a pending All Notes Off now. Called before any new note-on, so the
+ * delayed one can never cut a note that started after the stop. */
+static void flush_notes_off_cc(engine_t *e) {
+    if (!e->notes_off_cc_frames) return;
+    e->notes_off_cc_frames = 0;
+    emit_notes_off_cc(e);
+}
+
+/* Count down to a pending All Notes Off; run every audio block. */
+static void tick_notes_off_cc(engine_t *e, int frames) {
+    if (!e->notes_off_cc_frames || frames <= 0) return;
+    if ((uint32_t)frames >= e->notes_off_cc_frames) flush_notes_off_cc(e);
+    else e->notes_off_cc_frames -= (uint32_t)frames;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -2284,6 +2316,7 @@ static void emit_instrument_event(engine_t *e, const inst_voice_t *inst,
     /* Count what's sounding, so stopping can release anything a lost
      * note-off left behind -- see emit_instrument_notes_release. */
     if (high == 0x90 && vel > 0) {
+        flush_notes_off_cc(e);
         if (e->inst_notes_on[target][ch][n] < 255) e->inst_notes_on[target][ch][n]++;
         e->notes_ch_used[target] |= (uint16_t)(1u << ch);
     } else if (high == 0x80 || high == 0x90) {
@@ -4753,7 +4786,7 @@ static void handle_loop_or_stop(engine_t *e, uint32_t *target) {
                 emit_instruments_all_off(e);
                 emit_jam_instruments_all_off(e);
                 emit_instrument_notes_release(e);
-                emit_notes_off_cc(e);
+                schedule_notes_off_cc(e);
                 if (e->playhead_tick > e->live_slot.end_tick) e->playhead_tick = e->live_slot.end_tick;
             }
         }
@@ -5021,7 +5054,7 @@ static void engine_clear_error(engine_t *e) {
 
 /* DSP build version stamp. Keep in sync with UI_BUILD_VERSION in ui.js so the
  * running dsp.so can be confirmed from .dsp_log on module load. */
-static const char *const DSP_BUILD_VERSION = "arranger-dsp-2026-10-05-cc123";
+static const char *const DSP_BUILD_VERSION = "arranger-dsp-2026-10-05-ccdelay";
 
 static void* arr_create_instance(const char *module_dir, const char *config_json) {
     (void)module_dir;
@@ -5264,6 +5297,7 @@ static void arr_render_block(void *instance, int16_t *out_interleaved_lr, int fr
 
     int sample_rate = g_host ? g_host->sample_rate : 44100;
 
+    tick_notes_off_cc(e, frames);
     advance_playhead(e, frames, sample_rate);
     update_click(e);
     clock_tick(e, frames, sample_rate);
@@ -5761,7 +5795,7 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
         emit_instruments_all_off(e);
         emit_jam_instruments_all_off(e);
         emit_instrument_notes_release(e);
-        emit_notes_off_cc(e);
+        schedule_notes_off_cc(e);
         /* Discard any not-yet-promoted Jam chord pick -- it was queued for
          * a future bar boundary that will now never arrive, so resuming it
          * later (see "play"'s apply_pending_jam_chord call) would be
