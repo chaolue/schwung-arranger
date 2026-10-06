@@ -5258,8 +5258,20 @@ static void handle_loop_or_stop(engine_t *e, uint32_t *target) {
  * nothing left to free(). Caller (handle_loop_or_stop's AUTOSWAP branch) is
  * responsible for staging_consumed_gen bookkeeping, since it already holds
  * the generation this slot was published under. */
+/* A different timeline just became live: its first chord bar must fire even
+ * if its position key matches the one the old timeline was last seen at.
+ * Found live: after Perform's one-bar count-in (a timeline without
+ * instruments, so the key stayed at "section 0, bar 0" from Play), the
+ * song swapped in at its own section 0, bar 0 -- the same key -- so its
+ * first chord was skipped and the chords began a bar late. */
+#define INST_BAR_KEY_NONE 0xFFFFFFFEu
+static void forget_inst_bar_key(engine_t *e) {
+    e->inst_bar_key = INST_BAR_KEY_NONE;
+}
+
 static void engine_swap_to_staging(engine_t *e, const timeline_slot_t *src) {
     copy_timeline_slot(&e->live_slot, src);
+    forget_inst_bar_key(e);
 
     e->tempo_bpm = e->live_slot.tempo_bpm;
     e->time_sig_num = e->live_slot.time_sig_num;
@@ -5442,6 +5454,7 @@ static void advance_playhead(engine_t *e, int frames, int sample_rate) {
          * staging_ch.slot[], captured at schedule time, so it cannot have
          * been overwritten by that later preload. */
         copy_timeline_slot(&e->live_slot, &e->pending_swap_slot);
+        forget_inst_bar_key(e);
         e->tempo_bpm = e->live_slot.tempo_bpm;
         e->time_sig_num = e->live_slot.time_sig_num;
         e->time_sig_den = e->live_slot.time_sig_den;
@@ -5557,7 +5570,7 @@ static void engine_clear_error(engine_t *e) {
 
 /* DSP build version stamp. Keep in sync with UI_BUILD_VERSION in ui.js so the
  * running dsp.so can be confirmed from .dsp_log on module load. */
-static const char *const DSP_BUILD_VERSION = "arranger-dsp-2026-10-06-clickvol";
+static const char *const DSP_BUILD_VERSION = "arranger-dsp-2026-10-06-countinchord";
 
 static void* arr_create_instance(const char *module_dir, const char *config_json) {
     (void)module_dir;
