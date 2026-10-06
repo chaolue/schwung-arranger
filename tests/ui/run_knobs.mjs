@@ -67,8 +67,8 @@ sl = saved();
 check(sl.knobs[1] && sl.knobs[1].comp === "fx1" && sl.knobs[1].key === "mix", "knob 2 mapped to FX 1 Mix");
 
 /* Knob 3 -> Master FX -> FX 2 (tapedelay) -> Feedback. Chain rows: None,
- * Chain 1-4, Master FX. */
-jog(1); click(); jog(5);
+ * Chain 1-8, Master FX. */
+jog(1); click(); jog(9);
 click();
 check(H.printed.includes("FX 2") && H.printed.some(t => /^ta/.test(t)) && !H.printed.includes("FX 1"),
       "Master FX lists its loaded positions: " + JSON.stringify(H.printed));

@@ -8,7 +8,7 @@
  * confirmed from the logs (see init()/playCurrentSong()) instead of guessing
  * whether a new file actually loaded. Keep the DSP dsp_build_version in
  * arranger_engine.c in sync so both sides are verifiable. */
-const UI_BUILD_VERSION = "arranger-ui-2026-10-06-mergesplit";
+const UI_BUILD_VERSION = "arranger-ui-2026-10-07-chainpairs";
 
 /* Lit white buttons at full brightness (127). Schwung's WhiteLedBright is 124. */
 const WhiteLedFull = 127;
@@ -399,7 +399,10 @@ const BACK_SUSPEND_HOLD_MS = 500;
 /* ---- Schwung chains alongside Arranger (co-run) --------------------------
  *
  * Hold Track 1-4 to open Schwung's own editor for Chain 1-4 WITHOUT leaving
- * Arranger, and hold Menu for Schwung's Master FX. Arranger keeps running
+ * Arranger; under that view, TAP a Track to switch to its chain, and tap it
+ * again to toggle to its second chain (Track 1: Chain 1 <-> Chain 5 ... Track
+ * 4: Chain 4 <-> Chain 8). Holding the Track of the open chain (either of its
+ * pair) closes the view. and hold Menu for Schwung's Master FX. Arranger keeps running
  * underneath: playback, pads, steps, transport and the track buttons stay
  * Arranger's, while the screen, jog, knobs, knob touches and Back drive the
  * editor. So a song can keep playing while you tweak the synth it is
@@ -424,7 +427,8 @@ const BACK_SUSPEND_HOLD_MS = 500;
  * action that fires on press (a Perform/Jam mute) cannot be taken back once a
  * hold turns out to be a hold. With Shift held they act on press as before
  * (Shift+Track 3/4 opens the Jam instrument menu). */
-const CHAIN_SLOT_COUNT = 4;          /* Schwung's chain slots, one per Move track */
+const CHAIN_SLOT_COUNT = 8;          /* Schwung's chain slots: two per Move track */
+const TRACK_CHAIN_COUNT = 4;         /* chains a Track hold opens (the first of each pair) */
 const LONG_PRESS_HOLD_MS = 500;      /* = Back-hold, and Schwung's own Track hold */
 const CHAIN_NOTICE_MS = 3000;
 const longPressHolds = new Map();    /* cc -> { startTime, fired, pressValue, statusByte } */
@@ -677,6 +681,9 @@ function endLongPressHold(cc) {
         closeChainView();
         return;
     }
+    /* Under a chain view a Track tap switches chain (see chainViewTrackTap)
+     * rather than its usual action. */
+    if (chainViewTrackTap(cc)) return;
     routeCcInput([hold.statusByte, cc, hold.pressValue], cc, hold.pressValue);
 }
 
@@ -690,12 +697,27 @@ function fireLongPressAction(cc) {
         return;
     }
     const slot = trackCcToChainSlot(cc);
-    if (slot < 0 || slot >= CHAIN_SLOT_COUNT) return;
-    if (chainViewActive() && !chainViewMfx && !chainViewMfxPending && chainViewSlot === slot) {
+    if (slot < 0 || slot >= TRACK_CHAIN_COUNT) return;
+    if (chainViewActive() && !chainViewMfx && !chainViewMfxPending &&
+        chainViewSlot % TRACK_CHAIN_COUNT === slot) {
         closeChainView();
     } else {
         openChainView(slot);
     }
+}
+
+/* A Track tap under a chain view (no Shift): its chain, or -- tapped again
+ * on its own chain -- the other of its pair (Chain 1 <-> 5 ... 4 <-> 8).
+ * Returns true if the tap was used. */
+function chainViewTrackTap(cc) {
+    if (!chainViewActive() || chainViewMfx || chainViewMfxPending || !isTrackCc(cc)) return false;
+    const base = trackCcToChainSlot(cc);
+    if (base < 0 || base >= TRACK_CHAIN_COUNT) return false;
+    const alt = base + TRACK_CHAIN_COUNT;
+    let target = base;
+    if (chainViewSlot === base && alt < CHAIN_SLOT_COUNT) target = alt;
+    openChainView(target);
+    return true;
 }
 
 function tickLongPressHolds() {
@@ -713,7 +735,7 @@ function tickLongPressHolds() {
  *
  * In Performance (not under a chain view, which cedes the knobs), each knob
  * can drive one parameter of one Schwung chain -- any component (synth, MIDI
- * FX, audio FX) of any of the 4 chains. Mappings live in the SETLIST
+ * FX, audio FX) of any of the 8 chains. Mappings live in the SETLIST
  * (setlist.knobs[0..7]); a song entry may OVERRIDE a knob (entry.knobs[i]: a
  * mapping of its own, or {off:true}; absent = use the setlist's). Values are
  * restored: when a song loads, every knob's saved value is written back to its

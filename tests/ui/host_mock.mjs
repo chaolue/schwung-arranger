@@ -72,7 +72,7 @@ function install() {
     if (!corunApiPresent) { for (const n of names) delete g[n]; return; }
     g.shadow_corun_begin_cede = (t, id, cede, flags) => {
         log.push(["begin_cede", t, id, cede, flags]);
-        if (t !== 1 || id < 0 || id > 3) return;
+        if (t !== 1 || id < 0 || id > 7) return;   /* SHADOW_UI_SLOTS = 8 */
         corun.flags = 1 | (flags & 2);
         corun.keep = (~cede) & GRP_ALL;
         corun.id = id; corun.target = 1;

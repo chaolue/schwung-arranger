@@ -197,6 +197,22 @@ check(H.suspends.length === 1, "Back hold still suspends");
     check(H.knobLeds[3] === 0, "off again after a resume: " + H.knobLeds[3]);
 }
 
+/* 14c. Chains 5-8: under a chain view a Track TAP goes to its chain, and
+ * again to the other of its pair (Track 1: Chain 1 <-> 5). Holding the
+ * Track of either of the pair closes the view. */
+hold(TR1);
+check(H.corun.target === 1 && H.corun.id === 0, "hold Track 1: chain 1");
+tap(TR1);
+check(H.corun.target === 1 && H.corun.id === 4, "tap Track 1 again: chain 5 (" + H.corun.id + ")");
+tap(TR1);
+check(H.corun.id === 0, "and again: back to chain 1 (" + H.corun.id + ")");
+tap(TR3);
+check(H.corun.id === 2, "tap Track 3: chain 3 (" + H.corun.id + ")");
+tap(TR3);
+check(H.corun.id === 6, "tap Track 3 again: chain 7 (" + H.corun.id + ")");
+hold(TR3);
+check(H.corun.target === 0, "hold Track 3 on chain 7 closes the view");
+
 /* 15. onUnload ends a session. */
 hold(TR3);
 check(H.corun.target === 1, "chain 3 open");
