@@ -8,7 +8,7 @@
  * confirmed from the logs (see init()/playCurrentSong()) instead of guessing
  * whether a new file actually loaded. Keep the DSP dsp_build_version in
  * arranger_engine.c in sync so both sides are verifiable. */
-const UI_BUILD_VERSION = "arranger-ui-2026-10-06-itemtracks";
+const UI_BUILD_VERSION = "arranger-ui-2026-10-06-chordmove";
 
 /* Lit white buttons at full brightness (127). Schwung's WhiteLedBright is 124. */
 const WhiteLedFull = 127;
@@ -6626,6 +6626,27 @@ function drawFolderList() {
     });
 }
 
+/* Pixels between a list row's name and its right-hand value in Song
+ * Builder's track lists (Schwung's menu default). */
+const LIST_LABEL_GAP = 6;
+
+/* "5/10" for Song Builder's section row (every track's list). While
+ * builderPlayingFromTemp, currentSong is sliced to start at
+ * currentSectionIndex (the shown index is forced to 0 to index into it), so
+ * currentSong.sections.length is short by currentSectionIndex and would show
+ * "1/6" instead of "5/10" until playback confirms -- the flash seen on
+ * pressing Play. currentSectionIndex itself is never touched during this
+ * window, so it is still the true original index; adding it back to the
+ * sliced length recovers the true total. */
+function sectionCountLabel(shownIdx) {
+    if (!currentSong) return "";
+    const total = builderPlayingFromTemp
+        ? currentSong.sections.length + currentSectionIndex
+        : currentSong.sections.length;
+    const shown = builderPlayingFromTemp ? currentSectionIndex : shownIdx;
+    return (shown + 1) + "/" + total;
+}
+
 function drawBuilder() {
     /* The chord and instrument tracks have their own displays. */
     if (builderTrack === TRACK_CHORD) { drawChordTrack(); return; }
@@ -6667,23 +6688,7 @@ function drawBuilder() {
             return "(pads add clips)";
         },
         getValue: (item) => {
-            if (item.type === "section") {
-                /* While builderPlayingFromTemp, currentSong is sliced to
-                 * start at currentSectionIndex (displayIdx is forced to 0 to
-                 * index into it -- see above), so currentSong.sections.length
-                 * is short by currentSectionIndex and would show "1/13"
-                 * instead of "2/14" for section 2 of 14. currentSectionIndex
-                 * itself is never touched during this window (only
-                 * currentSong/dspLoopEnabled/builderPlayingFromTemp are), so
-                 * it's still the true original index; adding it back to the
-                 * sliced length recovers the true original total without
-                 * needing a separate stored value. */
-                const total = builderPlayingFromTemp
-                    ? currentSong.sections.length + currentSectionIndex
-                    : currentSong.sections.length;
-                const shown = builderPlayingFromTemp ? currentSectionIndex : displayIdx;
-                return (shown + 1) + "/" + total;
-            }
+            if (item.type === "section") return sectionCountLabel(displayIdx);
             if (item.type === "clip") {
                 const c = sec.clips[item.index];
                 /* Show the effective (beat-trimmed) bar count as a mixed
@@ -6700,7 +6705,9 @@ function drawBuilder() {
          * like "3 2/4b"; lowering it lets up to 6+ chars fit while the
          * label-floor still protects long clip names from being overlapped. */
         valueX: 44,
-        labelGap: 1,
+        /* Room between a long name (or its "...") and the value, so the
+         * two don't read as one string. */
+        labelGap: LIST_LABEL_GAP,
         listArea: { topY: LIST_TOP_Y, bottomY: LIST_INDICATOR_BOTTOM_Y }
     });
     const bpm = currentSong ? currentSong.tempo_bpm : 120;
@@ -6788,21 +6795,23 @@ function drawChordTrack() {
             return "+ Add";
         },
         getValue: (item) => {
-            if (item.type === "section") return (secIndex + 1) + "/" + currentSong.sections.length;
+            if (item.type === "section") return sectionCountLabel(secIndex);
             if (item.type === "chord") return chordPosLabel(item.ev.bar, item.ev.beat);
             return "";
         },
         valueAlignRight: true,
         valueX: 44,
-        labelGap: 1,
+        /* Room between a long name (or its "...") and the value, so the
+         * two don't read as one string. */
+        labelGap: LIST_LABEL_GAP,
         listArea: { topY: LIST_TOP_Y, bottomY: LIST_INDICATOR_BOTTOM_Y }
     });
     drawOverlay();
 }
 
 /* Chord track list: jog moves the selection, Shift+jog nudges the selected
- * chord a beat (half in Advanced) -- across bars, stopping at its neighbours
- * and the section's ends. */
+ * chord a beat (half in Advanced) -- across bars and past other chords
+ * (onto the next free beat), stopping at the section's ends. */
 function chordListJog(delta) {
     const secIndex = chordDisplaySectionIndex();
     const sec = currentSong ? currentSong.sections[secIndex] : null;
@@ -6813,6 +6822,32 @@ function chordListJog(delta) {
     needsRedraw = true;
 }
 
+/* Move a position (beats from the section start) by `delta` steps, each
+ * step landing on the next free position in that direction -- so it passes
+ * over taken ones -- and stopping at the section's ends (0, end - step). */
+function nudgePosition(pos, delta, step, end, taken) {
+    const dir = Math.sign(delta);
+    for (let n = Math.abs(delta); n > 0; n--) {
+        let p = pos + dir * step;
+        while (p >= 0 && p <= end - step && taken.has(p)) p += dir * step;
+        if (p < 0 || p > end - step) break;
+        pos = p;
+    }
+    return pos;
+}
+
+/* When no bar after the last chord/item is free, "+ Add" shares the last
+ * one's bar: halfway through what's left of it (beat 1 -> 3 -> 4 in 4/4),
+ * shortening it, until the bar has no beat left. `free` is the bar's free
+ * beats. Returns the beat, or null. */
+function splitBeatAfter(lastBeat, free, adv) {
+    const step = adv ? 0.5 : 1;
+    const after = free.filter(b => b > lastBeat);
+    if (!after.length) return null;
+    const mid = lastBeat + Math.max(step, Math.floor((beatsPerBar() + 1 - lastBeat) / 2 / step) * step);
+    return after.includes(mid) ? mid : after[0];
+}
+
 function chordListNudge(delta) {
     const secIndex = chordDisplaySectionIndex();
     const sec = currentSong ? currentSong.sections[secIndex] : null;
@@ -6820,15 +6855,10 @@ function chordListNudge(delta) {
     const evs = sectionChordEvents(sec);
     const e = evs[chordListCursor];
     if (!e || delta === 0) return;
-    const step = e.chord.adv ? 0.5 : 1;
     const bpb = beatsPerBar();
     const total = sectionChordBars(sec);
-    /* Position as beats from the section start. */
-    let pos = e.bar * bpb + (e.beat - 1);
-    const prev = evs[chordListCursor - 1], next = evs[chordListCursor + 1];
-    const lo = prev ? prev.bar * bpb + (prev.beat - 1) + step : 0;
-    const hi = next ? next.bar * bpb + (next.beat - 1) - step : total * bpb - step;
-    pos = Math.max(lo, Math.min(hi, pos + delta * step));
+    const taken = new Set(evs.filter(x => x !== e).map(x => x.bar * bpb + (x.beat - 1)));
+    const pos = nudgePosition(e.bar * bpb + (e.beat - 1), delta, e.chord.adv ? 0.5 : 1, total * bpb, taken);
     const bar = Math.floor(pos / bpb), beat = pos - bar * bpb + 1;
     if (bar === e.bar && beat === e.beat) return;
     removeChordEvent(sec, e.bar, e.idx);
@@ -6870,9 +6900,15 @@ function chordListClick() {
         return;
     }
     const last = evs[evs.length - 1];
-    const pos = !last ? { bar: 0, beat: 1 } : nextFreeChordPos(sec, last.bar, 1);
+    let pos = !last ? { bar: 0, beat: 1 } : nextFreeChordPos(sec, last.bar, 1);
+    if (!pos && last) {
+        /* No bar after it: share the last chord's bar. */
+        const adv = !!last.chord.adv;
+        const beat = splitBeatAfter(last.beat, freeBeatsInBar(sec, last.bar, adv, -1, -1), adv);
+        if (beat !== null) pos = { bar: last.bar, beat };
+    }
     if (!pos) {
-        showPopup("Chords", "No free bar after the last chord", 2000);
+        showPopup("Chords", "No free beat after the last chord", 2000);
         return;
     }
     openChordPick(pos.bar, -1, true, pos.beat);
@@ -7433,13 +7469,15 @@ function drawItemTrack() {
             return "+ Add";
         },
         getValue: (row) => {
-            if (row.type === "section") return (secIndex + 1) + "/" + currentSong.sections.length;
+            if (row.type === "section") return sectionCountLabel(secIndex);
             if (row.type === "item") return chordPosLabel(row.it.bar, chordBeat(row.it));
             return "";
         },
         valueAlignRight: true,
         valueX: 44,
-        labelGap: 1,
+        /* Room between a long name (or its "...") and the value, so the
+         * two don't read as one string. */
+        labelGap: LIST_LABEL_GAP,
         listArea: { topY: LIST_TOP_Y, bottomY: LIST_INDICATOR_BOTTOM_Y }
     });
     drawOverlay();
@@ -7454,22 +7492,19 @@ function itemListJog(delta) {
     needsRedraw = true;
 }
 
-/* Shift+jog: move the selected item a beat (half in Advanced), between its
- * neighbours and the section's ends. */
+/* Shift+jog: move the selected item a beat (half in Advanced), past other
+ * items onto the next free beat, stopping at the section's ends. */
 function itemListNudge(delta) {
     const { sec } = itemTrackSection();
     if (!sec || delta === 0) return;
     const list = sortItems(sectionItems(sec, builderTrack));
     const it = list[itemListCursor];
     if (!it) return;
-    const step = it.adv ? 0.5 : 1;
     const bpb = beatsPerBar();
     const total = sectionChordBars(sec);
     const posOf = (x) => x.bar * bpb + (chordBeat(x) - 1);
-    const prev = list[itemListCursor - 1], next = list[itemListCursor + 1];
-    const lo = prev ? posOf(prev) + step : 0;
-    const hi = next ? posOf(next) - step : total * bpb - step;
-    const pos = Math.max(lo, Math.min(hi, posOf(it) + delta * step));
+    const taken = new Set(list.filter(x => x !== it).map(posOf));
+    const pos = nudgePosition(posOf(it), delta, it.adv ? 0.5 : 1, total * bpb, taken);
     const bar = Math.floor(pos / bpb), beat = pos - bar * bpb + 1;
     it.bar = bar;
     if (beat !== 1) it.beat = beat; else delete it.beat;
@@ -7503,8 +7538,13 @@ function itemListClick() {
     if (it) { openItemEdit(builderTrack, secIndex, it); return; }
     if (songIsLocked()) return;
     const last = list[list.length - 1];
-    const pos = !last ? { bar: 0, beat: 1 } : nextFreeItemPos(list, sec, last.bar, 1);
-    if (!pos) { showPopup(itemTrackName(builderTrack), "No free bar after the last item", 2000); return; }
+    let pos = !last ? { bar: 0, beat: 1 } : nextFreeItemPos(list, sec, last.bar, 1);
+    if (!pos && last) {
+        /* No bar after it: share the last item's bar (see splitBeatAfter). */
+        const beat = splitBeatAfter(chordBeat(last), freeItemBeats(list, last.bar, !!last.adv, null), !!last.adv);
+        if (beat !== null) pos = { bar: last.bar, beat };
+    }
+    if (!pos) { showPopup(itemTrackName(builderTrack), "No free beat after the last item", 2000); return; }
     const fresh = builderTrack === TRACK_CLICK
         ? { volume: last && typeof last.volume === "number" ? last.volume : clickVolume } : {};
     fresh.bar = pos.bar;
