@@ -8,7 +8,7 @@
  * confirmed from the logs (see init()/playCurrentSong()) instead of guessing
  * whether a new file actually loaded. Keep the DSP dsp_build_version in
  * arranger_engine.c in sync so both sides are verifiable. */
-const UI_BUILD_VERSION = "arranger-ui-2026-10-06-chordmove";
+const UI_BUILD_VERSION = "arranger-ui-2026-10-06-listleds";
 
 /* Lit white buttons at full brightness (127). Schwung's WhiteLedBright is 124. */
 const WhiteLedFull = 127;
@@ -4856,10 +4856,9 @@ function updateButtonLEDs() {
                 } else if (ledSec && ledSec.clips.length > 0) {
                     active.set(MovePlay, White);
                 }
-                /* The clip-editing controls (main button, copy, loop, delete,
-                 * page up/down) only apply to the Drum track; the Chord and
-                 * Instrument tracks don't use them, so leave them unlit and
-                 * skip the locked/shift variants below for those tracks. */
+                /* The Drum track's clip-editing controls (main button, copy,
+                 * loop, delete, page up/down); the Chord, Inst and Click
+                 * tracks' lists light theirs in the else branch below. */
                 if (builderTrack === TRACK_DRUM) {
                     const ledOnClip = ledSec && builderCursor >= 0 && builderCursor < ledSec.clips.length;
                     const ledOnSection = builderCursor === -1;
@@ -4905,6 +4904,22 @@ function updateButtonLEDs() {
                          * dim/bright hints per section availability. */
                         if (playbackState !== "playing") active.set(MovePlay, White);
                     }
+                } else {
+                    /* The Chord, Inst and Click tracks' lists: the jog click
+                     * always does something (edit, rename, add); Copy and
+                     * Delete act on a selected chord/item, so they light only
+                     * there -- and not on a locked song. Shift+jog moves the
+                     * selected one. */
+                    const ledListSec = currentSong ? currentSong.sections[chordDisplaySectionIndex()] : null;
+                    const ledOnItem = listCursorBar(ledListSec) >= 0;
+                    active.set(MoveMainButton, WhiteLedFull);
+                    if (!ledLocked && ledOnItem) {
+                        active.set(MoveCopy, WhiteLedFull);
+                        active.set(MoveDelete, WhiteLedFull);
+                    }
+                    if (!ledLocked) active.set(MoveShift, shiftHeld ? WhiteLedFull : WhiteLedDim);
+                    else if (shiftHeld) active.set(MoveShift, WhiteLedFull);
+                    if (shiftHeld && playbackState !== "playing") active.set(MovePlay, White);
                 }
                 break;
             }
@@ -6413,6 +6428,11 @@ function drawChordStepLEDs(force) {
         ? instrumentForTrack(builderTrack) : null;
     /* Match the bar colour to the selected track's Row button colour. */
     const trackColour = TRACK_ROW_COLOUR[builderTrack];
+    /* The white cursor: the bar of the row selected in this section's list,
+     * read from the list itself each time -- a stored bar went stale when
+     * the section changed (Left/Right, or playback following), lighting a
+     * different step than the one highlighted. */
+    const chordCursorBar = listCursorBar(sec);
 
     /* Playback flash: the same bar/beat-accurate white flash on the
      * currently playing bar as the drum track (drawBuilderStepLEDs) -- see
@@ -6752,6 +6772,21 @@ function selectChordListAt(sec, bar, beat) {
     syncChordCursorBar(sec);
 }
 
+/* The bar of the row selected in a section's Chord/Inst/Click list, or -1
+ * (the section row, "+ Add"). */
+function listCursorBar(sec) {
+    if (!sec) return -1;
+    if (builderTrack === TRACK_CHORD) {
+        const e = sectionChordEvents(sec)[chordListCursor];
+        return e ? e.bar : -1;
+    }
+    if (isItemTrack(builderTrack)) {
+        const it = sortItems(sectionItems(sec, builderTrack))[itemListCursor];
+        return it ? it.bar : -1;
+    }
+    return -1;
+}
+
 /* Keep the step-LED cursor (chordCursorBar/Idx) on the selected chord. */
 function syncChordCursorBar(sec) {
     const evs = sectionChordEvents(sec);
@@ -6899,14 +6934,7 @@ function chordListClick() {
         openChordPick(e.bar, e.idx);
         return;
     }
-    const last = evs[evs.length - 1];
-    let pos = !last ? { bar: 0, beat: 1 } : nextFreeChordPos(sec, last.bar, 1);
-    if (!pos && last) {
-        /* No bar after it: share the last chord's bar. */
-        const adv = !!last.chord.adv;
-        const beat = splitBeatAfter(last.beat, freeBeatsInBar(sec, last.bar, adv, -1, -1), adv);
-        if (beat !== null) pos = { bar: last.bar, beat };
-    }
+    const pos = chordAppendPos(sec);
     if (!pos) {
         showPopup("Chords", "No free beat after the last chord", 2000);
         return;
@@ -6927,16 +6955,32 @@ function chordListDelete() {
     needsRedraw = true;
 }
 
-/* Copy: duplicate the selected chord onto the next free bar. */
+/* Where "+ Add" or Copy puts a new chord: the bar after the section's last
+ * chord, else sharing that last bar (see splitBeatAfter), else null. */
+function chordAppendPos(sec) {
+    const evs = sectionChordEvents(sec);
+    const last = evs[evs.length - 1];
+    if (!last) return { bar: 0, beat: 1 };
+    let pos = nextFreeChordPos(sec, last.bar, 1);
+    if (!pos) {
+        const adv = !!last.chord.adv;
+        const beat = splitBeatAfter(last.beat, freeBeatsInBar(sec, last.bar, adv, -1, -1), adv);
+        if (beat !== null) pos = { bar: last.bar, beat };
+    }
+    return pos;
+}
+
+/* Copy: duplicate the selected chord after the section's last chord, as
+ * "+ Add" would add one. */
 function chordListDuplicate() {
     const secIndex = chordDisplaySectionIndex();
     const sec = currentSong ? currentSong.sections[secIndex] : null;
     if (!sec) return;
     const e = sectionChordEvents(sec)[chordListCursor];
     if (!e) return;
-    const pos = nextFreeChordPos(sec, e.bar, e.beat);
+    const pos = chordAppendPos(sec);
     if (!pos) {
-        showPopup("Chords", "No free bar after this chord", 2000);
+        showPopup("Chords", "No free beat after the last chord", 2000);
         return;
     }
     const copy = Object.assign({}, e.chord);
@@ -7538,18 +7582,26 @@ function itemListClick() {
     if (it) { openItemEdit(builderTrack, secIndex, it); return; }
     if (songIsLocked()) return;
     const last = list[list.length - 1];
-    let pos = !last ? { bar: 0, beat: 1 } : nextFreeItemPos(list, sec, last.bar, 1);
-    if (!pos && last) {
-        /* No bar after it: share the last item's bar (see splitBeatAfter). */
-        const beat = splitBeatAfter(chordBeat(last), freeItemBeats(list, last.bar, !!last.adv, null), !!last.adv);
-        if (beat !== null) pos = { bar: last.bar, beat };
-    }
+    const pos = itemAppendPos(list, sec);
     if (!pos) { showPopup(itemTrackName(builderTrack), "No free beat after the last item", 2000); return; }
     const fresh = builderTrack === TRACK_CLICK
         ? { volume: last && typeof last.volume === "number" ? last.volume : clickVolume } : {};
     fresh.bar = pos.bar;
     if (pos.beat !== 1) fresh.beat = pos.beat;
     openItemEdit(builderTrack, secIndex, null, fresh);
+}
+
+/* Where "+ Add" or Copy puts a new item: the bar after the section's last
+ * item, else sharing that last bar (see splitBeatAfter), else null. */
+function itemAppendPos(list, sec) {
+    const last = list[list.length - 1];
+    if (!last) return { bar: 0, beat: 1 };
+    let pos = nextFreeItemPos(list, sec, last.bar, 1);
+    if (!pos) {
+        const beat = splitBeatAfter(chordBeat(last), freeItemBeats(list, last.bar, !!last.adv, null), !!last.adv);
+        if (beat !== null) pos = { bar: last.bar, beat };
+    }
+    return pos;
 }
 
 function itemListDelete() {
@@ -7570,8 +7622,9 @@ function itemListDuplicate() {
     const list = sortItems(sectionItems(sec, builderTrack));
     const it = list[itemListCursor];
     if (!it) return;
-    const pos = nextFreeItemPos(list, sec, it.bar, chordBeat(it));
-    if (!pos) { showPopup(itemTrackName(builderTrack), "No free bar after this item", 2000); return; }
+    /* After the section's last item, as "+ Add" would add one. */
+    const pos = itemAppendPos(list, sec);
+    if (!pos) { showPopup(itemTrackName(builderTrack), "No free beat after the last item", 2000); return; }
     const copy = Object.assign({}, it, { bar: pos.bar });
     if (pos.beat !== 1) copy.beat = pos.beat; else delete copy.beat;
     list.push(copy);
