@@ -8,7 +8,7 @@
  * confirmed from the logs (see init()/playCurrentSong()) instead of guessing
  * whether a new file actually loaded. Keep the DSP dsp_build_version in
  * arranger_engine.c in sync so both sides are verifiable. */
-const UI_BUILD_VERSION = "arranger-ui-2026-10-06-listleds";
+const UI_BUILD_VERSION = "arranger-ui-2026-10-06-mergesplit";
 
 /* Lit white buttons at full brightness (127). Schwung's WhiteLedBright is 124. */
 const WhiteLedFull = 127;
@@ -4856,6 +4856,17 @@ function updateButtonLEDs() {
                 } else if (ledSec && ledSec.clips.length > 0) {
                     active.set(MovePlay, White);
                 }
+                /* Mute merges this section with the next (lit when there is
+                 * one); Shift+Mute splits it at the selected clip (Drum
+                 * track, from the 2nd clip). Both need the song stopped and
+                 * unlocked. */
+                if (!ledLocked && playbackState !== "playing" && currentSong) {
+                    const mSec = currentSong.sections[currentSectionIndex];
+                    const canMerge = currentSectionIndex + 1 < currentSong.sections.length;
+                    const canSplit = builderTrack === TRACK_DRUM && mSec &&
+                        builderCursor >= 1 && builderCursor < mSec.clips.length;
+                    if (shiftHeld ? canSplit : canMerge) active.set(MoveMute, WhiteLedFull);
+                }
                 /* The Drum track's clip-editing controls (main button, copy,
                  * loop, delete, page up/down); the Chord, Inst and Click
                  * tracks' lists light theirs in the else branch below. */
@@ -9597,12 +9608,18 @@ function handleBuilderInput(cc, value) {
      * and transport apply there. */
     if (builderTrack !== TRACK_DRUM) {
         const allowed = cc === MoveLeft || cc === MoveRight || cc === MoveMenu ||
-            cc === MoveBack || cc === MovePlay || cc === MoveShift ||
+            cc === MoveBack || cc === MovePlay || cc === MoveShift || cc === MoveMute ||
             (!shiftHeld && (cc === MoveMainKnob || cc === MoveMainButton)) ||
             /* The Chord, Inst and Click tracks' lists edit like the Drum
              * track's: Shift+jog nudges, Delete removes, Copy duplicates. */
             cc === MoveMainKnob || (!shiftHeld && (cc === MoveDelete || cc === MoveCopy));
         if (!allowed) return;
+    }
+    if (cc === MoveMute && value > 0) {
+        /* Mute merges this section with the next; Shift+Mute splits it at
+         * the selected clip (Drum track). */
+        builderMergeOrSplit(shiftHeld);
+        return;
     }
     if (isItemTrack(builderTrack)) {
         /* The Inst and Click tracks' lists edit like the Chord track's. */
@@ -12133,6 +12150,150 @@ function duplicateClipAtCursor() {
     builderCursor++;
     unsavedChanges = true;
     stepLedsDirty = true;
+    needsRedraw = true;
+}
+
+/* ── Merge / split sections (Mute, Shift+Mute) ───────────────────────── */
+
+/* A section's length in beats (halves kept), from its clips' bars. */
+function sectionBeats(sec) {
+    return Math.round(sectionBars(sec) * beatsPerBar() * 2) / 2;
+}
+
+/* A position as beats from its section's start, and back. A position off a
+ * whole beat is marked Advanced so the settings pages can show it. */
+function posToBeats(it) {
+    return it.bar * beatsPerBar() + (chordBeat(it) - 1);
+}
+function placeAtBeats(obj, pos) {
+    const bpb = beatsPerBar();
+    const bar = Math.floor(pos / bpb), beat = pos - bar * bpb + 1;
+    const o = Object.assign({}, obj, { bar });
+    delete o.beat;
+    if (beat !== 1) o.beat = beat;
+    if (!Number.isInteger(beat)) o.adv = true;
+    return o;
+}
+
+/* A section's chords as [{pos, chord}] and back. */
+function sectionChordList(sec) {
+    return sectionChordEvents(sec).map(e => ({ pos: e.bar * beatsPerBar() + (e.beat - 1), chord: e.chord }));
+}
+function writeSectionChords(sec, list) {
+    sec.chords = [];
+    const byBar = new Map();
+    for (const { pos, chord } of list) {
+        const c = placeAtBeats(chord, pos);
+        const bar = c.bar;
+        delete c.bar;
+        if (!byBar.has(bar)) byBar.set(bar, []);
+        byBar.get(bar).push(c);
+    }
+    for (const [bar, chords] of byBar) setBarChords(sec, bar, chords);
+}
+
+/* The item lists a section carries: Inst 1, Inst 2, Click (see sectionItems). */
+const SECTION_ITEM_TRACKS = [TRACK_INSTRUMENT_1, TRACK_INSTRUMENT_2, TRACK_CLICK];
+
+/* Mute: merge the current section with the next one. The next section's
+ * clips, chords and items follow on, shifted by this section's length. A
+ * section starts fresh (no chord carried in, Inst defaults, the default
+ * click volume), so where this one had something that would now carry on,
+ * the join gets a No Chord / back-to-defaults item / default volume -- the
+ * merged section sounds as the two did. */
+export function mergeSectionWithNext(song, i) {
+    if (!song || i < 0 || i + 1 >= song.sections.length) return false;
+    const a = song.sections[i], b = song.sections[i + 1];
+    const off = sectionBeats(a);
+    const ca = sectionChordList(a), cb = sectionChordList(b);
+    const merged = ca.concat(cb.map(x => ({ pos: x.pos + off, chord: x.chord })));
+    if (ca.length && !cb.some(x => x.pos === 0)) merged.push({ pos: off, chord: { none: true } });
+    merged.sort((x, y) => x.pos - y.pos);
+    for (const t of SECTION_ITEM_TRACKS) {
+        const la = sectionItems(a, t), lb = sectionItems(b, t);
+        const moved = lb.map(it => placeAtBeats(it, posToBeats(it) + off));
+        if (la.length && !lb.some(it => posToBeats(it) === 0)) {
+            moved.push(placeAtBeats(t === TRACK_CLICK ? { volume: clickVolume } : {}, off));
+        }
+        la.push(...moved);
+        sortItems(la);
+    }
+    a.clips = (a.clips || []).concat(b.clips || []);
+    writeSectionChords(a, merged);
+    song.sections.splice(i + 1, 1);
+    return true;
+}
+
+/* Shift+Mute: split the current section before clip `clipIdx` (not the
+ * first). The clips from there, and the chords and items from that point,
+ * become a new section after it, named like a duplicate. Whatever was in
+ * effect at the split -- the chord sounding, the Inst settings, the click
+ * volume -- is restated at the new section's start so it carries on. */
+export function splitSectionAt(song, i, clipIdx) {
+    if (!song || i < 0 || i >= song.sections.length) return false;
+    const a = song.sections[i];
+    if (!a.clips || clipIdx < 1 || clipIdx >= a.clips.length) return false;
+    const bpb = beatsPerBar();
+    let bars = 0;
+    for (let c = 0; c < clipIdx; c++) bars += clipEffBars(a.clips[c]);
+    const off = Math.round(bars * bpb * 2) / 2;
+    const b = { id: "sec-" + Date.now(), name: incrementSectionName(a.name || "Section"), clips: a.clips.slice(clipIdx) };
+    a.clips = a.clips.slice(0, clipIdx);
+    const all = sectionChordList(Object.assign({}, a, { clips: a.clips.concat(b.clips) }));
+    const before = all.filter(x => x.pos < off), after = all.filter(x => x.pos >= off).map(x => ({ pos: x.pos - off, chord: x.chord }));
+    const lastBefore = before[before.length - 1];
+    if (lastBefore && !lastBefore.chord.none && !after.some(x => x.pos === 0)) after.unshift({ pos: 0, chord: lastBefore.chord });
+    writeSectionChords(a, before);
+    writeSectionChords(b, after);
+    for (const t of SECTION_ITEM_TRACKS) {
+        const la = sortItems(sectionItems(a, t));
+        const keep = la.filter(it => posToBeats(it) < off);
+        const move = la.filter(it => posToBeats(it) >= off).map(it => placeAtBeats(it, posToBeats(it) - off));
+        const last = keep[keep.length - 1];
+        if (last && !move.some(it => posToBeats(it) === 0)) {
+            const carry = Object.assign({}, last);
+            delete carry.adv;
+            move.unshift(placeAtBeats(carry, 0));
+        }
+        la.length = 0;
+        la.push(...keep);
+        const lb = sectionItems(b, t);
+        lb.push(...move);
+        sortItems(lb);
+    }
+    song.sections.splice(i + 1, 0, b);
+    return true;
+}
+
+/* Merge/split from Song Builder: the current section, while stopped (the
+ * playing timeline still has the old sections). */
+function builderMergeOrSplit(split) {
+    if (!currentSong || songIsLocked()) return;
+    if (playbackState === "playing") {
+        showPopup(split ? "Split" : "Merge", "Stop playback first", 2000);
+        return;
+    }
+    const i = currentSectionIndex;
+    const sec = currentSong.sections[i];
+    if (!sec) return;
+    if (split) {
+        if (builderTrack !== TRACK_DRUM || builderCursor < 1 || builderCursor >= sec.clips.length) return;
+        const name = sec.name || "Section";
+        if (!splitSectionAt(currentSong, i, builderCursor)) return;
+        builderCursor = Math.max(0, sec.clips.length - 1);
+        showPopup("Split", name + " | " + currentSong.sections[i + 1].name, 2000);
+    } else {
+        const next = currentSong.sections[i + 1];
+        if (!next) return;
+        const names = (sec.name || "Section") + " + " + (next.name || "Section");
+        if (!mergeSectionWithNext(currentSong, i)) return;
+        showPopup("Merged", names, 2000);
+    }
+    unsavedChanges = true;
+    chordListCursor = 0;
+    itemListCursor = 0;
+    stepLedsDirty = true;
+    ledDirtyAll = true;
     needsRedraw = true;
 }
 
