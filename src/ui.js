@@ -8,7 +8,7 @@
  * confirmed from the logs (see init()/playCurrentSong()) instead of guessing
  * whether a new file actually loaded. Keep the DSP dsp_build_version in
  * arranger_engine.c in sync so both sides are verifiable. */
-const UI_BUILD_VERSION = "arranger-ui-2026-10-07-chainpairs";
+const UI_BUILD_VERSION = "arranger-ui-2026-10-07-userpresets";
 
 /* Lit white buttons at full brightness (127). Schwung's WhiteLedBright is 124. */
 const WhiteLedFull = 127;
@@ -767,6 +767,14 @@ const KNOB_SHOW_MS = 1500;           /* feedback after the last turn */
 const KNOB_WRITES_PER_TICK = 4;      /* each is one param round trip (~3 ms) */
 const KNOB_WRITE_RETRIES = 20;
 const KNOB_PARAM_TYPES = new Set(["float", "int", "enum", "bool"]);
+/* A knob can also step through a module's user presets ("My Presets" in
+ * Schwung's chain editor): not a module parameter but files under
+ * USER_PRESET_ROOT/<module-id>/<name>.json, each holding the component's
+ * whole state. Loading one writes that state to "<comp>:state", as
+ * Schwung's own preset browser does. The mapping's key is this pseudo key
+ * and its value the preset's name. */
+const USER_PRESET_KEY = "__user_preset";
+const USER_PRESET_ROOT = "/data/UserData/schwung/presets";
 let perfKnobs = new Array(KNOB_COUNT).fill(null);   /* resolved, see resolvePerfKnob */
 let perfKnobsKey = "";               /* which setlist+song perfKnobs was built for */
 const knobWriteQueue = new Map();    /* knob index -> { slot, fullKey, value, tries } */
@@ -843,7 +851,7 @@ function readCompModule(slot, comp) {
  * cached, so the next look retries. */
 function readCompMeta(slot, comp, moduleId) {
     const cacheKey = slot + "|" + comp + "|" + moduleId;
-    if (knobMetaCache.has(cacheKey)) return knobMetaCache.get(cacheKey);
+    if (knobMetaCache.has(cacheKey)) return withUserPresets(knobMetaCache.get(cacheKey), slot, moduleId);
     const raw = readCompParam(slot, comp, "chain_params");
     if (raw === null) return null;
     let arr = null;
@@ -859,7 +867,62 @@ function readCompMeta(slot, comp, moduleId) {
     }
     const meta = { list, byKey };
     knobMetaCache.set(cacheKey, meta);
-    return meta;
+    return withUserPresets(meta, slot, moduleId);
+}
+
+/* A module's user presets, sorted by name as Schwung lists them:
+ * [{name, file}]. Read fresh each time, so presets saved since show up. */
+function listUserPresets(moduleId) {
+    if (!moduleId || typeof os.readdir !== "function") return [];
+    const dir = USER_PRESET_ROOT + "/" + moduleId;
+    let names = [];
+    try {
+        const raw = os.readdir(dir);
+        names = Array.isArray(raw) ? (Array.isArray(raw[0]) ? raw[0] : raw) : [];
+    } catch (e) { return []; }
+    const out = [];
+    for (const f of names) {
+        if (typeof f !== "string" || !f.endsWith(".json")) continue;
+        let name = f.replace(/\.json$/, "");
+        try {
+            const txt = host_read_file(dir + "/" + f);
+            const m = txt ? txt.match(/"name"\s*:\s*"([^"]+)"/) : null;
+            if (m && m[1]) name = m[1];
+        } catch (e) { /* keep the file name */ }
+        out.push({ name, file: f });
+    }
+    out.sort((a, b) => a.name.toLowerCase() < b.name.toLowerCase() ? -1 : (a.name.toLowerCase() > b.name.toLowerCase() ? 1 : 0));
+    return out;
+}
+
+/* The component's parameters plus, when its module has user presets (chain
+ * components; not Master FX), a "My Presets" entry: an option per preset. */
+function withUserPresets(meta, slot, moduleId) {
+    if (isMasterFxSlot(slot)) return meta;
+    const presets = listUserPresets(moduleId);
+    if (presets.length === 0) return meta;
+    const up = { key: USER_PRESET_KEY, name: "My Presets", type: "enum", user_preset: true,
+                 options: presets.map(p => p.name), files: presets };
+    const byKey = new Map(meta.byKey);
+    byKey.set(USER_PRESET_KEY, up);
+    return { list: [up].concat(meta.list), byKey };
+}
+
+/* A user preset's state as the string to write to "<comp>:state", or null. */
+function readUserPresetState(moduleId, name) {
+    const p = listUserPresets(moduleId).find(x => x.name === name);
+    if (!p) return null;
+    let obj = null;
+    try { obj = JSON.parse(host_read_file(USER_PRESET_ROOT + "/" + moduleId + "/" + p.file)); } catch (e) { return null; }
+    if (!obj || (obj.module && obj.module !== moduleId) || obj.state === undefined) return null;
+    return typeof obj.state === "string" ? obj.state : JSON.stringify(obj.state);
+}
+
+/* What a mapped parameter is set to now, read from the chain; a user preset
+ * has no readable value, so it starts from "none" (see knobStepValue). */
+function readKnobLive(m) {
+    if (m.key === USER_PRESET_KEY) return "";
+    return readCompParam(m.slot, m.comp, m.key);
 }
 
 function knobOptions(meta) {
@@ -879,7 +942,8 @@ function knobStepValue(meta, cur, delta, knob) {
     const options = knobOptions(meta);
     if (options) {
         let idx = options.indexOf(String(cur));
-        const usesIndex = idx < 0;
+        /* A user preset knob with none chosen yet starts before the first. */
+        const usesIndex = idx < 0 && !meta.user_preset;
         if (usesIndex) {
             const n = parseInt(cur, 10);
             idx = Number.isFinite(n) && n >= 0 && n < options.length ? n : 0;
@@ -890,7 +954,7 @@ function knobStepValue(meta, cur, delta, knob) {
         if (steps === 0) return null;
         knobEnumAcc[knob] -= steps * 2;
         const next = Math.max(0, Math.min(options.length - 1, idx + steps));
-        if (next === idx) return null;
+        if (next === idx || next < 0) return null;
         return usesIndex ? String(next) : options[next];
     }
     const num = parseFloat(cur);
@@ -969,6 +1033,14 @@ function resolveKnob(res, moduleCache) {
 }
 
 function queueKnobWrite(i, m, value) {
+    if (m.key === USER_PRESET_KEY) {
+        /* Load the named preset: its whole state to "<comp>:state". */
+        const state = readUserPresetState(m.module, String(value));
+        if (state === null) { logDebug("knobs: user preset \"" + value + "\" not readable for " + m.module); return; }
+        knobWriteQueue.set(i, { slot: knobIpcSlot(m.slot), fullKey: compKey(m.slot, m.comp, "state"),
+            value: state, tries: 0 });
+        return;
+    }
     knobWriteQueue.set(i, { slot: knobIpcSlot(m.slot), fullKey: compKey(m.slot, m.comp, m.key),
         value: String(value), tries: 0 });
 }
@@ -1038,7 +1110,7 @@ function refreshPerfKnobs() {
         const k = resolveKnob(res, modules);
         k.value = null;
         if (k.status === "ok") {
-            const live = readCompParam(res.m.slot, res.m.comp, res.m.key);
+            const live = readKnobLive(res.m);
             k.value = live ? live : knobSavedValue(entry, i, res);
         }
         perfKnobs[i] = k;
@@ -1111,8 +1183,8 @@ function turnPerfKnob(i, delta) {
     const m = k.res.m;
     if (k.value === null) {
         /* Nothing saved yet: start from what the parameter is now. */
-        const cur = readCompParam(m.slot, m.comp, m.key);
-        if (cur === null || cur === "") return;
+        const cur = readKnobLive(m);
+        if (cur === null || (cur === "" && m.key !== USER_PRESET_KEY)) return;
         k.value = cur;
     }
     const next = knobStepValue(k.meta, k.value, delta, i);
@@ -1254,8 +1326,8 @@ function turnEditKnob(i, delta) {
     const m = k.res.m;
     const entry = knobEditEntry();
     let cur = knobSavedValue(entry, i, k.res);
-    if (cur === null) cur = readCompParam(m.slot, m.comp, m.key);
-    if (cur === null || cur === "") return;
+    if (cur === null) cur = readKnobLive(m);
+    if (cur === null || (cur === "" && m.key !== USER_PRESET_KEY)) return;
     const next = knobStepValue(k.meta, cur, delta, i);
     if (next === null) return;
     queueKnobWrite(i, m, next);
@@ -1444,7 +1516,7 @@ function handleKnobPickInput(cc, value) {
             setKnobPickStage(knobPickStage);
         } else if (item.action === "param") {
             const p = item.param;
-            const cur = readCompParam(knobPickSlot, knobPickComp, p.key);
+            const cur = p.key === USER_PRESET_KEY ? "" : readCompParam(knobPickSlot, knobPickComp, p.key);
             const mapping = {
                 slot: knobPickSlot, comp: knobPickComp, key: p.key, module: knobPickModule,
                 moduleName: knobPickModuleName, label: p.name || p.key
