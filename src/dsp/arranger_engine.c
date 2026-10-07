@@ -5106,12 +5106,20 @@ static void rescue_guard_window_events(engine_t *e, uint32_t resume_tick, uint32
 
 static void engine_swap_to_staging(engine_t *e, const timeline_slot_t *src); /* defined below */
 
+/* Whether a published staging build is one not yet used or discarded:
+ * newer than staging_consumed_gen (wrap-safe), not merely different -- a
+ * stale build still finishing after a discard (see song_json) publishes an
+ * OLDER generation, which must not count. */
+static int staging_gen_is_new(const engine_t *e, uint32_t pub) {
+    return (int32_t)(pub - e->staging_consumed_gen) > 0;
+}
+
 static void handle_loop_or_stop(engine_t *e, uint32_t *target) {
     if (*target >= e->live_slot.end_tick + 1 || e->event_cursor >= e->live_slot.event_count) {
         /* A published-but-not-yet-consumed staging build, with actual
          * events, is this block's AUTOSWAP candidate. */
         uint32_t staging_pub = atomic_load_explicit(&e->staging_ch.published_gen, memory_order_acquire);
-        int staging_have_new = (staging_pub != e->staging_consumed_gen);
+        int staging_have_new = staging_gen_is_new(e, staging_pub);
         /* memory_order_acquire (not relaxed) is required here: this load is
          * what establishes happens-before with the worker's release store to
          * .active in process_timeline_channel, so that staged->event_count
@@ -5570,7 +5578,7 @@ static void engine_clear_error(engine_t *e) {
 
 /* DSP build version stamp. Keep in sync with UI_BUILD_VERSION in ui.js so the
  * running dsp.so can be confirmed from .dsp_log on module load. */
-static const char *const DSP_BUILD_VERSION = "arranger-dsp-2026-10-06-countinchord";
+static const char *const DSP_BUILD_VERSION = "arranger-dsp-2026-10-07-stagingclear";
 
 static void* arr_create_instance(const char *module_dir, const char *config_json) {
     (void)module_dir;
@@ -5990,6 +5998,13 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
             atomic_store_explicit(&e->primary_ch.request_active, next, memory_order_release);
         }
         atomic_fetch_add_explicit(&e->primary_ch.request_gen, 1, memory_order_release);
+        /* A new song replaces whatever was queued to follow the old one:
+         * discard every staging request made so far, built or still
+         * building. Found live: Perform staged the next song during a
+         * count-in, was stopped, and Song Builder's song then auto-swapped
+         * into that leftover at its end instead of stopping. Perform and Jam
+         * stage their next song AFTER loading this one, so theirs survive. */
+        e->staging_consumed_gen = atomic_load_explicit(&e->staging_ch.request_gen, memory_order_acquire);
         sem_post(&e->worker_wake);
         return;
     }
@@ -6017,7 +6032,7 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
          * regression tripwire for exactly the race that skipping that
          * confirmation would reintroduce. */
         uint32_t pub = atomic_load_explicit(&e->staging_ch.published_gen, memory_order_acquire);
-        if (pub == e->staging_consumed_gen) {
+        if (!staging_gen_is_new(e, pub)) {
             atomic_fetch_add_explicit(&e->staging_swap_rejected, 1, memory_order_relaxed);
             dsp_log_enqueue_worker("swap: no staging ready");
             return;
