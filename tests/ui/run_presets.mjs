@@ -47,6 +47,13 @@ click();                     /* My Presets */
 let sl = saved();
 check(sl.knobs && sl.knobs[0] && sl.knobs[0].key === "__user_preset" && sl.knobs[0].module === "dexed" &&
       sl.knobs[0].value === undefined, "knob 1 mapped to My Presets, nothing chosen yet: " + JSON.stringify(sl.knobs && sl.knobs[0]));
+/* Shift+jog moves knob 1's assignment to knob 2, and back again. */
+cc(49, 127); jog(1); cc(49, 0); tick(Math.ceil(1700 / 23));
+sl = saved();
+check(!sl.knobs[0] && sl.knobs[1] && sl.knobs[1].key === "__user_preset", "Shift+jog moved it to knob 2: " + JSON.stringify(sl.knobs));
+cc(49, 127); jog(-1); cc(49, 0); tick(Math.ceil(1700 / 23));
+sl = saved();
+check(sl.knobs[0] && sl.knobs[0].key === "__user_preset" && !sl.knobs[1], "and back to knob 1: " + JSON.stringify(sl.knobs));
 back(); back(); back();      /* Setlist Edit, Bank, Root */
 
 /* Perform: nothing chosen, so nothing is loaded. A turn (two detents per

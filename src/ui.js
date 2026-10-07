@@ -8,7 +8,7 @@
  * confirmed from the logs (see init()/playCurrentSong()) instead of guessing
  * whether a new file actually loaded. Keep the DSP dsp_build_version in
  * arranger_engine.c in sync so both sides are verifiable. */
-const UI_BUILD_VERSION = "arranger-ui-2026-10-07-headerfit";
+const UI_BUILD_VERSION = "arranger-ui-2026-10-07-knobmove";
 
 /* Lit white buttons at full brightness (127). Schwung's WhiteLedBright is 124. */
 const WhiteLedFull = 127;
@@ -1351,9 +1351,44 @@ function clearKnobMapping(i) {
     refreshKnobEdit();
 }
 
+/* Shift+jog on the Knobs screen: move the selected knob's assignment to the
+ * next/previous knob (swapping with what is there). At setlist scope every
+ * song's saved value for those knobs moves with it (knob_values follow their
+ * mapping; a song's own overrides belong to the knob position and stay). At
+ * song scope that song's overrides and values swap. */
+function moveKnobMapping(delta) {
+    if (!currentSetlist || !delta) return;
+    const i = knobEditFocus;
+    const j = Math.max(0, Math.min(KNOB_COUNT - 1, i + Math.sign(delta)));
+    if (j === i) return;
+    const swap = (arr) => {
+        if (!Array.isArray(arr)) return;
+        const a = arr[i] === undefined ? null : arr[i], b = arr[j] === undefined ? null : arr[j];
+        arr[i] = b;
+        arr[j] = a;
+    };
+    if (knobEditScope === "song") {
+        const entry = knobEditEntry();
+        if (!entry) return;
+        if (!Array.isArray(entry.knobs)) entry.knobs = [];
+        swap(entry.knobs);
+        swap(entry.knob_values);
+    } else {
+        if (!Array.isArray(currentSetlist.knobs)) currentSetlist.knobs = [];
+        swap(currentSetlist.knobs);
+        for (const entry of currentSetlist.songs || []) swap(entry && entry.knob_values);
+    }
+    knobEditFocus = j;
+    perfKnobsKey = "";               /* Performance re-reads it */
+    markKnobSave();
+    refreshKnobEdit();
+    needsRedraw = true;
+}
+
 function handleKnobMapInput(cc, value) {
     if (cc === MoveMainKnob) {
         const delta = decodeDelta(value);
+        if (shiftHeld) { moveKnobMapping(delta); return; }
         const n = Math.max(0, Math.min(KNOB_COUNT - 1, knobEditFocus + delta));
         if (n !== knobEditFocus) { knobEditFocus = n; needsRedraw = true; }
     } else if (cc >= 71 && cc <= 78) {
@@ -5067,6 +5102,8 @@ function updateButtonLEDs() {
                 active.set(MoveBack, WhiteLedFull);
                 active.set(MoveMainButton, WhiteLedFull);
                 if (knobEditMapping(knobEditFocus) || knobEditScope === "song") active.set(MoveDelete, WhiteLedFull);
+                /* Shift+jog moves the selected knob's assignment. */
+                active.set(MoveShift, shiftHeld ? WhiteLedFull : WhiteLedDim);
                 break;
             case VIEW_SETLIST_BANK:
                 active.set(MoveBack, WhiteLedFull);
@@ -14045,8 +14082,10 @@ function footerHints() {
             return [["JOG", "SEL"], ["CLK", "LOAD"], ["BACK", "OUT"]];
         case VIEW_FOLDER_LIST: case VIEW_SETLIST_EDIT: case VIEW_SETLIST_PICK:
         case VIEW_SECTION_PICK: case VIEW_PERF_SETLIST: case VIEW_JAM_FOLDER:
-        case VIEW_KNOB_MAP: case VIEW_KNOB_PICK:
+        case VIEW_KNOB_PICK:
             return HINTS_LIST;
+        case VIEW_KNOB_MAP:
+            return shiftHeld ? [["JOG", "MOVE"], ["BACK", "OUT"]] : HINTS_LIST;
         case VIEW_OPTIONS: return editMenuHints(optionsEditing);
         case VIEW_OPTIONS_DRUMS: case VIEW_OPTIONS_INST: case VIEW_OPTIONS_CLICK:
         case VIEW_OPTIONS_CHAINS:
