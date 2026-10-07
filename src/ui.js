@@ -8,7 +8,7 @@
  * confirmed from the logs (see init()/playCurrentSong()) instead of guessing
  * whether a new file actually loaded. Keep the DSP dsp_build_version in
  * arranger_engine.c in sync so both sides are verifiable. */
-const UI_BUILD_VERSION = "arranger-ui-2026-10-07-playfromview";
+const UI_BUILD_VERSION = "arranger-ui-2026-10-07-headerfit";
 
 /* Lit white buttons at full brightness (127). Schwung's WhiteLedBright is 124. */
 const WhiteLedFull = 127;
@@ -6712,6 +6712,25 @@ function scrollHeader(title, maxChars) {
     return sc.getScrolledText(title, maxChars);
 }
 
+/* A header title scrolled to what actually fits beside `right`, measured in
+ * the header's own font (uppercase font4x5, 128px less 2px margins and a 4px
+ * gap before the right text) -- a fixed character count cut titles well
+ * short in this proportional font. Every window the scroller can show must
+ * fit, so the budget is the longest length whose widest window fits. */
+function fitHeader(title, right) {
+    if (!title) return "";
+    const avail = 124 - (right ? fontWidth4x5(String(right).toUpperCase()) + 4 : 0);
+    const T = String(title).toUpperCase();
+    if (fontWidth4x5(T) <= avail) return scrollHeader(title, title.length);
+    let n = 1;
+    for (let len = T.length - 1; len >= 1; len--) {
+        let fits = true;
+        for (let i = 0; i + len <= T.length && fits; i++) fits = fontWidth4x5(T.slice(i, i + len)) <= avail;
+        if (fits) { n = len; break; }
+    }
+    return scrollHeader(title, n);
+}
+
 function drawRoot() {
     drawMenuHeader("Arranger", "v0.5");
     drawMenuList({
@@ -6789,8 +6808,8 @@ function drawBuilder() {
     /* The clip pads are waiting on the folder scan (a song opened before
      * the library has loaded): "..." until they arrive. */
     const clipsLoading = !!pendingFolderClipLoadName;
-    drawMenuHeader(scrollHeader("Drums: " + (currentSong ? shortSongName(currentSong.name) : ""), (songIsLocked() || clipsLoading) ? 27 : 28),
-        clipsLoading ? "..." : (songIsLocked() ? "*" : ""));
+    const drumsRight = clipsLoading ? "..." : (songIsLocked() ? "*" : "");
+    drawMenuHeader(fitHeader("Drums: " + (currentSong ? shortSongName(currentSong.name) : ""), drumsRight), drumsRight);
     if (!sec) {
         print(2, LIST_TOP_Y, "No section.", 1);
         drawOverlay();
@@ -6916,7 +6935,7 @@ function drawChordTrack() {
     const secIndex = builderPlayingFromTemp ? viewSectionIndex() : chordDisplaySectionIndex();
     const sec = viewSong() ? viewSong().sections[secIndex] : null;
     const key = currentSong ? (currentSong.key || DEFAULT_KEY) : DEFAULT_KEY;
-    drawMenuHeader(scrollHeader("Chords: " + (currentSong ? shortSongName(currentSong.name) : ""), 24), key);
+    drawMenuHeader(fitHeader("Chords: " + (currentSong ? shortSongName(currentSong.name) : ""), key), key);
     if (!sec) {
         print(2, LIST_TOP_Y, "No section.", 1);
         drawOverlay();
@@ -7601,7 +7620,7 @@ function drawItemTrack() {
     let right;
     if (track === TRACK_CLICK) right = clickOn ? "ON" : "OFF";
     else { const inst = instrumentForTrack(track); right = inst && inst.enabled ? "ON" : "OFF"; }
-    drawMenuHeader(scrollHeader(itemTrackName(track) + ": " + (currentSong ? shortSongName(currentSong.name) : ""), 22), right);
+    drawMenuHeader(fitHeader(itemTrackName(track) + ": " + (currentSong ? shortSongName(currentSong.name) : ""), right), right);
     if (!sec) {
         print(2, LIST_TOP_Y, "No section.", 1);
         drawOverlay();
