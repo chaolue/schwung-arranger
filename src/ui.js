@@ -8,7 +8,7 @@
  * confirmed from the logs (see init()/playCurrentSong()) instead of guessing
  * whether a new file actually loaded. Keep the DSP dsp_build_version in
  * arranger_engine.c in sync so both sides are verifiable. */
-const UI_BUILD_VERSION = "arranger-ui-2026-10-07-userpresets";
+const UI_BUILD_VERSION = "arranger-ui-2026-10-07-playfromview";
 
 /* Lit white buttons at full brightness (127). Schwung's WhiteLedBright is 124. */
 const WhiteLedFull = 127;
@@ -5674,7 +5674,7 @@ function drawBuilderStepLEDs(force) {
      * stable section/bar metadata. */
     const stepSong = (currentView === VIEW_PERFORMANCE)
         ? (perfFullSong || currentSong || getPerfDisplaySong())
-        : currentSong;
+        : viewSong();
 
     let secIndex = currentSectionIndex;
     if (currentView === VIEW_PERFORMANCE) {
@@ -5702,9 +5702,8 @@ function drawBuilderStepLEDs(force) {
             secIndex = -1;
         }
     } else if (builderPlayingFromTemp) {
-        /* currentSong (== stepSong here) is a song sliced to start at
-         * currentSectionIndex -- see builderPlayingFromTemp's declaration. */
-        secIndex = 0;
+        /* stepSong is the real song (see viewSong), not the sliced copy. */
+        secIndex = viewSectionIndex();
     } else {
         secIndex = playbackState === "playing"
             ? (builderDisplaySection >= 0 ? builderDisplaySection : playbackSectionIndex)
@@ -6519,8 +6518,9 @@ function updateLEDs() {
  * instrument. The cursor bar isn't highlighted white here — colour alone
  * conveys state, since white is reserved for the chord track's selection. */
 function drawChordStepLEDs(force) {
-    const secIndex = chordDisplaySectionIndex();
-    const sec = currentSong ? currentSong.sections[secIndex] : null;
+    /* The real song/section while a play-from build is pending (viewSong). */
+    const secIndex = builderPlayingFromTemp ? viewSectionIndex() : chordDisplaySectionIndex();
+    const sec = viewSong() ? viewSong().sections[secIndex] : null;
     if (!sec) {
         for (let s = 0; s < NUM_STEPS; s++) stepColor(s, Black, force);
         return;
@@ -6783,8 +6783,9 @@ function drawBuilder() {
      * see the flag's declaration. This duplicates builderDisplaySectionIndex()
      * rather than calling it because playingIdx (the auto-follow/manual-jump
      * value once actually playing) is only needed here. */
-    const displayIdx = builderPlayingFromTemp ? 0 : (playbackState === "playing" ? playingIdx : currentSectionIndex);
-    const sec = currentSong ? currentSong.sections[displayIdx] : null;
+    const displayIdx = builderPlayingFromTemp ? viewSectionIndex() : (playbackState === "playing" ? playingIdx : currentSectionIndex);
+    const vSong = viewSong();
+    const sec = vSong ? vSong.sections[displayIdx] : null;
     /* The clip pads are waiting on the folder scan (a song opened before
      * the library has loaded): "..." until they arrive. */
     const clipsLoading = !!pendingFolderClipLoadName;
@@ -6911,8 +6912,9 @@ function syncChordCursorBar(sec) {
  * then the section's chords in order, each with where it starts (it holds
  * until the next), then "+ Add". */
 function drawChordTrack() {
-    const secIndex = chordDisplaySectionIndex();
-    const sec = currentSong ? currentSong.sections[secIndex] : null;
+    /* The real song/section while a play-from build is pending (viewSong). */
+    const secIndex = builderPlayingFromTemp ? viewSectionIndex() : chordDisplaySectionIndex();
+    const sec = viewSong() ? viewSong().sections[secIndex] : null;
     const key = currentSong ? (currentSong.key || DEFAULT_KEY) : DEFAULT_KEY;
     drawMenuHeader(scrollHeader("Chords: " + (currentSong ? shortSongName(currentSong.name) : ""), 24), key);
     if (!sec) {
@@ -7592,7 +7594,9 @@ function syncItemCursorBar(list) {
 }
 
 function drawItemTrack() {
-    const { secIndex, sec } = itemTrackSection();
+    const { secIndex, sec } = builderPlayingFromTemp
+        ? { secIndex: viewSectionIndex(), sec: viewSong() ? viewSong().sections[viewSectionIndex()] : null }
+        : itemTrackSection();
     const track = builderTrack;
     let right;
     if (track === TRACK_CLICK) right = clickOn ? "ON" : "OFF";
@@ -12175,6 +12179,20 @@ function insertClipAtCursor(clip) {
  * builderPlayingFromTemp is set, currentSong is a song sliced to start at
  * currentSectionIndex, so the section being played is always its own
  * section 0 -- see builderPlayingFromTemp's declaration. */
+/* What Song Builder's screens and step LEDs DRAW: while a play-from build
+ * is pending (builderPlayingFromTemp), currentSong is a copy sliced to
+ * start at the played section -- and, playing from a clip, that section
+ * keeps only the clips from it on -- so drawing it showed the section
+ * without its earlier clips until playback confirmed. Draw the real song
+ * and section instead; edits keep using currentSong. */
+function viewSong() {
+    return builderPlayingFromTemp ? (tempSongOrigin.get(currentSong) || currentSong) : currentSong;
+}
+function viewSectionIndex() {
+    if (builderPlayingFromTemp) return tempSongOrigin.get(currentSong) ? currentSectionIndex : 0;
+    return builderDisplaySectionIndex();
+}
+
 function builderDisplaySectionIndex() {
     if (builderPlayingFromTemp) return 0;
     return playbackState === "playing"
