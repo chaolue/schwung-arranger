@@ -85,6 +85,14 @@ clips from the "Song 13 4-4 120 BPM" folder of Groove Monkee's GM Rock 2 pack,
 which is not in the repo — point `ARRANGER_TEST_LIBRARY` at a library holding
 it, or they are reported as skipped.
 
+## Upgrading from 0.5
+
+Songs open as before. Their per-bar instrument mutes and settings are turned
+into instrument items that play the same way, and saved that way. Songs saved
+by 0.6 store chord lists, items and click volumes that **0.5 does not
+understand** — if you go back to 0.5, restore a backup made before upgrading
+(Song Settings > Restore Backup). See [CHANGELOG.md](./CHANGELOG.md).
+
 ## Installation
 
 Install via the Schwung module store, or manually copy the built module:
