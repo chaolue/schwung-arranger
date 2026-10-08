@@ -19,6 +19,11 @@ for (const f of ["clear_screen", "fill_rect", "draw_rect", "set_pixel", "draw_li
 /* An in-memory file system: setlists and songs the tests write, everything
  * else absent (ui.js treats a missing config as defaults). */
 export const files = new Map();
+/* Schwung's chain slot count, as shadow_get_slots() reports it (one entry
+ * per slot): 8 with the aux slots, 4 on releases up to 1.7.3. */
+let slotCount = 8;
+export function setSlotCount(n) { slotCount = n; }
+g.shadow_get_slots = () => Array.from({ length: slotCount }, (_, i) => ({ channel: i + 1, name: "" }));
 g.host_read_file = (path) => files.has(path) ? files.get(path) : null;
 g.host_write_file = (path, text) => { files.set(path, String(text)); return true; };
 g.host_file_exists = (path) => files.has(path);
@@ -72,7 +77,7 @@ function install() {
     if (!corunApiPresent) { for (const n of names) delete g[n]; return; }
     g.shadow_corun_begin_cede = (t, id, cede, flags) => {
         log.push(["begin_cede", t, id, cede, flags]);
-        if (t !== 1 || id < 0 || id > 7) return;   /* SHADOW_UI_SLOTS = 8 */
+        if (t !== 1 || id < 0 || id >= slotCount) return;   /* SHADOW_UI_SLOTS */
         corun.flags = 1 | (flags & 2);
         corun.keep = (~cede) & GRP_ALL;
         corun.id = id; corun.target = 1;

@@ -427,7 +427,25 @@ const BACK_SUSPEND_HOLD_MS = 500;
  * action that fires on press (a Perform/Jam mute) cannot be taken back once a
  * hold turns out to be a hold. With Shift held they act on press as before
  * (Shift+Track 3/4 opens the Jam instrument menu). */
-const CHAIN_SLOT_COUNT = 8;          /* Schwung's chain slots: two per Move track */
+const MAX_CHAIN_SLOTS = 8;           /* the most chain slots Schwung has: two per Move track */
+let chainSlotCountCache = 0;
+
+/* How many chain slots this Schwung has: 4 on releases up to 1.7.3, 8 once it
+ * has the four aux slots. Read from shadow_get_slots() (one entry per slot),
+ * cached once answered; 4 until then. Chains 5-8 are only offered where they
+ * exist -- on a 4-slot Schwung a Track tap under a chain view keeps the old
+ * single chain, and the chain lists stop at Chain 4. */
+function chainSlotCount() {
+    if (chainSlotCountCache) return chainSlotCountCache;
+    let n = 0;
+    try {
+        const slots = typeof shadow_get_slots === "function" ? shadow_get_slots() : null;
+        if (Array.isArray(slots)) n = slots.length;
+    } catch (e) { n = 0; }
+    if (n <= 0) return 4;
+    chainSlotCountCache = Math.max(1, Math.min(MAX_CHAIN_SLOTS, n));
+    return chainSlotCountCache;
+}
 const TRACK_CHAIN_COUNT = 4;         /* chains a Track hold opens (the first of each pair) */
 const LONG_PRESS_HOLD_MS = 500;      /* = Back-hold, and Schwung's own Track hold */
 const CHAIN_NOTICE_MS = 3000;
@@ -636,7 +654,7 @@ function reconcileChainView() {
         endChainView();
         return false;
     }
-    if (st.id >= 0 && st.id < CHAIN_SLOT_COUNT) chainViewSlot = st.id;
+    if (st.id >= 0 && st.id < chainSlotCount()) chainViewSlot = st.id;
     if (chainViewMfxPending) {
         chainViewMfxPending = false;
         let opened = false;
@@ -715,7 +733,7 @@ function chainViewTrackTap(cc) {
     if (base < 0 || base >= TRACK_CHAIN_COUNT) return false;
     const alt = base + TRACK_CHAIN_COUNT;
     let target = base;
-    if (chainViewSlot === base && alt < CHAIN_SLOT_COUNT) target = alt;
+    if (chainViewSlot === base && alt < chainSlotCount()) target = alt;
     openChainView(target);
     return true;
 }
@@ -1414,7 +1432,7 @@ function knobPickChainItems() {
     } else {
         items.push({ label: "None", action: "clear" });
     }
-    for (let slot = 0; slot < CHAIN_SLOT_COUNT; slot++) {
+    for (let slot = 0; slot < chainSlotCount(); slot++) {
         const mod = readCompModule(slot, "synth");
         const value = mod === null ? "?" : (mod === "" ? "Empty" : (readChainSlotParam(slot, "synth:name") || mod));
         items.push({ label: "Chain " + (slot + 1), value, action: "chain", slot });
@@ -1760,7 +1778,7 @@ let optionsInstIndex = 1;
  * receive channel and synth, not Arranger, so these are only the last read,
  * refreshed when the screen opens, the chain changes or a chain view closes.
  * null = the read did not complete (never shown as a value). */
-let optionsChainIndex = 0;          /* 0..CHAIN_SLOT_COUNT-1 */
+let optionsChainIndex = 0;          /* 0..chainSlotCount()-1 */
 let chainInfoChannel = null;        /* 0 = All, 1-16 */
 let chainInfoSynth = null;          /* display name; "" = no synth loaded */
 let swapGuardFraction = 0.25;  /* guard window (fraction of a beat) at mid-clip swap boundaries */
@@ -10442,7 +10460,7 @@ function handleOptionsChainsInput(cc, value) {
         if (optionsSubEditing) {
             if (optionsSubFocus === 0) {
                 /* Page to another chain and read it. */
-                const newIdx = Math.max(0, Math.min(CHAIN_SLOT_COUNT - 1, optionsChainIndex + delta));
+                const newIdx = Math.max(0, Math.min(chainSlotCount() - 1, optionsChainIndex + delta));
                 if (newIdx !== optionsChainIndex) {
                     optionsChainIndex = newIdx;
                     const frame = menuStack.current();
