@@ -15,6 +15,8 @@
 - Click track (Track 4): the click's volume per section; Options > Click >
   Volume sets where each section starts.
 - Merge a section with the next (Mute) or split it at a clip (Shift + Mute).
+- Play and Shift + Play work on every Song Builder settings page (chord, item,
+  instrument, trim, song settings), saving the page's edit first.
 - Headers fit the song name by measured width; list names keep a gap before
   their value.
 

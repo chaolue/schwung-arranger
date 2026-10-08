@@ -184,6 +184,11 @@ Edit one chord, opened with the jog click on it in the Chord Track.
 | Advanced | **On** also offers half-beat starts (the "and" of each beat); turning it off moves the chord to the nearest free whole beat |
 | Delete Chord | Remove the chord |
 
+**Play** works here (and on every Song Builder settings page — Item Settings,
+Instrument Settings, Trim Clip, Song Settings) as it does in Song Builder:
+Play / Shift + Play start playback after saving what the page is editing, and
+stop it while playing; the page stays open.
+
 A bar can hold several chords, each on its own beat. A chord you open but don't
 change is kept exactly as it was, even one whose root is outside the key.
 
