@@ -5578,7 +5578,7 @@ static void engine_clear_error(engine_t *e) {
 
 /* DSP build version stamp. Keep in sync with UI_BUILD_VERSION in ui.js so the
  * running dsp.so can be confirmed from .dsp_log on module load. */
-static const char *const DSP_BUILD_VERSION = "arranger-dsp-2026-10-07-stagingclear";
+static const char *const DSP_BUILD_VERSION = "arranger-dsp-0.6.0";
 
 static void* arr_create_instance(const char *module_dir, const char *config_json) {
     (void)module_dir;
