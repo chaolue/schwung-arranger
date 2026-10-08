@@ -1739,6 +1739,11 @@ let chordPickFocus = 0;       /* row index into chordPickItems() */
  * new one) and its original object, its beat, Advanced (half-beat starts),
  * and whether its chord fields were edited (see pickResult). chordPickBar
  * is its (possibly moved) bar. */
+/* The song and section the chord page edits, fixed when it opens: Play from
+ * the page swaps currentSong for a play-from copy until playback confirms,
+ * and a save in that window must still land in the real song. */
+let chordPickSong = null;
+let chordPickSecIdx = -1;
 let chordPickOrig = null;
 let chordPickOrigBar = -1;
 let chordPickOrigIdx = -1;
@@ -5100,6 +5105,10 @@ function updateButtonLEDs() {
                 active.set(MoveRow4, clickOn ? CLICK_ROW_COLOUR : Black);
                 break;
         }
+        /* Song Builder's settings pages: Play works there as in Song Builder. */
+        if (currentSong && SONG_BUILDER_SUBVIEWS.has(currentView)) {
+            active.set(MovePlay, playbackState === "playing" ? PureGreen : White);
+        }
     }
 
     for (const cc of ALL_BUTTON_CCS) {
@@ -7188,9 +7197,12 @@ function insertChordEvent(sec, bar, chord) {
 /* Open the settings page for chord `idx` of `bar` (the list's selection), or
  * for a new chord at bar/beat when `isNew`. */
 function openChordPick(barIndex, idx, isNew, newBeat) {
-    const secIndex = chordDisplaySectionIndex();
-    const sec = currentSong ? currentSong.sections[secIndex] : null;
+    const secIndex = builderPlayingFromTemp ? viewSectionIndex() : chordDisplaySectionIndex();
+    const song = viewSong();
+    const sec = song ? song.sections[secIndex] : null;
     if (!sec) return;
+    chordPickSong = song;
+    chordPickSecIdx = secIndex;
     chordPickBar = barIndex;
     if (isNew) {
         chordPickOrig = null;
@@ -7219,11 +7231,15 @@ function openChordPick(barIndex, idx, isNew, newBeat) {
     needsRedraw = true;
 }
 
+/* The section the chord page edits (see chordPickSong). */
+function chordPickSection() {
+    return chordPickSong ? chordPickSong.sections[chordPickSecIdx] || null : null;
+}
+
 /* Save the page's chord: take the original out, put the result in at its
  * (possibly new) position, and select it in the list. */
 function commitChordPick() {
-    const secIndex = chordDisplaySectionIndex();
-    const sec = currentSong ? currentSong.sections[secIndex] : null;
+    const sec = chordPickSection();
     if (!sec || !chordPickHasChord) return;
     if (chordPickOrigBar >= 0) removeChordEvent(sec, chordPickOrigBar, chordPickOrigIdx);
     const chord = pickResult();
@@ -7282,8 +7298,7 @@ function drawChordPick() {
 function handleChordPickInput(cc, value) {
     const items = chordPickItems();
     const item = items[Math.max(0, Math.min(items.length - 1, chordPickFocus))];
-    const secIndex = chordDisplaySectionIndex();
-    const sec = currentSong ? currentSong.sections[secIndex] : null;
+    const sec = chordPickSection();
     if (cc === MoveMainKnob) {
         const delta = decodeDelta(value);
         if (chordPickEditing && sec) {
@@ -7474,6 +7489,7 @@ let itemListCursor = 0;
  * item being edited (null for a new one) and a working copy of it. */
 let itemEditTrack = -1;
 let itemEditSec = -1;
+let itemEditSong = null;          /* the song it edits -- see chordPickSong */
 let itemEditOrig = null;
 let itemWork = null;
 let itemFocus = 0;
@@ -7706,7 +7722,8 @@ function itemListSelectBar(bar) {
 
 function openItemEdit(track, secIndex, item, fresh) {
     itemEditTrack = track;
-    itemEditSec = secIndex;
+    itemEditSong = viewSong();
+    itemEditSec = builderPlayingFromTemp ? viewSectionIndex() : secIndex;
     itemEditOrig = item;
     itemWork = Object.assign({}, item || fresh || {});
     itemFocus = 0;
@@ -7717,7 +7734,7 @@ function openItemEdit(track, secIndex, item, fresh) {
 }
 
 function itemEditList() {
-    const sec = currentSong ? currentSong.sections[itemEditSec] : null;
+    const sec = itemEditSong ? itemEditSong.sections[itemEditSec] : null;
     return sec ? sectionItems(sec, itemEditTrack) : [];
 }
 
@@ -7803,7 +7820,7 @@ function handleInstrumentBarMenuInput(cc, value) {
     const row = rows[Math.max(0, Math.min(rows.length - 1, itemFocus))];
     const w = itemWork;
     const list = itemEditList();
-    const sec = currentSong ? currentSong.sections[itemEditSec] : null;
+    const sec = itemEditSong ? itemEditSong.sections[itemEditSec] : null;
     if (cc === MoveMainKnob) {
         const delta = decodeDelta(value);
         if (itemEditing && sec) {
@@ -9753,29 +9770,7 @@ function handleBuilderInput(cc, value) {
         currentView = VIEW_SONG_BANK;
         needsRedraw = true;
     } else if (cc === MovePlay && value > 0) {
-        if (playbackState === "playing") {
-            stopPlayback();
-        } else if (shiftHeld) {
-            /* Shift + Play starts playback from the beginning of the song,
-             * playing through to the end without looping. */
-            saveCurrentSong();
-            const savedLoop = dspLoopEnabled;
-            dspLoopEnabled = false;
-            /* Restore inside onConfirmed, not synchronously after this call
-             * returns -- playCurrentSong is async (the build/play happen on
-             * the DSP worker thread and land later, once
-             * primary_published_gen confirms); the actual
-             * set("loop", dspLoopEnabled ? "1" : "0") read of this flag
-             * happens inside that deferred callback, not before
-             * playCurrentSong() returns. Restoring synchronously here (the
-             * old code) put the flag back to its previous value (loop
-             * enabled, by default) before that read ever happened, so the
-             * "no looping" request was silently dropped and the song looped
-             * anyway. */
-            playCurrentSong(false, function () { dspLoopEnabled = savedLoop; });
-        } else {
-            previewClipAtCursor();
-        }
+        builderPlayPress();
     } else if (cc === MoveCopy && value > 0) {
         if (locked) return; /* cannot duplicate in a locked song */
         if (shiftHeld) {
@@ -9858,6 +9853,66 @@ function handleBuilderInput(cc, value) {
             folderPickerSelectedIndex = 0;
         }
         needsRedraw = true;
+    }
+}
+
+/* Play in Song Builder: stop while playing; Shift + Play plays the song from
+ * the start; Play plays from the clip at the cursor. */
+function builderPlayPress() {
+    if (playbackState === "playing") {
+        stopPlayback();
+    } else if (shiftHeld) {
+        /* Shift + Play starts playback from the beginning of the song,
+         * playing through to the end without looping. */
+        saveCurrentSong();
+        const savedLoop = dspLoopEnabled;
+        dspLoopEnabled = false;
+        /* Restore inside onConfirmed, not synchronously after this call
+         * returns -- playCurrentSong is async (the build/play happen on
+         * the DSP worker thread and land later, once
+         * primary_published_gen confirms); the actual
+         * set("loop", dspLoopEnabled ? "1" : "0") read of this flag
+         * happens inside that deferred callback, not before
+         * playCurrentSong() returns. Restoring synchronously here (the
+         * old code) put the flag back to its previous value (loop
+         * enabled, by default) before that read ever happened, so the
+         * "no looping" request was silently dropped and the song looped
+         * anyway. */
+        playCurrentSong(false, function () { dspLoopEnabled = savedLoop; });
+    } else {
+        previewClipAtCursor();
+    }
+}
+
+/* Song Builder's settings pages, where Play works as in Song Builder. */
+const SONG_BUILDER_SUBVIEWS = new Set([VIEW_CHORD_PICK, VIEW_INSTRUMENT_BAR, VIEW_INSTRUMENT,
+    VIEW_TRIM, VIEW_SONG_SETTINGS, VIEW_SONG_BACKUPS]);
+
+/* Before Play starts from a settings page, save what the page is editing --
+ * without leaving it -- so you hear it. The chord and item pages then carry
+ * on editing the saved chord/item. */
+function applyOpenEditForPlay() {
+    if (currentView === VIEW_CHORD_PICK) {
+        const sec = chordPickSection();
+        if (!sec) return;
+        commitChordPick();
+        const list = barChords(sec, chordPickBar);
+        const i = list.findIndex(c => chordBeat(c) === chordPickBeat);
+        if (i >= 0) {
+            chordPickOrig = list[i];
+            chordPickOrigBar = chordPickBar;
+            chordPickOrigIdx = i;
+            chordPickDirty = false;
+        }
+    } else if (currentView === VIEW_INSTRUMENT_BAR) {
+        commitItemEdit();
+        const list = itemEditList();
+        if (list[itemListCursor]) {
+            itemEditOrig = list[itemListCursor];
+            itemWork = Object.assign({}, itemEditOrig);
+        }
+    } else if (currentView === VIEW_TRIM) {
+        commitTrim();
     }
 }
 
@@ -14413,6 +14468,13 @@ function routeCcInput(rawData, cc, value) {
     }
     if (confirmState) {
         handleConfirmInput(cc, value);
+        return;
+    }
+    if (cc === MovePlay && value > 0 && currentSong && SONG_BUILDER_SUBVIEWS.has(currentView)) {
+        /* Play anywhere in Song Builder, its settings pages included. */
+        if (playbackState !== "playing") applyOpenEditForPlay();
+        builderPlayPress();
+        needsRedraw = true;
         return;
     }
     switch (currentView) {
