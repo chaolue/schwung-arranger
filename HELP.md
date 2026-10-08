@@ -19,7 +19,7 @@ Button LED legend:
 | Track 1–4 (hold ≥0.5s) | Open Schwung's editor for Chain 1–4 **alongside** the Arranger, which keeps playing — see **Schwung Chains** below |
 | Menu (hold ≥0.5s) | Open Schwung's Master FX alongside the Arranger |
 
-A quick tap of a Track button or Menu still does what that screen says it does, but it acts when you **let go** rather than when you press, so that a hold can be told apart from a tap. With Shift held they act on press, as before.
+A quick tap of a Track button or Menu still does what that screen says it does, but it acts when you **let go** rather than when you press, so that a hold can be told apart from a tap. With Shift held they act on press, as before. While a chain is open, a Track tap switches chain instead (see **Schwung Chains**).
 
 ---
 
@@ -71,22 +71,25 @@ Choose the MIDI folder a new song is built from, or change the current song's so
 
 ### Edit Song
 
-Build and arrange a song from Groove/Fill clips. A song has four tracks — Drum,
-Chord, and two Instrument tracks — selected with the **Track** buttons above
-the pads:
+Build and arrange a song from Groove/Fill clips. A song has five tracks — Drum,
+Chord, two Instrument tracks and the Click track — selected with the **Track**
+buttons above the pads:
 
 | Track button | Track | LED colour |
 |---------------|-------|------------|
 | Track 1 | Drum, or Chord — press again to switch between them | White (Drum) / Azure Blue (Chord) |
 | Track 2 | Instrument 1 | Bright Yellow |
 | Track 3 | Instrument 2 | Purple |
-| Track 4 | Click on/off (not a track to edit — see **Options: Click**) | Bright Orange while on |
+| Track 4 | Click track — press again to turn the click on/off | Bright Orange (dim while the click is off) |
 
-The lit Track button shows which track is showing. See **Chord Track** and
-**Instrument Track** below for the other three — this section covers the Drum
-track, which is the only one with clip editing (pads, Delete, Copy, Record,
-Loop). Section navigation (Left/Right), Song Settings/Instrument Settings
-(Menu), and playback (Play, Back) work the same on every track.
+The lit Track button shows which track is showing. Every track is edited the
+same way: the display lists the current section's items — clips on the Drum
+track; chords, instrument changes or click volumes on the others — and the jog
+wheel, jog click, Shift + jog, Delete and Copy act on the selected one. This
+section covers the Drum track; see **Chord Track**, **Instrument Track** and
+**Click Track** below for the others. Section navigation (Left/Right), merging
+and splitting sections (Mute), Song Settings/Instrument Settings (Menu), and
+playback (Play, Back) work the same on every track.
 
 | Control | Action |
 |---------|--------|
@@ -105,12 +108,22 @@ Loop). Section navigation (Left/Right), Song Settings/Instrument Settings
 | Copy | Duplicate the clip at the cursor |
 | Shift + Copy | Duplicate the current section |
 | Shift + Loop | Add a new empty section after the current one |
+| Mute | Merge the current section with the next one (lit when there is a next section) |
+| Shift + Mute | Split the current section at the clip under the cursor — that clip and the ones after it become a new section (from the 2nd clip; Drum track) |
 | Up / Down | Change the clip page |
 | Left / Right | Move to the previous / next section |
 | Shift + Left / Right | Move the current section backward / forward in the song order |
 | Back | Save the song and return to Song Bank |
 | Hold a pad | Preview the clip (release to insert a short tap) |
 | Tap a pad | Insert the clip at the current cursor position |
+
+**Merging and splitting** need the song stopped. A merge keeps the second
+section's chords, instrument items and click volumes, moved after the first
+section's; where the second section started fresh (no chord carried in,
+instrument defaults, the default click volume) the join gets a No Chord /
+defaults item / default volume, so the result sounds the same. A split starts
+the new section with whatever was in effect at the split point. The new section
+is named like a duplicate (Verse → Verse 2).
 
 Playback keeps running while you browse: moving the cursor with the jog wheel, changing the palette page (Up/Down), or moving sections (Left/Right) does not stop playback. While playing, the display and step LEDs follow the section you navigate to, then resume following the playhead on the next section change.
 
@@ -120,44 +133,59 @@ Playback keeps running while you browse: moving the cursor with the jog wheel, c
 
 ### Chord Track
 
-Set the harmony for the song, bar by bar. Chords apply across every section using
-the song's key (set in Song Settings) and drive any Instrument track set to
-**Chord** voicing.
+Set the harmony for each section. Press **Track 1** on the Drum track to show
+it. Chords use the song's key (set in Song Settings) and drive the Instrument
+tracks. Each chord starts at a bar and beat and holds until the next one; a
+section starts with no chord (nothing carries over from the section before).
+
+The display lists the section, then its chords in order with where each starts
+(`b3` = bar 3, `b3.2` = bar 3 beat 2, `b3.2&` = halfway through beat 2), then
+**+ Add**.
 
 | Control | Action |
 |---------|--------|
-| Step buttons | Open the Chord Picker for that bar (scrolled the same way as the Drum track's steps) |
+| Jog wheel | Select the section row, a chord, or **+ Add** |
+| Jog click (on a chord) | Open Chord Settings for it |
+| Jog click (on + Add) | Add a chord after the last one — on the next bar, or, when no bar is left, halfway through what remains of the last chord's bar (beat 1 → 3 → 4 in 4/4) — and open it |
+| Jog click (on the section row) | Rename the section |
+| Shift + Jog wheel | Move the selected chord a beat (half a beat in Advanced) — past other chords, across bars, stopping at the section's ends |
+| Delete | Delete the selected chord |
+| Copy | Duplicate the selected chord after the section's last chord |
+| Step buttons | Select that bar's first chord (the selected chord's bar is white) |
 | Left / Right | Move to the previous / next section |
+| Mute / Shift + Mute | Merge / split sections (see Edit Song) |
 | Menu | Open Song Settings |
 | Play / Back | Same as the Drum track |
 
-The display shows the section, the chord currently sounding, the next chord
-change and its bar, and the current bar position.
-
-**Button LED hints:** Track 1 is lit azure blue.
+**Button LED hints:** Track 1 is lit azure blue. Copy and Delete are lit when a
+chord is selected.
 
 ---
 
-### Chord Picker
+### Chord Settings
 
-Set the chord for the bar opened from the Chord Track. New bars default to the
-diatonic chord for their position in the key.
+Edit one chord, opened with the jog click on it in the Chord Track.
 
 | Control | Action |
 |---------|--------|
-| Jog wheel (browse mode) | Move between Root, Type, Bass (or the single Add Chord row if this bar has no chord yet) |
+| Jog wheel (browse mode) | Move between the fields |
 | Jog wheel (edit mode) | Adjust the selected field |
-| Jog click | Toggle edit / browse mode for the selected field |
-| Jog click (on Add/Delete Chord) | Add a chord to this bar, or delete the existing one |
-| Step buttons | Commit this bar and open the picker for the newly pressed bar |
+| Jog click | Toggle edit / browse mode; on Advanced it toggles On/Off; on Delete Chord it deletes the chord |
 | Back (edit mode) | Exit edit mode |
-| Back (browse mode) | Commit the chord (if one was actually added) and return to the Chord Track |
+| Back (browse mode) | Save the chord and return to the Chord Track |
 
 | Field | Meaning |
 |-------|---------|
-| Root | Scale degree within the song's key (I, ii, iii, IV, V, vi, vii°) |
+| Root | Scale degree within the song's key (I, ii, iii, IV, V, vi, vii°), or **No Chord** — a silent bar: the chord before stops there, and empty bars after it stay silent until the next chord |
 | Type | Chord quality (major, minor, 7th, etc.) |
-| Bass | Optional slash-chord bass note, or **—** for none |
+| Bass | Optional slash-chord bass note, or **—** for none. The choices start at the song key's tonic |
+| Bar | The bar the chord starts in (only bars with a free beat) |
+| Beat | The beat it starts on, from the bar's free beats |
+| Advanced | **On** also offers half-beat starts (the "and" of each beat); turning it off moves the chord to the nearest free whole beat |
+| Delete Chord | Remove the chord |
+
+A bar can hold several chords, each on its own beat. A chord you open but don't
+change is kept exactly as it was, even one whose root is outside the key.
 
 **Button LED hints:** Back and Main are lit.
 
@@ -166,21 +194,49 @@ diatonic chord for their position in the key.
 ### Instrument Track
 
 Play a synth/bass part alongside the drums, following the Chord Track's harmony.
-There are two independent instrument tracks (Instrument 1 and 2).
+There are two independent instrument tracks — press **Track 2** for Instrument 1
+and **Track 3** for Instrument 2. Each plays with its track settings (Menu) by
+default; an **item** changes them from a bar and beat until the section's next
+item — mute it, change its octave, follow note, voicing, inversion or note gap.
+Each section starts on the track settings.
+
+The display lists the section, then its items in order with where each starts,
+then **+ Add**. Controls are the same as the Chord Track's (jog, jog click,
+Shift + jog, Delete, Copy, step buttons, Mute, Left/Right), plus:
 
 | Control | Action |
 |---------|--------|
-| Step buttons | Toggle this instrument on/off for that bar |
-| Left / Right | Move to the previous / next section |
+| Jog click (on an item) | Open Item Settings for it |
+| Jog click (on + Add) | Add an item after the last one and open it |
 | Menu | Open Instrument Settings for this track |
-| Play / Back | Same as the Drum track |
 
-The display shows the section, the chord currently sounding, whether this bar
-sends or mutes the instrument, the song key, and the instrument's MIDI output
-channel (set in Options).
+| Item field | Meaning |
+|------------|---------|
+| Bar / Beat / Advanced | Where the item starts, as for chords |
+| Sound | **Play**, or **Mute** from here (a mute mid-bar cuts the note there) |
+| Octave, Follow Note, Voicing, Inversion, Note Gap | **Default (x)** uses the track setting (shown); or a value of its own — see Instrument Settings |
+| Delete | Remove the item |
+
+Songs made before items existed are converted when opened: their per-bar mutes
+and per-bar settings become items that play the same way.
 
 **Button LED hints:** Track 2 (Instrument 1) is lit bright yellow; Track 3
-(Instrument 2) is lit purple.
+(Instrument 2) is lit purple. A bar the instrument plays is in the track colour,
+a muted bar dimmed, and the selected item's bar white.
+
+---
+
+### Click Track
+
+Set how loud the click is through the song. Press **Track 4** to show it, and
+again to turn the click on or off. Each section starts at the click volume set
+in **Options: Click**; a **click item** changes it from a bar and beat until the
+section's next item — louder in a chorus, **0%** for silence. Controls are the
+same as the Chord Track's; an item's fields are Bar, Beat, Advanced, **Volume**
+(0–100%) and Delete.
+
+**Button LED hints:** Track 4 is bright orange while it shows (dim while the
+click is off). Bars where an item starts are in orange.
 
 ---
 
@@ -411,9 +467,11 @@ The Track buttons are live mutes, not saved to the song. Each song starts with i
 ### Performance Knobs
 
 Each of Move's 8 knobs can control one parameter of a Schwung chain while you
-perform — the synth, a MIDI FX or an audio FX of any of the 4 chains, or an
-effect in Schwung's Master FX — using the parameters (and ranges) the module
-itself publishes.
+perform — the synth, a MIDI FX or an audio FX of any chain, or an effect in
+Schwung's Master FX — using the parameters (and ranges) the module itself
+publishes. A chain component whose module has **user presets** (Schwung's My
+Presets) also offers **My Presets**: the knob steps through them by name and
+loads each one.
 
 - **Per setlist, with song overrides.** Map the knobs in Setlist Edit >
   (knobs). A song can replace any knob with its own parameter, or turn it
@@ -424,7 +482,7 @@ itself publishes.
   knob in Perform saves the new value for the **current song** only. The
   setlist's own value is the starting point for songs that have none yet —
   set it by turning the knob on the setlist's Knobs screen.
-- **Rows and the knob display say where a knob points:** C1–C4 for a chain,
+- **Rows and the knob display say where a knob points:** C1–C8 for a chain,
   MFX for Master FX. Turning or touching a knob in Perform shows the chain or
   Master FX, the component and its module on one line, and the parameter and
   value on the next.
@@ -440,7 +498,8 @@ itself publishes.
 | Control (Knobs screen) | Action |
 |------------------------|--------|
 | Jog wheel / touch a knob | Select a knob row |
-| Jog click | Choose what the knob controls: Chain 1–4 or Master FX, then component, then parameter (or None / Use Setlist / Off) |
+| Jog click | Choose what the knob controls: a chain or Master FX, then component, then parameter (or None / Use Setlist / Off) |
+| Shift + Jog wheel | Move the selected knob's mapping to the next / previous knob (swapping with what is there) |
 | Turn a knob | Set the value it restores, live |
 | Delete | Clear the mapping (on a song: back to the setlist's) |
 | Back | Return |
@@ -594,7 +653,7 @@ routing — opened as a sub-screen from here.
 | Inst 1 | Instrument 1's output + MIDI channel (opens a sub-screen — see below) |
 | Inst 2 | Instrument 2's output + MIDI channel (opens a sub-screen — see below) |
 | Click | The click track's output, MIDI channel and notes (opens a sub-screen — see below) |
-| Chains | Schwung's 4 chains: each one's MIDI channel, and a way into its editor (opens a sub-screen — see below) |
+| Chains | Schwung's chains (4, or 8 with the aux slots): each one's MIDI channel, and a way into its editor (opens a sub-screen — see below) |
 | Swap Guard | Mid-clip swap guard window (0–100%). Removed at the outgoing side of a clip boundary to avoid overlaps; on the incoming side (e.g. a fill swapping back into a partially-played groove), any note that fell inside this window is replayed right at the resume point instead of being lost |
 | Schwung Clock | **On** (default): while the Arranger plays, it sends MIDI clock to Schwung at the song's tempo, so clock-synced Schwung modules and effects (synced LFOs, tempo delays, arpeggiators) follow the song and start on its first beat. Move's own clock takes over whenever Move's sequencer is playing. Move's own tempo is not changed |
 | DSP Debug | Toggles the DSP debug log (`.dsp_log`) on/off |
@@ -631,13 +690,14 @@ Output routing for one track, opened from the Options list.
 The click track: a metronome that plays a note on every beat while the
 Arranger plays — the accent note on beat 1 of each bar, the normal note on the
 others (the time signature's beat, so eighths in 6/8). Turn it on or off with
-**Track 4** in Song Builder, Perform and Jam. It also plays each Perform song's
+**Track 4** in Perform and Jam, and with a second press of Track 4 in Song
+Builder (where the first shows the Click track). It also plays each Perform song's
 count-in, when that song's **Sound** is on (see **Setlist Song Settings**), and
 it stays quiet during a count-in so the two don't double up.
 
 | Control | Action |
 |---------|--------|
-| Jog wheel (browse mode) | Move between Output, MIDI Channel, Accent Note, Normal Note |
+| Jog wheel (browse mode) | Move between Output, MIDI Channel, Accent Note, Normal Note, Volume |
 | Jog wheel (edit mode) | Change the selected value |
 | Jog click | Toggle edit / browse mode |
 | Back (edit mode) | Exit edit mode |
@@ -649,6 +709,7 @@ it stays quiet during a count-in so the two don't double up.
 | MIDI Channel | MIDI channel (1–16) for the click. Default **10** |
 | Accent Note | Note for beat 1 of each bar. Default **76** (GM Hi Wood Block) |
 | Normal Note | Note for the other beats. Default **77** (GM Low Wood Block) |
+| Volume | How loud the click is (0–100%, scaling its velocity), where a song's Click track doesn't say otherwise; every song section starts here. Always used for count-ins. Default **100%** |
 
 **Button LED hints:** Back and Main are lit.
 
@@ -656,7 +717,8 @@ it stays quiet during a count-in so the two don't double up.
 
 ### Options: Chains
 
-One of Schwung's 4 chains, as the Arranger sees it. A track whose Output is
+One of Schwung's chains (4, or 8 on a Schwung with the aux slots), as the
+Arranger sees it. A track whose Output is
 **Schwung** plays every chain listening on its MIDI channel, so this is where
 you match the two up without leaving the module. The channel is the chain's own
 setting — the same one as Schwung's Slot Settings and Schwung Manager — so a
@@ -665,7 +727,7 @@ change here shows up there too, and is saved with the set.
 | Control | Action |
 |---------|--------|
 | Jog wheel (browse mode) | Move between Chain, MIDI Channel, Edit Chain |
-| Jog wheel (edit mode, Chain) | Show chain 1–4 |
+| Jog wheel (edit mode, Chain) | Show another chain |
 | Jog wheel (edit mode, MIDI Channel) | Change that chain's MIDI channel (All, 1–16) |
 | Jog click (on Edit Chain) | Open that chain's editor alongside the Arranger — the same as holding its Track button |
 | Jog click (other fields) | Toggle edit / browse mode |
@@ -674,7 +736,7 @@ change here shows up there too, and is saved with the set.
 
 | Field | Meaning |
 |-------|---------|
-| Chain | Which chain is shown (1–4, the same numbers as Schwung's own) |
+| Chain | Which chain is shown (the same numbers as Schwung's own) |
 | MIDI Channel | The channel the chain listens on. **All** listens on every channel |
 | Edit Chain | The synth loaded in the chain, or **Empty** |
 
@@ -694,7 +756,7 @@ shape a synth while it plays the part.
 | What stays with the Arranger | What the editor gets |
 |------------------------------|----------------------|
 | Pads, step buttons, Play, Record, Loop | The screen |
-| Track buttons (tap: the screen's own action, e.g. Perform/Jam mutes) | Jog wheel and jog click |
+| Track buttons (hold: open / close a chain; tap: switch chain) | Jog wheel and jog click |
 | Shift, Menu, arrows, Copy/Delete/Undo | The 8 knobs and their touch |
 | Playback | Back |
 
@@ -703,7 +765,8 @@ shape a synth while it plays the part.
 | Jog / knobs / jog click | Navigate and edit in Schwung's editor |
 | Back | Step back inside the editor; from its top level, return to the Arranger. From Master FX's top level, return to the Arranger |
 | Menu (tap) | Return to the Arranger |
-| Track 1–4 (hold) | Switch to that chain; hold the open chain's Track again to return to the Arranger |
+| Track 1–4 (tap) | Switch to that Track's chain; tap it again for its second chain (Track 1: Chain 1 ↔ 5 … Track 4: Chain 4 ↔ 8). Only on a Schwung with 8 chain slots |
+| Track 1–4 (hold) | Switch to that chain; hold the open chain's Track (either of its pair) again to return to the Arranger |
 | Menu (hold) | Switch to Master FX; hold again to return to the Arranger |
 
 Shift + Track and Shift + Menu do nothing while a chain is open, so they cannot

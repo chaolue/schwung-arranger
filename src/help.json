@@ -34,11 +34,17 @@
             "Chord (press again).",
             "Track 2: Inst 1",
             "Track 3: Inst 2",
-            "Track 4: click",
-            "on/off.",
+            "Track 4: Click;",
+            "again: click on/off.",
             "",
-            "Only Drum has full",
-            "clip editing."
+            "Every track lists",
+            "the section's items:",
+            "clips, chords, inst",
+            "changes or click",
+            "volumes. Jog, click,",
+            "Shift+Jog, Delete",
+            "and Copy act on the",
+            "selected one."
           ]
         },
         {
@@ -46,42 +52,77 @@
           "lines": [
             "Jog: move cursor",
             "Click: open Trim",
+            "Shift+Jog: move clip",
             "Tap pad: insert",
             "Hold pad: preview",
             "Delete: remove clip",
             "Copy: duplicate",
             "Left/Right: section",
-            "Menu: song settings"
+            "Menu: song settings",
+            "",
+            "Mute: merge with the",
+            "next section.",
+            "Shift+Mute: split",
+            "at the cursor clip.",
+            "(Stopped only.)"
           ]
         },
         {
           "title": "Chords",
           "lines": [
-            "Step button opens",
-            "chord picker for",
-            "that bar.",
+            "Track 1 again shows",
+            "the Chord track: the",
+            "section's chords,",
+            "each from a bar and",
+            "beat (b3.2) until",
+            "the next one.",
             "",
-            "Set root, type, and",
-            "bass note.",
+            "Click a chord: Root,",
+            "Type, Bass, Bar,",
+            "Beat, Advanced",
+            "(half beats).",
             "",
-            "Drives Instrument",
-            "tracks set to Chord."
+            "+ Add: a chord after",
+            "the last one.",
+            "Shift+Jog: move it.",
+            "",
+            "Root No Chord: a",
+            "silent bar until the",
+            "next chord."
           ]
         },
         {
           "title": "Instruments",
           "lines": [
             "Menu: Instrument",
-            "Settings.",
+            "Settings (defaults).",
             "",
             "Chord or Bass voice.",
             "Octave shift.",
-            "",
             "Follow Note: fires",
             "on a drum hit.",
-            "",
             "Note Gap: cuts note",
-            "before the next."
+            "before the next.",
+            "",
+            "Items change them",
+            "from a bar/beat:",
+            "Mute, Octave,",
+            "Follow, Voicing...",
+            "Each section starts",
+            "on the defaults."
+          ]
+        },
+        {
+          "title": "Click Track",
+          "lines": [
+            "Track 4 shows it.",
+            "Items set the click",
+            "volume from a bar/",
+            "beat; 0% = silent.",
+            "",
+            "Each section starts",
+            "at Options > Click",
+            "> Volume."
           ]
         },
         {
@@ -159,7 +200,15 @@
         "",
         "Warns if the loaded",
         "Move Set is not the",
-        "setlist's."
+        "setlist's.",
+        "",
+        "My Presets: steps",
+        "through a module's",
+        "user presets.",
+        "",
+        "Shift+Jog on the",
+        "Knobs screen: move",
+        "a knob's mapping."
       ]
     },
     {
@@ -230,6 +279,7 @@
         "its chain; tap it",
         "again for chain 5-8",
         "(Track 1: 1 <-> 5).",
+        "(Needs 8 slots.)",
         "Hold Menu: Master FX",
         "",
         "Pads, steps and Play",
@@ -268,9 +318,9 @@
         "keep time.",
         "",
         "Click: metronome",
-        "output, channel and",
-        "accent/normal notes.",
-        "Track 4 turns it on."
+        "output, channel,",
+        "accent/normal notes",
+        "and Volume."
       ]
     }
   ]
