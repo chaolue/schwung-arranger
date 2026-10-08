@@ -7163,7 +7163,9 @@ function chordPosFree(sec, bar, beat, ignoreBar, ignoreIdx) {
  * minus those other chords use. */
 function freeBeatsInBar(sec, bar, adv, ignoreBar, ignoreIdx) {
     const out = [];
-    for (let b = 1; b <= beatsPerBar(); b += adv ? 0.5 : 1) {
+    /* Whole beats, or with Advanced every half -- up to the "and" of the
+     * last beat (4& in 4/4). */
+    for (let b = 1; b < beatsPerBar() + 1; b += adv ? 0.5 : 1) {
         if (chordPosFree(sec, bar, b, ignoreBar, ignoreIdx)) out.push(b);
     }
     return out;
@@ -7505,7 +7507,9 @@ function itemPosFree(list, bar, beat, ignore) {
 
 function freeItemBeats(list, bar, adv, ignore) {
     const out = [];
-    for (let b = 1; b <= beatsPerBar(); b += adv ? 0.5 : 1) {
+    /* Whole beats, or with Advanced every half -- up to the "and" of the
+     * last beat (4& in 4/4). */
+    for (let b = 1; b < beatsPerBar() + 1; b += adv ? 0.5 : 1) {
         if (itemPosFree(list, bar, b, ignore)) out.push(b);
     }
     return out;
