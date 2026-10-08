@@ -539,7 +539,6 @@ function chainViewNotice(line) {
     logDebug("chain view: " + line);
 }
 
-
 /* A session began: nothing Arranger was in the middle of may finish under the
  * editor, out of sight. */
 function startChainView() {
@@ -2390,18 +2389,6 @@ function logClick(msg) {
     appendLogLine(CLICK_LOG_PATH, 20000, new Date().toISOString() + " " + msg + "\n");
 }
 
-function listFolders(path) {
-    const folders = [];
-    if (!host_file_exists(path)) return folders;
-    try {
-        const raw = host_read_file(path + "/.folder_index");
-        if (raw) return JSON.parse(raw);
-    } catch (e) {}
-    /* Fallback: we cannot list directories from JS directly in all hosts.
-     * The DSP plugin will provide a folder list via get_param. */
-    return folders;
-}
-
 function inferTempoFromFolder(name) {
     /* A number followed by "BPM" (e.g. "120 BPM", "85BPM") is the tempo.
      * Accept 2-3 digits so two-digit tempos like "85BPM" are not missed. */
@@ -2605,32 +2592,6 @@ function diatonicChord(key, degree) {
     return { root: NOTE_NAMES[rootPc], quality: DIATONIC_QUALITY[d] };
 }
 
-/* The MIDI note number for a note name at a given octave (C4 = 60). */
-function noteNameToMidi(name, octave) {
-    const pc = noteSemitone(name);
-    if (pc < 0) return 60;
-    return (octave + 1) * 12 + pc;
-}
-
-/* The MIDI note number for a chord's root (or its bass note when a slash
- * chord like C/G is set), at the given octave. */
-function chordBassMidi(chord, octave) {
-    if (!chord) return 60;
-    const bass = chord.bass || chord.root;
-    return noteNameToMidi(bass, octave);
-}
-
-/* The MIDI note numbers for a chord's full voicing (root position) at the
- * given octave. */
-function chordVoicingMidi(chord, octave) {
-    if (!chord) return [60];
-    const rootPc = noteSemitone(chord.root);
-    if (rootPc < 0) return [60];
-    const intervals = CHORD_INTERVALS[chord.quality] || CHORD_INTERVALS["maj"];
-    const base = (octave + 1) * 12;
-    return intervals.map(iv => base + rootPc + iv);
-}
-
 /* Render a chord object as a display string, e.g. "C", "Dm", "C/G", "Dm7". */
 export function chordLabel(chord) {
     if (!chord) return "";
@@ -2752,12 +2713,6 @@ export function migrateInstrumentItems(song) {
     return changed;
 }
 
-/* The first chord of a bar (whatever starts it), or null. */
-function chordAtBar(sec, barIndex) {
-    const list = barChords(sec, barIndex);
-    return list.length ? list[0] : null;
-}
-
 /* Transpose a chord object by a number of semitones (used when the song key
  * changes so existing chords follow the new key). */
 export function transposeChord(chord, semitones) {
@@ -2842,85 +2797,6 @@ export function reindexInstrumentsForSectionSlice(song, startSectionIndex) {
                 .map(ov => Object.assign({}, ov, { section: ov.section - startSectionIndex }));
         }
     }
-}
-
-/* The instrument's per-section per-bar on/off map, sized to the song. */
-function instrumentBars(inst) {
-    if (!inst) return [];
-    if (!inst.bars) inst.bars = [];
-    if (!currentSong) return inst.bars;
-    for (let s = 0; s < currentSong.sections.length; s++) {
-        if (!inst.bars[s]) inst.bars[s] = [];
-    }
-    return inst.bars;
-}
-
-/* Whether the instrument sends a chord on a given section/bar (default on). */
-export function instrumentBarOn(inst, sectionIndex, barIndex) {
-    const bars = instrumentBars(inst);
-    const sec = bars[sectionIndex];
-    if (!sec) return true;
-    return sec[barIndex] !== false;
-}
-
-/* Toggle the instrument's chord on/off for a section/bar. */
-export function toggleInstrumentBar(inst, sectionIndex, barIndex) {
-    const bars = instrumentBars(inst);
-    if (!bars[sectionIndex]) bars[sectionIndex] = [];
-    const cur = bars[sectionIndex][barIndex] !== false;
-    bars[sectionIndex][barIndex] = !cur;
-    unsavedChanges = true;
-}
-
-/* Find the per-bar override entry for a section/bar, or null if that bar has
- * no override (uses track defaults for octave/follow_note/voicing). */
-export function instrumentBarOverride(inst, sectionIndex, barIndex) {
-    if (!inst || !inst.overrides) return null;
-    for (const ov of inst.overrides) {
-        if (ov.section === sectionIndex && ov.bar === barIndex) return ov;
-    }
-    return null;
-}
-
-/* The effective octave/follow_note/voicing for a bar: the override's value
- * where set, else the track default. */
-export function resolvedInstrumentForBar(inst, sectionIndex, barIndex) {
-    const ov = instrumentBarOverride(inst, sectionIndex, barIndex);
-    return {
-        octave: (ov && ov.octave !== null && ov.octave !== undefined) ? ov.octave : inst.octave,
-        follow_note: (ov && ov.follow_note !== null && ov.follow_note !== undefined) ? ov.follow_note : inst.follow_note,
-        voicing: (ov && ov.voicing !== null && ov.voicing !== undefined) ? ov.voicing : inst.voicing,
-        inversion: (ov && ov.inversion !== null && ov.inversion !== undefined) ? ov.inversion : (inst.inversion || 0)
-    };
-}
-
-/* Set (or clear) one field of a bar's override. Materializes an override
- * entry on first real edit (mirrors the Chord Picker's "don't create data
- * just by viewing" convention, commitChordPick above); if clearing a field
- * back to "Default" leaves the entry with nothing set, the entry itself is
- * removed so the array stays sparse. `value` of null/undefined means
- * "Default" (use the track setting) for that field. */
-export function setInstrumentBarOverrideField(inst, sectionIndex, barIndex, field, value) {
-    if (!inst) return;
-    if (!inst.overrides) inst.overrides = [];
-    let ov = instrumentBarOverride(inst, sectionIndex, barIndex);
-    if (value === null || value === undefined) {
-        if (ov) {
-            delete ov[field];
-            const hasAny = ["octave", "follow_note", "voicing", "inversion"].some(f => ov[f] !== null && ov[f] !== undefined);
-            if (!hasAny) {
-                const idx = inst.overrides.indexOf(ov);
-                if (idx >= 0) inst.overrides.splice(idx, 1);
-            }
-        }
-    } else {
-        if (!ov) {
-            ov = { section: sectionIndex, bar: barIndex };
-            inst.overrides.push(ov);
-        }
-        ov[field] = value;
-    }
-    unsavedChanges = true;
 }
 
 /* Display label for a full-chord inversion (0-3: root/1st/2nd/3rd). Only
@@ -3615,7 +3491,6 @@ function toggleClick() {
     needsRedraw = true;
     ledDirtyAll = true;
 }
-
 
 /* Push the full output-routing state to the DSP. In co-run/overtake mode,
  * host_module_set_param is fire-and-forget over a SINGLE shared shadow_param
@@ -6918,8 +6793,6 @@ function drawBuilder() {
     drawOverlay();
 }
 
-
-
 /* ── Chord track display ────────────────────────────────────────────── */
 
 /* The section index the chord track is currently showing (mirrors the drum
@@ -7180,11 +7053,6 @@ function sectionChordEvents(sec) {
         barChords(sec, b).forEach((c, i) => out.push({ bar: b, idx: i, beat: chordBeat(c), chord: c }));
     }
     return out;
-}
-
-/* " @3" for a chord off the bar's first beat (Advanced halves as "2&"). */
-function beatSuffix(ev) {
-    return ev && ev.beat !== 1 ? " @" + formatBeat(ev.beat) : "";
 }
 
 /* Handle a step-button press on the Chord, Inst or Click track. The step
@@ -9550,7 +9418,6 @@ function drawJam() {
         print(2, LIST_TOP_Y + 36, "Key: " + jamKey + "  Chord: " + chordText, 1);
     }
 }
-
 
 /* ── Input handling ─────────────────────────────────────────────────── */
 
@@ -13617,8 +13484,6 @@ function perfTick() {
     }
 }
 
-
-
 function readScanState() {
     if (typeof host_module_get_param !== "function") return null;
     const raw = host_module_get_param("scan_state");
@@ -13954,10 +13819,6 @@ function buildFolderClipMap() {
 }
 
 /* ── Pad helpers (local to avoid deprecated shared exports) ──────────── */
-
-function isPadNote(noteNumber) {
-    return MovePads.includes(noteNumber);
-}
 
 function getPadIndex(noteNumber) {
     return MovePads.indexOf(noteNumber);
