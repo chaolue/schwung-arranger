@@ -774,10 +774,19 @@ function tickLongPressHolds() {
  * chain_params -- a module that publishes none offers no parameters rather
  * than an invented 0..1 knob.
  *
- * Master FX is a fifth target, stored as slot MASTER_FX_TARGET (-1): its
- * positions are addressed on the shim as "master_fx:fx<N>:<key>" at IPC slot
- * 0, with "master_fx:fx<N>:name" serving the module id (NOT the slot chain's
- * "<comp>_module" spelling, which the master bus does not serve).
+ * Master FX and the two send buses (Send A/B) are further targets -- "bus"
+ * targets -- stored as negative slots: MASTER_FX_TARGET (-1), Send A (-2) and
+ * Send B (-3). A bus's positions are addressed on the shim as
+ * "<bus>:fx<N>:<key>" at IPC slot 0 (bus "master_fx", "send1" or "send2"),
+ * with "<bus>:fx<N>:name" serving the module id (NOT the slot chain's
+ * "<comp>_module" spelling, which the buses do not serve). The sends are
+ * offered only when Schwung serves them (see sendBusesAvailable).
+ *
+ * Each chain, and each send, also has "Settings" (SETTINGS_COMP): not a
+ * module but the mixer values Schwung's Slot Settings page turns -- a chain's
+ * volume, pan, mute, solo and send levels, a send's return level. Their keys
+ * are stored whole ("slot:volume", "send1:return") and always present, so a
+ * Settings knob never reads "not loaded".
  *
  * A mapping stores the module id it was made against. Chains belong to the
  * Move Set, so a Set change (or a module swap) can put a different module
@@ -802,7 +811,22 @@ const KNOB_BANK_COLOURS = [120, 11, 21, 25];   /* White, Neon Green, Hot Magenta
 let perfKnobBank = 0;
 let knobEditBank = 0;
 const MASTER_FX_TARGET = -1;         /* mapping.slot for Master FX */
-const MASTER_FX_POSITIONS = 8;
+const SEND_A_TARGET = -2;            /* mapping.slot for Send A; Send B is -3 */
+const SEND_BUS_COUNT = 2;
+const BUS_FX_POSITIONS = 8;          /* Master FX and each send */
+const SETTINGS_COMP = "settings";    /* mapping.comp (and .module) for Settings */
+const OFF_ON = ["Off", "On"];
+/* As Schwung's Slot Settings and Control module declare them. */
+const CHAIN_SETTINGS_PARAMS = [
+    { key: "slot:volume", name: "Volume", type: "float", min: 0, max: 2, step: 0.01 },
+    { key: "slot:pan", name: "Pan", type: "float", min: -1, max: 1, step: 0.02 },
+    { key: "slot:muted", name: "Mute", type: "enum", options: OFF_ON },
+    { key: "slot:soloed", name: "Solo", type: "enum", options: OFF_ON }
+];
+const CHAIN_SEND_PARAMS = [
+    { key: "buses:main_send1", name: "Send A", type: "int", min: 0, max: 127 },
+    { key: "buses:main_send2", name: "Send B", type: "int", min: 0, max: 127 }
+];
 const KNOB_SAVE_DELAY_MS = 1500;     /* batch flash writes while a knob turns */
 const KNOB_SHOW_MS = 1500;           /* feedback after the last turn */
 const KNOB_WRITES_PER_TICK = 4;      /* each is one param round trip (~3 ms) */
@@ -844,14 +868,31 @@ function isMasterFxSlot(slot) {
     return slot === MASTER_FX_TARGET;
 }
 
+/* Send A/B: 0 / 1, else -1. */
+function sendBusIndex(slot) {
+    const i = SEND_A_TARGET - slot;
+    return i >= 0 && i < SEND_BUS_COUNT ? i : -1;
+}
+
+/* Master FX or a send: a bus of FX positions rather than a chain. */
+function isBusSlot(slot) {
+    return isMasterFxSlot(slot) || sendBusIndex(slot) >= 0;
+}
+
+/* The shim's key prefix for a bus: "master_fx" / "send1" / "send2". */
+function busPrefix(slot) {
+    return isMasterFxSlot(slot) ? "master_fx" : "send" + (sendBusIndex(slot) + 1);
+}
+
 /* The shim's IPC slot and key for a component's own key: a chain addresses
- * "<comp>:<key>" at its slot, Master FX "master_fx:<comp>:<key>" at slot 0. */
+ * "<comp>:<key>" at its slot, a bus "<bus>:<comp>:<key>" at slot 0. */
 function knobIpcSlot(slot) {
-    return isMasterFxSlot(slot) ? 0 : slot;
+    return isBusSlot(slot) ? 0 : slot;
 }
 
 function compKey(slot, comp, key) {
-    return (isMasterFxSlot(slot) ? "master_fx:" : "") + comp + ":" + key;
+    if (comp === SETTINGS_COMP) return key;
+    return (isBusSlot(slot) ? busPrefix(slot) + ":" : "") + comp + ":" + key;
 }
 
 function readCompParam(slot, comp, key) {
@@ -862,17 +903,24 @@ function compModuleKey(comp) {
     return comp === "synth" ? "synth_module" : comp + "_module";
 }
 
-/* Where a mapping points, for screens: "Chain 1" / "Master FX". */
+/* Where a mapping points, for screens: "Chain 1" / "Master FX" / "Send A". */
 function knobTargetName(slot) {
-    return isMasterFxSlot(slot) ? "Master FX" : "Chain " + (slot + 1);
+    if (isMasterFxSlot(slot)) return "Master FX";
+    const send = sendBusIndex(slot);
+    if (send >= 0) return "Send " + "AB"[send];
+    return "Chain " + (slot + 1);
 }
 
-/* The short form for list rows: "C1" / "MFX". */
+/* The short form for list rows: "C1" / "MFX" / "SndA". */
 function knobTargetShort(slot) {
-    return isMasterFxSlot(slot) ? "MFX" : "C" + (slot + 1);
+    if (isMasterFxSlot(slot)) return "MFX";
+    const send = sendBusIndex(slot);
+    if (send >= 0) return "Snd" + "AB"[send];
+    return "C" + (slot + 1);
 }
 
 function compLabel(comp) {
+    if (comp === SETTINGS_COMP) return "Settings";
     if (comp === "synth") return "Synth";
     const mfx = /^midi_fx(\d+)$/.exec(comp);
     if (mfx) return "MIDI FX " + mfx[1];
@@ -883,14 +931,34 @@ function compLabel(comp) {
 /* The module in a chain position: a module id, "" for an empty position, or
  * null when the read did not complete (never taken for "empty"). */
 function readCompModule(slot, comp) {
-    if (isMasterFxSlot(slot)) return readCompParam(slot, comp, "name");
+    if (comp === SETTINGS_COMP) return SETTINGS_COMP;
+    if (isBusSlot(slot)) return readCompParam(slot, comp, "name");
     return readChainSlotParam(slot, compModuleKey(comp));
+}
+
+/* A chain's or send's Settings parameters; Master FX has none. */
+function settingsMeta(slot) {
+    let list = [];
+    const send = sendBusIndex(slot);
+    if (send >= 0) {
+        list = [{ key: "send" + (send + 1) + ":return", name: "Return", type: "int", min: 0, max: 127 }];
+    } else if (!isMasterFxSlot(slot)) {
+        list = CHAIN_SETTINGS_PARAMS.concat(sendBusesAvailable() ? CHAIN_SEND_PARAMS : []);
+    }
+    return { list, byKey: new Map(list.map(p => [p.key, p])) };
+}
+
+/* The Settings entry in a chain's or send's component list. */
+function settingsCompItem() {
+    return { label: "Settings", value: "", action: "comp", comp: SETTINGS_COMP,
+             module: SETTINGS_COMP, moduleName: "" };
 }
 
 /* A component's editable parameters from its chain_params, cached per module.
  * null = not available (no answer, or nothing parseable); a failure is not
  * cached, so the next look retries. */
 function readCompMeta(slot, comp, moduleId) {
+    if (comp === SETTINGS_COMP) return settingsMeta(slot);
     const cacheKey = slot + "|" + comp + "|" + moduleId;
     if (knobMetaCache.has(cacheKey)) return withUserPresets(knobMetaCache.get(cacheKey), slot, moduleId);
     const raw = readCompParam(slot, comp, "chain_params");
@@ -937,9 +1005,10 @@ function listUserPresets(moduleId) {
 }
 
 /* The component's parameters plus, when its module has user presets (chain
- * components; not Master FX), a "My Presets" entry: an option per preset. */
+ * components; not Master FX or the sends), a "My Presets" entry: an option
+ * per preset. */
 function withUserPresets(meta, slot, moduleId) {
-    if (isMasterFxSlot(slot)) return meta;
+    if (isBusSlot(slot)) return meta;
     const presets = listUserPresets(moduleId);
     if (presets.length === 0) return meta;
     const up = { key: USER_PRESET_KEY, name: "My Presets", type: "enum", user_preset: true,
@@ -1486,33 +1555,53 @@ function knobPickChainItems() {
         items.push({ label: "Chain " + (slot + 1), value, action: "chain", slot });
     }
     items.push({ label: "Master FX", value: "", action: "chain", slot: MASTER_FX_TARGET });
+    if (sendBusesAvailable()) {
+        for (let i = 0; i < SEND_BUS_COUNT; i++) {
+            const slot = SEND_A_TARGET - i;
+            items.push({ label: knobTargetName(slot), value: "", action: "chain", slot });
+        }
+    }
     return items;
 }
 
-/* Master FX's loaded positions: one read of "master_fx:modules" ([{id, path}]
- * per position), else a ":name" read per position. */
-function masterFxCompItems() {
-    let ids = null;
-    const raw = readChainSlotParam(0, "master_fx:modules");
-    if (raw) {
-        try {
-            const arr = JSON.parse(raw);
-            if (Array.isArray(arr)) ids = arr.map(e => (e && typeof e === "object" && e.id) ? String(e.id) : "");
-        } catch (e) { ids = null; }
-    }
+/* A bus's module ids by position, from one read of "<bus>:modules"
+ * ([{id, path}] per position): null when unserved or unparseable. */
+function readBusModuleIds(slot) {
+    const raw = readChainSlotParam(0, busPrefix(slot) + ":modules");
+    if (!raw) return null;
+    try {
+        const arr = JSON.parse(raw);
+        if (Array.isArray(arr)) return arr.map(e => (e && typeof e === "object" && e.id) ? String(e.id) : "");
+    } catch (e) { /* unparseable */ }
+    return null;
+}
+
+/* Whether this Schwung has the send buses (they are newer than Master FX):
+ * asked once, and only a served module list counts. */
+let sendBusesAvailableCache = null;
+function sendBusesAvailable() {
+    if (sendBusesAvailableCache === null) sendBusesAvailableCache = readBusModuleIds(SEND_A_TARGET) !== null;
+    return sendBusesAvailableCache;
+}
+
+/* A bus's loaded positions (Master FX, Send A/B): the module list, else a
+ * ":name" read per position. */
+function busCompItems(slot) {
+    const ids = readBusModuleIds(slot);
     const items = [];
-    for (let n = 1; n <= MASTER_FX_POSITIONS; n++) {
+    for (let n = 1; n <= BUS_FX_POSITIONS; n++) {
         const comp = "fx" + n;
-        const mod = ids ? (ids[n - 1] || "") : readCompModule(MASTER_FX_TARGET, comp);
+        const mod = ids ? (ids[n - 1] || "") : readCompModule(slot, comp);
         if (!mod) continue;
         items.push({ label: compLabel(comp), value: mod, action: "comp", comp, module: mod, moduleName: mod });
     }
-    if (items.length === 0) items.push({ label: "No Master FX", action: "none" });
+    if (items.length === 0 && isMasterFxSlot(slot)) items.push({ label: "No Master FX", action: "none" });
+    if (!isMasterFxSlot(slot)) items.push(settingsCompItem());
     return items;
 }
 
 function knobPickCompItems(slot) {
-    if (isMasterFxSlot(slot)) return masterFxCompItems();
+    if (isBusSlot(slot)) return busCompItems(slot);
     const items = [];
     const comps = ["synth"];
     const midiCount = parseInt(readChainSlotParam(slot, "midi_fx_count") || "0", 10) || 0;
@@ -1525,7 +1614,7 @@ function knobPickCompItems(slot) {
         const name = readChainSlotParam(slot, comp + ":name") || mod;
         items.push({ label: compLabel(comp), value: name, action: "comp", comp, module: mod, moduleName: name });
     }
-    if (items.length === 0) items.push({ label: "Empty chain", action: "none" });
+    items.push(settingsCompItem());
     return items;
 }
 

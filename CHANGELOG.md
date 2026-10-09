@@ -33,6 +33,8 @@
 - Knob banks: Sample switches between 4 banks of 8 knob mappings in Perform
   (and on the Knobs screen), lit in the bank's colour; the knob lights show
   each knob's value along the bank's colour sweep.
+- Knobs can also map Send A/B's effects and return level, and a chain's
+  Settings: volume, pan, mute, solo and send levels.
 - Under Master FX, a Track tap goes to that Track's chain.
 
 ### Schwung

@@ -440,7 +440,7 @@ Play through a setlist.
 | Track 4 | Turn the click on or off (lit orange while on) |
 | Record | Start or stop recording the Schwung mix to a WAV file (see below) |
 | Knobs 1–8 | Change the Schwung parameter mapped to that knob — see **Performance Knobs** |
-| Touch a knob | Show what it controls (chain or Master FX, component, module) and its value |
+| Touch a knob | Show what it controls (chain, Master FX or send, component, module) and its value |
 | Play | Start playback from the current / selected song or section |
 | Back | Stop and return to Root Menu |
 
@@ -473,8 +473,10 @@ The Track buttons are live mutes, not saved to the song. Each song starts with i
 
 Each of Move's 8 knobs can control one parameter of a Schwung chain while you
 perform — the synth, a MIDI FX or an audio FX of any chain, or an effect in
-Schwung's Master FX — using the parameters (and ranges) the module itself
-publishes. A chain component whose module has **user presets** (Schwung's My
+Schwung's Master FX or Send A/B — using the parameters (and ranges) the module
+itself publishes. Each chain's **Settings** offer its Volume, Pan, Mute, Solo
+and Send A/B levels, and each send's Settings its **Return** level. (Send A/B
+appear only on a Schwung that has the send buses.) A chain component whose module has **user presets** (Schwung's My
 Presets) also offers **My Presets**: the knob steps through them by name and
 loads each one.
 
@@ -494,7 +496,7 @@ loads each one.
   setlist's own value is the starting point for songs that have none yet —
   set it by turning the knob on the setlist's Knobs screen.
 - **Rows and the knob display say where a knob points:** C1–C8 for a chain,
-  MFX for Master FX. Turning or touching a knob in Perform shows the chain or
+  MFX for Master FX, SndA/SndB for the sends. Turning or touching a knob in Perform shows the chain or
   Master FX, the component and its module on one line, and the parameter and
   value on the next.
 - **On a Knobs screen**, turning a knob sets the value restored at that
@@ -509,7 +511,7 @@ loads each one.
 | Control (Knobs screen) | Action |
 |------------------------|--------|
 | Jog wheel / touch a knob | Select a knob row |
-| Jog click | Choose what the knob controls: a chain or Master FX, then component, then parameter (or None / Use Setlist / Off) |
+| Jog click | Choose what the knob controls: a chain, Master FX or Send A/B, then component (or Settings), then parameter (or None / Use Setlist / Off) |
 | Shift + Jog wheel | Move the selected knob's mapping to the next / previous knob (swapping with what is there) |
 | Sample | Show the next bank's knobs (bank 1–4; the header shows which) |
 | Turn a knob | Set the value it restores, live |

@@ -41,8 +41,9 @@ and perform live — all from Move's pads, step buttons and jog wheel.
   second chain (Chain 5–8). Options > Chains sets which MIDI channel each
   chain listens on.
 - **Performance knobs** — map Move's 8 knobs to parameters of any Schwung
-  chain (synth, MIDI FX or audio FX, or a module's user presets) or of Master
-  FX, per setlist with per-song overrides;
+  chain (synth, MIDI FX or audio FX, a module's user presets, or the chain's
+  volume, pan, mute, solo and send levels), of Master FX or of Send A/B (their
+  effects and return level), per setlist with per-song overrides;
   each song restores its own knob values, and the Arranger warns when the
   loaded Move Set is not the one the setlist was used with.
 - **Schwung clock** — while playing, the Arranger sends MIDI clock to

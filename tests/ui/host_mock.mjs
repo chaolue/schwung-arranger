@@ -138,6 +138,19 @@ export const masterFx = {
     fx2: { module: "tapedelay", values: { feedback: "0.40" },
            params: [{ key: "feedback", name: "Feedback", type: "float", min: 0, max: 1, step: 0.01 }] },
 };
+/* Send A/B: positions fx1..fx8 at IPC slot 0, as "send<N>:fx<M>:<key>", and
+ * the bus's "send<N>:return". sendsServed false is a Schwung without sends. */
+export const sends = [
+    { fx: { fx1: { module: "cloudseed", values: { size: "0.70" },
+                   params: [{ key: "size", name: "Size", type: "float", min: 0, max: 1, step: 0.01 }] } },
+      ret: "100" },
+    { fx: {}, ret: "90" },
+];
+export let sendsServed = true;
+export function setSendsServed(v) { sendsServed = v; }
+/* Each chain's Slot Settings values. */
+const SLOT_SETTING_DEFAULTS = { "slot:volume": "1.0000", "slot:pan": "0.0000", "slot:muted": "0",
+                                "slot:soloed": "0", "buses:main_send1": "0", "buses:main_send2": "0" };
 export let masterModulesServed = true;
 export function setMasterModulesServed(v) { masterModulesServed = v; }
 export const moveSet = { uuid: "set-a", name: "Gig Set" };
@@ -153,6 +166,27 @@ g.shadow_get_param = (slot, key) => {
         const arr = [];
         for (let n = 1; n <= 8; n++) { const c = masterFx["fx" + n]; arr.push({ id: c ? c.module : "", path: "" }); }
         return JSON.stringify(arr);
+    }
+    let sm = /^send(\d+):(.+)$/.exec(key);
+    if (sm) {
+        const b = sends[sm[1] - 1];
+        if (!sendsServed || !b) return null;
+        if (sm[2] === "return") return b.ret;
+        if (sm[2] === "modules") {
+            const arr = [];
+            for (let n = 1; n <= 8; n++) { const c = b.fx["fx" + n]; arr.push({ id: c ? c.module : "", path: "" }); }
+            return JSON.stringify(arr);
+        }
+        const fm = /^(fx\d+):(.+)$/.exec(sm[2]);
+        const c = fm ? b.fx[fm[1]] : null;
+        if (!c) return "";
+        if (fm[2] === "name") return c.module;
+        if (fm[2] === "chain_params") return JSON.stringify(c.params);
+        return c.values[fm[2]] !== undefined ? String(c.values[fm[2]]) : "";
+    }
+    if (key in SLOT_SETTING_DEFAULTS) {
+        if (!s.settings) s.settings = Object.assign({}, SLOT_SETTING_DEFAULTS);
+        return s.settings[key];
     }
     let mm = /^master_fx:(fx\d+):(.+)$/.exec(key);
     if (mm) {
@@ -184,6 +218,19 @@ g.shadow_set_param_timeout = (slot, key, val, t) => {
     if (paramFails) return false;
     writes.push([slot, key, String(val)]);
     const s = slots[slot];
+    const sm = /^send(\d+):(?:(fx\d+):)?(.+)$/.exec(key);
+    if (sm) {
+        const b = sends[sm[1] - 1];
+        if (slot !== 0 || !b) return true;
+        if (!sm[2] && sm[3] === "return") b.ret = String(val);
+        else if (sm[2] && b.fx[sm[2]]) b.fx[sm[2]].values[sm[3]] = String(val);
+        return true;
+    }
+    if (key in SLOT_SETTING_DEFAULTS) {
+        if (!s.settings) s.settings = Object.assign({}, SLOT_SETTING_DEFAULTS);
+        s.settings[key] = String(val);
+        return true;
+    }
     const mm = /^master_fx:(fx\d+):(.+)$/.exec(key);
     if (mm) {
         if (slot === 0 && masterFx[mm[1]]) masterFx[mm[1]].values[mm[2]] = String(val);
