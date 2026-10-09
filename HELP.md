@@ -478,6 +478,12 @@ publishes. A chain component whose module has **user presets** (Schwung's My
 Presets) also offers **My Presets**: the knob steps through them by name and
 loads each one.
 
+- **Four banks.** Press **Sample** in Perform to switch the knobs between 4
+  banks of 8 mappings (bank 1 → 2 → 3 → 4 → 1); Sample lights in the bank's
+  colour — white, green, violet, pink. The knob lights show each knob's value
+  along the bank's colour sweep (neutral, rainbow, synthwave, rose — the
+  Control module's), off for an unmapped knob. Every bank's values are restored
+  when a song loads. On a Knobs screen, Sample switches the bank being edited.
 - **Per setlist, with song overrides.** Map the knobs in Setlist Edit >
   (knobs). A song can replace any knob with its own parameter, or turn it
   **Off**, in its Settings > Knobs; the rest follow the setlist. A song's
@@ -505,6 +511,7 @@ loads each one.
 | Jog wheel / touch a knob | Select a knob row |
 | Jog click | Choose what the knob controls: a chain or Master FX, then component, then parameter (or None / Use Setlist / Off) |
 | Shift + Jog wheel | Move the selected knob's mapping to the next / previous knob (swapping with what is there) |
+| Sample | Show the next bank's knobs (bank 1–4; the header shows which) |
 | Turn a knob | Set the value it restores, live |
 | Delete | Clear the mapping (on a song: back to the setlist's) |
 | Back | Return |

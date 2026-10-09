@@ -783,7 +783,24 @@ function tickLongPressHolds() {
  * Move Set, so a Set change (or a module swap) can put a different module
  * there: such a knob reads "not loaded" and writes NOTHING, rather than
  * writing a number meant for another module's parameter. */
-const KNOB_COUNT = 8;
+const KNOB_COUNT = 8;                /* Move's physical knobs */
+/* Knob banks: Sample (Rec) switches which of 4 sets of 8 mappings Move's
+ * knobs drive, in Perform and on the Knobs screen. Bank b's knob k is stored
+ * at index b * KNOB_COUNT + k of setlist.knobs / a song's knobs and
+ * knob_values, so existing setlists (8 entries) are bank 1. Each bank lights
+ * the knobs with its own colour sweep (the Control module's four) showing
+ * each knob's value, and Sample in the bank's colour. */
+const KNOB_BANKS = 4;
+const KNOB_SLOTS = KNOB_COUNT * KNOB_BANKS;
+const KNOB_BANK_SWEEPS = [
+    [0, 117, 124, 119, 123, 118, 121, 122, 120],   /* neutral */
+    [33, 16, 15, 14, 11, 8, 3, 2],                  /* rainbow */
+    [104, 105, 20, 21, 23, 26, 25],                 /* synthwave */
+    [124, 35, 23, 26, 25]                           /* rose */
+];
+const KNOB_BANK_COLOURS = [120, 11, 21, 25];   /* White, Neon Green, Hot Magenta (violet), Bright Pink */
+let perfKnobBank = 0;
+let knobEditBank = 0;
 const MASTER_FX_TARGET = -1;         /* mapping.slot for Master FX */
 const MASTER_FX_POSITIONS = 8;
 const KNOB_SAVE_DELAY_MS = 1500;     /* batch flash writes while a knob turns */
@@ -799,7 +816,7 @@ const KNOB_PARAM_TYPES = new Set(["float", "int", "enum", "bool"]);
  * and its value the preset's name. */
 const USER_PRESET_KEY = "__user_preset";
 const USER_PRESET_ROOT = "/data/UserData/schwung/presets";
-let perfKnobs = new Array(KNOB_COUNT).fill(null);   /* resolved, see resolvePerfKnob */
+let perfKnobs = new Array(KNOB_SLOTS).fill(null);   /* resolved, all banks; see applyPerfKnobs */
 let perfKnobsKey = "";               /* which setlist+song perfKnobs was built for */
 const knobWriteQueue = new Map();    /* knob index -> { slot, fullKey, value, tries } */
 const knobMetaCache = new Map();     /* "slot|comp|module" -> { list, byKey } */
@@ -1110,7 +1127,7 @@ function applyPerfKnobs(force) {
     knobWriteQueue.clear();
     knobEnumAcc.fill(0);
     const modules = new Map();
-    for (let i = 0; i < KNOB_COUNT; i++) {
+    for (let i = 0; i < KNOB_SLOTS; i++) {
         const res = currentSetlist ? knobMappingFor(currentSetlist, entry, i) : null;
         if (!res) { perfKnobs[i] = null; continue; }
         const k = resolveKnob(res, modules);
@@ -1128,7 +1145,7 @@ function refreshPerfKnobs() {
     perfKnobsKey = (currentSetlist ? (currentSetlist.path || currentSetlist.name) : "") + "#" + perfSongIndex;
     knobWriteQueue.clear();
     const modules = new Map();
-    for (let i = 0; i < KNOB_COUNT; i++) {
+    for (let i = 0; i < KNOB_SLOTS; i++) {
         const res = currentSetlist ? knobMappingFor(currentSetlist, entry, i) : null;
         if (!res) { perfKnobs[i] = null; continue; }
         const k = resolveKnob(res, modules);
@@ -1201,7 +1218,8 @@ function showKnob(i) {
 
 /* A knob turned in Performance. */
 function turnPerfKnob(i, delta) {
-    const k = perfKnobs[i];
+    const slot = perfKnobBank * KNOB_COUNT + i;   /* this bank's knob i */
+    const k = perfKnobs[slot];
     showKnob(i);
     if (!k || k.status !== "ok" || !delta) return;
     const m = k.res.m;
@@ -1214,9 +1232,9 @@ function turnPerfKnob(i, delta) {
     const next = knobStepValue(k.meta, k.value, delta, i);
     if (next === null) return;
     k.value = next;
-    queueKnobWrite(i, m, next);
+    queueKnobWrite(slot, m, next);
     const entry = currentSetlist ? currentSetlist.songs[perfSongIndex] : null;
-    storeKnobValue(entry, i, k.res, next);
+    storeKnobValue(entry, slot, k.res, next);
     markKnobSave();
 }
 
@@ -1231,11 +1249,11 @@ function perfKnobFeedbackVisible() {
 function drawPerfKnobFeedback() {
     const i = knobShowIndex;
     if (!perfKnobFeedbackVisible()) return;
-    const k = perfKnobs[i];
+    const k = perfKnobs[perfKnobBank * KNOB_COUNT + i];
     let where;
     let what;
     if (!k) {
-        where = "Knob " + (i + 1);
+        where = "Bank " + (perfKnobBank + 1) + " Knob " + (i + 1);
         what = "Unassigned";
     } else {
         const m = k.res.m;
@@ -1270,6 +1288,11 @@ let knobPickModule = "";
 let knobPickModuleName = "";
 let knobPickItems = [];
 
+/* The storage index of Knobs-screen row `row` in the bank being edited. */
+function knobEditSlot(row) {
+    return knobEditBank * KNOB_COUNT + row;
+}
+
 function knobEditEntry() {
     return knobEditScope === "song" && currentSetlist ? currentSetlist.songs[setlistSongIndex] : null;
 }
@@ -1278,8 +1301,9 @@ function knobEditEntry() {
  * song scope, the setlist's own in setlist scope. */
 function knobEditMapping(i) {
     if (!currentSetlist) return null;
-    if (knobEditScope === "song") return knobMappingFor(currentSetlist, knobEditEntry(), i);
-    const m = Array.isArray(currentSetlist.knobs) ? currentSetlist.knobs[i] : null;
+    const s = knobEditSlot(i);
+    if (knobEditScope === "song") return knobMappingFor(currentSetlist, knobEditEntry(), s);
+    const m = Array.isArray(currentSetlist.knobs) ? currentSetlist.knobs[s] : null;
     return m && typeof m.key === "string" ? { m, source: "setlist" } : null;
 }
 
@@ -1296,6 +1320,7 @@ function openKnobMap(scope, returnView) {
     knobEditScope = scope;
     knobEditReturnView = returnView;
     knobEditFocus = 0;
+    knobEditBank = 0;
     knobEnumAcc.fill(0);
     currentView = VIEW_KNOB_MAP;
     menuStack.push({ title: "Knobs", selectedIndex: 0 });
@@ -1305,7 +1330,7 @@ function openKnobMap(scope, returnView) {
 function knobRowLabel(i) {
     const res = knobEditMapping(i);
     const entry = knobEditEntry();
-    const o = entry && Array.isArray(entry.knobs) ? entry.knobs[i] : null;
+    const o = entry && Array.isArray(entry.knobs) ? entry.knobs[knobEditSlot(i)] : null;
     if (knobEditScope === "song" && o && o.off) return (i + 1) + " Off";
     if (!res) return (i + 1) + " —";
     const name = knobTargetShort(res.m.slot) + " " + res.m.label;
@@ -1317,13 +1342,14 @@ function knobRowValue(i) {
     if (!k) return "";
     if (k.status === "missing") return "not loaded";
     if (k.status === "unknown") return "?";
-    return formatKnobValue(k.meta, knobSavedValue(knobEditEntry(), i, k.res));
+    return formatKnobValue(k.meta, knobSavedValue(knobEditEntry(), knobEditSlot(i), k.res));
 }
 
 function drawKnobMap() {
     const entry = knobEditEntry();
     const title = knobEditScope === "song" && entry ? "Knobs: " + shortSongName(entry.name) : "Knobs: Setlist";
-    drawMenuHeader(scrollHeader(title, 28), "");
+    const bank = "Bank " + (knobEditBank + 1);
+    drawMenuHeader(fitHeader(title, bank), bank);
     const items = [];
     for (let i = 0; i < KNOB_COUNT; i++) items.push({ i });
     drawMenuList({
@@ -1349,20 +1375,22 @@ function turnEditKnob(i, delta) {
     if (!k || k.status !== "ok" || !delta) return;
     const m = k.res.m;
     const entry = knobEditEntry();
-    let cur = knobSavedValue(entry, i, k.res);
+    const slot = knobEditSlot(i);
+    let cur = knobSavedValue(entry, slot, k.res);
     if (cur === null) cur = readKnobLive(m);
     if (cur === null || (cur === "" && m.key !== USER_PRESET_KEY)) return;
     const next = knobStepValue(k.meta, cur, delta, i);
     if (next === null) return;
-    queueKnobWrite(i, m, next);
-    if (knobEditScope === "song") storeKnobValue(entry, i, k.res, next);
+    queueKnobWrite(slot, m, next);
+    if (knobEditScope === "song") storeKnobValue(entry, slot, k.res, next);
     else m.value = next;
     perfKnobsKey = "";               /* Performance re-reads it */
     markKnobSave();
 }
 
-function clearKnobMapping(i) {
+function clearKnobMapping(row) {
     if (!currentSetlist) return;
+    const i = knobEditSlot(row);
     if (knobEditScope === "song") {
         const entry = knobEditEntry();
         if (entry && Array.isArray(entry.knobs)) entry.knobs[i] = null;
@@ -1382,9 +1410,9 @@ function clearKnobMapping(i) {
  * song scope that song's overrides and values swap. */
 function moveKnobMapping(delta) {
     if (!currentSetlist || !delta) return;
-    const i = knobEditFocus;
-    const j = Math.max(0, Math.min(KNOB_COUNT - 1, i + Math.sign(delta)));
-    if (j === i) return;
+    const row = Math.max(0, Math.min(KNOB_COUNT - 1, knobEditFocus + Math.sign(delta)));
+    if (row === knobEditFocus) return;
+    const i = knobEditSlot(knobEditFocus), j = knobEditSlot(row);
     const swap = (arr) => {
         if (!Array.isArray(arr)) return;
         const a = arr[i] === undefined ? null : arr[i], b = arr[j] === undefined ? null : arr[j];
@@ -1402,14 +1430,27 @@ function moveKnobMapping(delta) {
         swap(currentSetlist.knobs);
         for (const entry of currentSetlist.songs || []) swap(entry && entry.knob_values);
     }
-    knobEditFocus = j;
+    knobEditFocus = row;
     perfKnobsKey = "";               /* Performance re-reads it */
     markKnobSave();
     refreshKnobEdit();
     needsRedraw = true;
 }
 
+/* Sample: the next knob bank (Knobs screen or Perform). */
+function nextKnobBank(bank) {
+    showPopup("Knobs", "Bank " + (((bank + 1) % KNOB_BANKS) + 1), 1500);
+    knobEnumAcc.fill(0);
+    needsRedraw = true;
+    return (bank + 1) % KNOB_BANKS;
+}
+
 function handleKnobMapInput(cc, value) {
+    if (cc === MoveRecord && value > 0) {
+        knobEditBank = nextKnobBank(knobEditBank);
+        refreshKnobEdit();
+        return;
+    }
     if (cc === MoveMainKnob) {
         const delta = decodeDelta(value);
         if (shiftHeld) { moveKnobMapping(delta); return; }
@@ -1503,9 +1544,14 @@ function setKnobPickStage(stage) {
     needsRedraw = true;
 }
 
+/* "Knob 3", or "B2 Knob 3" past bank 1. */
+function knobEditName() {
+    return (knobEditBank > 0 ? "B" + (knobEditBank + 1) + " " : "") + "Knob " + (knobEditFocus + 1);
+}
+
 function openKnobPick() {
     currentView = VIEW_KNOB_PICK;
-    menuStack.push({ title: "Knob " + (knobEditFocus + 1), selectedIndex: 0 });
+    menuStack.push({ title: knobEditName(), selectedIndex: 0 });
     setKnobPickStage("chain");
 }
 
@@ -1519,7 +1565,7 @@ function closeKnobPick() {
  * Move Set it was made with is remembered, if the setlist has none yet. */
 function assignKnob(mapping) {
     if (!currentSetlist) return;
-    const i = knobEditFocus;
+    const i = knobEditSlot(knobEditFocus);
     if (knobEditScope === "song") {
         const entry = knobEditEntry();
         if (!entry) return;
@@ -1539,7 +1585,7 @@ function assignKnob(mapping) {
 }
 
 function drawKnobPick() {
-    let title = "Knob " + (knobEditFocus + 1);
+    let title = knobEditName();
     if (knobPickStage !== "chain") title += ": " + knobTargetName(knobPickSlot);
     if (knobPickStage === "param") title += " " + compLabel(knobPickComp);
     drawMenuHeader(scrollHeader(title, 28), "");
@@ -4783,13 +4829,50 @@ const KNOB_LED_CCS = [71, 72, 73, 74, 75, 76, 77, 78];
 const KNOB_LED_REPAINT_TICKS = 3;
 let knobLedRepaintTicks = 0;
 
+/* Where a knob's value sits in its range, 0..1, or null when there is no
+ * value to show. */
+function knobValueLevel(meta, value) {
+    if (!meta || value === null || value === undefined || value === "") return null;
+    const options = knobOptions(meta);
+    if (options) {
+        let idx = options.indexOf(String(value));
+        if (idx < 0) { const n = parseInt(value, 10); idx = Number.isFinite(n) ? n : -1; }
+        if (idx < 0) return null;
+        return options.length > 1 ? Math.max(0, Math.min(1, idx / (options.length - 1))) : 1;
+    }
+    const v = parseFloat(value);
+    if (!Number.isFinite(v)) return null;
+    const min = Number.isFinite(meta.min) ? meta.min : 0;
+    const max = Number.isFinite(meta.max) ? meta.max : (meta.type === "int" ? 127 : 1);
+    return max > min ? Math.max(0, Math.min(1, (v - min) / (max - min))) : 0;
+}
+
+/* A knob light: the bank's colour sweep at the knob's value (its first colour
+ * with none yet); off for an unmapped or unloaded knob. */
+function knobLedColour(bank, k, value) {
+    if (!k || k.status !== "ok") return Black;
+    const sweep = KNOB_BANK_SWEEPS[bank] || KNOB_BANK_SWEEPS[0];
+    const level = knobValueLevel(k.meta, value);
+    return sweep[level === null ? 0 : Math.round(level * (sweep.length - 1))];
+}
+
 function updateKnobLEDs() {
     if (chainViewActive()) return;
     if (knobLedRepaintTicks > 0) {
         knobLedRepaintTicks--;
         for (const cc of KNOB_LED_CCS) lastButtonState.delete(cc);
     }
-    for (const cc of KNOB_LED_CCS) setButtonHint(cc, Black);
+    for (let i = 0; i < KNOB_LED_CCS.length; i++) {
+        let colour = Black;
+        if (currentView === VIEW_PERFORMANCE) {
+            const k = perfKnobs[perfKnobBank * KNOB_COUNT + i];
+            colour = knobLedColour(perfKnobBank, k, k ? k.value : null);
+        } else if (currentView === VIEW_KNOB_MAP) {
+            const k = knobEditKnobs[i];
+            colour = knobLedColour(knobEditBank, k, k ? knobSavedValue(knobEditEntry(), knobEditSlot(i), k.res) : null);
+        }
+        setButtonHint(KNOB_LED_CCS[i], colour);
+    }
 }
 
 const ALL_BUTTON_CCS = [
@@ -5009,6 +5092,7 @@ function updateButtonLEDs() {
                 if (knobEditMapping(knobEditFocus) || knobEditScope === "song") active.set(MoveDelete, WhiteLedFull);
                 /* Shift+jog moves the selected knob's assignment. */
                 active.set(MoveShift, shiftHeld ? WhiteLedFull : WhiteLedDim);
+                active.set(MoveRecord, KNOB_BANK_COLOURS[knobEditBank]);
                 break;
             case VIEW_SETLIST_BANK:
                 active.set(MoveBack, WhiteLedFull);
@@ -5084,6 +5168,8 @@ function updateButtonLEDs() {
                 }
                 active.set(MovePlay, perfPlaying ? PureGreen : White);
                 if (perfRecordingAvailable()) active.set(MoveRec, perfRecording ? PureRed : White);
+                /* Sample (knob banks): the current bank's colour. */
+                active.set(MoveRecord, KNOB_BANK_COLOURS[perfKnobBank]);
                 active.set(MoveRow1, perfDrumEnabled ? TRACK_ROW_COLOUR[TRACK_DRUM] : Black);
                 active.set(MoveRow2, perfInst1Enabled ? TRACK_ROW_COLOUR[TRACK_INSTRUMENT_1] : Black);
                 active.set(MoveRow3, perfInst2Enabled ? TRACK_ROW_COLOUR[TRACK_INSTRUMENT_2] : Black);
@@ -9043,7 +9129,7 @@ function drawSetlistEdit() {
             return item.name || "";
         },
         getValue: (item) => {
-            if (item.type === "knobs") return knobMappedCount(currentSetlist && currentSetlist.knobs) + "/" + KNOB_COUNT;
+            if (item.type === "knobs") return knobMappedCount(currentSetlist && currentSetlist.knobs) + "/" + KNOB_SLOTS;
             return "";
         },
         maxVisible: 5
@@ -10725,6 +10811,9 @@ function handlePerformanceInput(cc, value) {
         needsRedraw = true;
     } else if (cc === MoveRec && value > 0) {
         perfToggleRecording();
+    } else if (cc === MoveRecord && value > 0) {
+        /* Sample: the next bank of knob mappings. */
+        perfKnobBank = nextKnobBank(perfKnobBank);
     } else if (cc === MoveBack && value > 0) {
         perfStopRecording();
         perfStop();

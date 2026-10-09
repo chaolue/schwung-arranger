@@ -30,6 +30,10 @@
   count-in no longer plays after another song.
 - Knobs can step through a module's user presets (My Presets), and Shift + jog
   moves a knob's mapping on the Knobs screen.
+- Knob banks: Sample switches between 4 banks of 8 knob mappings in Perform
+  (and on the Knobs screen), lit in the bank's colour; the knob lights show
+  each knob's value along the bank's colour sweep.
+- Under Master FX, a Track tap goes to that Track's chain.
 
 ### Schwung
 - MIDI clock to Schwung at the song's tempo while playing.
