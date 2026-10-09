@@ -1353,6 +1353,7 @@ function drawKnobMap() {
     const items = [];
     for (let i = 0; i < KNOB_COUNT; i++) items.push({ i });
     drawMenuList({
+        ...LIST_ROW_FIT,
         labelX: 3,
         items,
         selectedIndex: knobEditFocus,
@@ -1590,30 +1591,16 @@ function drawKnobPick() {
     if (knobPickStage === "param") title += " " + compLabel(knobPickComp);
     drawMenuHeader(scrollHeader(title, 28), "");
     drawMenuList({
+        ...LIST_ROW_FIT,
         labelX: 3,
         items: knobPickItems,
         selectedIndex: knobPickIndex,
         getLabel: (item) => item.label,
         getValue: (item) => item.value || "",
         valueAlignRight: true,
-        /* The labels here are short ("Synth", "FX 1", "Chain 1"); the
-         * values are module names. Let a value start right after the widest
-         * label rather than at the default column, which cut "Linear..." to
-         * "Lin..." with most of the row empty. */
-        valueX: valueColumnAfterLabels(knobPickItems, (item) => item.label, 3, 6),
         labelGap: 2,
         listArea: { topY: LIST_TOP_Y, bottomY: LIST_INDICATOR_BOTTOM_Y }
     });
-}
-
-/* The x where a list's right-aligned values may start: just after its widest
- * label (measured in the display font), but never right of the default
- * column (92). */
-function valueColumnAfterLabels(items, getLabel, labelX, gap) {
-    const measure = (t) => (typeof text_width === "function" ? text_width(String(t)) : String(t).length * 6);
-    let w = 0;
-    for (const it of items || []) w = Math.max(w, measure(getLabel(it) || ""));
-    return Math.min(92, labelX + w + gap);
 }
 
 function handleKnobPickInput(cc, value) {
@@ -6817,6 +6804,15 @@ function drawFolderList() {
     });
 }
 
+/* drawMenuList row fit for lists with right-aligned values: every row shows
+ * its whole label and its value takes all the room after it (keeping at
+ * least three characters), instead of every value starting at one fixed
+ * column (x=92 by default) -- which cut "External 3" to "Ex...", a song name
+ * to "Sing Wherev..." and module names to a few letters beside short labels
+ * with most of the row empty. The selected row may still give its value
+ * priority (prioritizeSelectedValue). */
+const LIST_ROW_FIT = { valueX: 3, minLabelChars: 99 };
+
 /* Pixels between a list row's name and its right-hand value in Song
  * Builder's track lists (Schwung's menu default). */
 const LIST_LABEL_GAP = 6;
@@ -6871,6 +6867,7 @@ function drawBuilder() {
         items.push({ type: "insert" });
     }
     drawMenuList({
+        ...LIST_ROW_FIT,
         labelX: 3,
         items,
         selectedIndex: builderCursor + 1,
@@ -6896,7 +6893,6 @@ function drawBuilder() {
          * LIST_VALUE_X (92) only leaves ~5 chars for a fractional bar count
          * like "3 2/4b"; lowering it lets up to 6+ chars fit while the
          * label-floor still protects long clip names from being overlapped. */
-        valueX: 44,
         /* Room between a long name (or its "...") and the value, so the
          * two don't read as one string. */
         labelGap: LIST_LABEL_GAP,
@@ -6992,6 +6988,7 @@ function drawChordTrack() {
     for (const e of evs) items.push({ type: "chord", ev: e });
     items.push({ type: "add" });
     drawMenuList({
+        ...LIST_ROW_FIT,
         labelX: 3,
         items,
         selectedIndex: chordListCursor + 1,
@@ -7006,7 +7003,6 @@ function drawChordTrack() {
             return "";
         },
         valueAlignRight: true,
-        valueX: 44,
         /* Room between a long name (or its "...") and the value, so the
          * two don't read as one string. */
         labelGap: LIST_LABEL_GAP,
@@ -7389,6 +7385,7 @@ function drawChordPick() {
     const items = chordPickItems();
     if (chordPickFocus >= items.length) chordPickFocus = items.length - 1;
     drawMenuList({
+        ...LIST_ROW_FIT,
         labelX: 3,
         items,
         selectedIndex: chordPickFocus,
@@ -7509,6 +7506,7 @@ function drawInstrument() {
         { key: "gap", label: "Note Gap", value: noteGapLabel(inst ? inst.note_gap : 0.25) }
     ];
     drawMenuList({
+        ...LIST_ROW_FIT,
         labelX: 3,
         items,
         selectedIndex: instrumentFocus,
@@ -7683,6 +7681,7 @@ function drawItemTrack() {
     for (const it of list) items.push({ type: "item", it });
     items.push({ type: "add" });
     drawMenuList({
+        ...LIST_ROW_FIT,
         labelX: 3,
         items,
         selectedIndex: itemListCursor + 1,
@@ -7697,7 +7696,6 @@ function drawItemTrack() {
             return "";
         },
         valueAlignRight: true,
-        valueX: 44,
         /* Room between a long name (or its "...") and the value, so the
          * two don't read as one string. */
         labelGap: LIST_LABEL_GAP,
@@ -7885,6 +7883,7 @@ function drawInstrumentBarMenu() {
     const rows = itemEditRows();
     if (itemFocus >= rows.length) itemFocus = rows.length - 1;
     drawMenuList({
+        ...LIST_ROW_FIT,
         labelX: 3,
         items: rows,
         selectedIndex: itemFocus,
@@ -8091,6 +8090,7 @@ function drawJamInstrumentMenu() {
         { key: "gap", label: "Note Gap", value: noteGapLabel(cfg.note_gap) }
     ];
     drawMenuList({
+        ...LIST_ROW_FIT,
         labelX: 3,
         items,
         selectedIndex: jamInstrumentFocus,
@@ -8306,6 +8306,7 @@ function drawTrim() {
     items.push({ key: "kick_target", label: "Limit Notes/Bar", value: trimPendingKickTarget === 0 ? "Off" : String(trimPendingKickTarget) });
     items.push({ key: "channel", label: "MIDI Channel", value: trimPendingChannel === 0 ? "Default" : String(trimPendingChannel) });
     drawMenuList({
+        ...LIST_ROW_FIT,
         labelX: 3,
         items,
         selectedIndex,
@@ -8534,6 +8535,7 @@ function drawSongSettings() {
         { key: "restore", label: "Restore Backup", value: String(songSettingsBackupCount) }
     ];
     drawMenuList({
+        ...LIST_ROW_FIT,
         labelX: 3,
         items,
         selectedIndex: songSettingsFocus,
@@ -8740,6 +8742,7 @@ function drawSongBackups() {
         return;
     }
     drawMenuList({
+        ...LIST_ROW_FIT,
         labelX: 3,
         items: songBackupList,
         selectedIndex: songBackupSelected,
@@ -8834,6 +8837,7 @@ function drawSongBank() {
         if (obj && obj.locked) lockMap.set(f.name, true);
     }
     drawMenuList({
+        ...LIST_ROW_FIT,
         labelX: 3,
         items,
         selectedIndex: selectedSongIndex,
@@ -8858,6 +8862,7 @@ function drawOptions() {
         { key: "dspdebug", label: "DSP Debug", value: dspDebugEnabled ? "On" : "Off" }
     ];
     drawMenuList({
+        ...LIST_ROW_FIT,
         labelX: 3,
         items,
         selectedIndex: optionsFocus,
@@ -8885,6 +8890,7 @@ function drawOptionsDrums() {
         { key: "dropnoteoffs", label: "Drop Note-Offs", value: dropNoteOffs ? "On" : "Off" }
     ];
     drawMenuList({
+        ...LIST_ROW_FIT,
         labelX: 3,
         items,
         selectedIndex: optionsSubFocus,
@@ -8909,6 +8915,7 @@ function drawOptionsInst() {
         { key: "channel", label: "MIDI Channel", value: String(channel) }
     ];
     drawMenuList({
+        ...LIST_ROW_FIT,
         labelX: 3,
         items,
         selectedIndex: optionsSubFocus,
@@ -8955,6 +8962,7 @@ function drawOptionsClick() {
         { key: "volume", label: "Volume", value: clickVolume + "%" }
     ];
     drawMenuList({
+        ...LIST_ROW_FIT,
         labelX: 3,
         items,
         selectedIndex: optionsSubFocus,
@@ -9091,6 +9099,7 @@ function drawOptionsChains() {
         { key: "edit", label: "Edit Chain", value: synth }
     ];
     drawMenuList({
+        ...LIST_ROW_FIT,
         labelX: 3,
         items,
         selectedIndex: optionsSubFocus,
@@ -9193,6 +9202,7 @@ function drawSetlistClick() {
         { key: "knobs", label: "Knobs", value: knobOverrideCount(entry) ? knobOverrideCount(entry) + " own" : "Setlist" }
     ];
     drawMenuList({
+        ...LIST_ROW_FIT,
         labelX: 3,
         items,
         selectedIndex: clickSettingsFocus,
