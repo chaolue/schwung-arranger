@@ -1596,9 +1596,24 @@ function drawKnobPick() {
         getLabel: (item) => item.label,
         getValue: (item) => item.value || "",
         valueAlignRight: true,
+        /* The labels here are short ("Synth", "FX 1", "Chain 1"); the
+         * values are module names. Let a value start right after the widest
+         * label rather than at the default column, which cut "Linear..." to
+         * "Lin..." with most of the row empty. */
+        valueX: valueColumnAfterLabels(knobPickItems, (item) => item.label, 3, 6),
         labelGap: 2,
         listArea: { topY: LIST_TOP_Y, bottomY: LIST_INDICATOR_BOTTOM_Y }
     });
+}
+
+/* The x where a list's right-aligned values may start: just after its widest
+ * label (measured in the display font), but never right of the default
+ * column (92). */
+function valueColumnAfterLabels(items, getLabel, labelX, gap) {
+    const measure = (t) => (typeof text_width === "function" ? text_width(String(t)) : String(t).length * 6);
+    let w = 0;
+    for (const it of items || []) w = Math.max(w, measure(getLabel(it) || ""));
+    return Math.min(92, labelX + w + gap);
 }
 
 function handleKnobPickInput(cc, value) {
