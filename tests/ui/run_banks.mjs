@@ -14,7 +14,7 @@ knobs[8] = { slot: 0, comp: "synth", key: "wave", module: "dexed", moduleName: "
 H.files.set(GIG, JSON.stringify({ id: "s1", name: "Gig", move_set: { uuid: "set-a", name: "Gig Set" }, knobs,
     songs: [{ id: "e1", name: "Song A", path: SONGS + "/a.json", click_bars: 0 }] }));
 
-await import('./ui_test.mjs');
+const ui = await import('./ui_test.mjs');
 const g = globalThis;
 let failures = 0, passes = 0;
 function check(cond, msg) { if (cond) passes++; else { failures++; console.log("FAIL: " + msg); } }
@@ -70,6 +70,9 @@ check(H.printed.some(t => /C1 Cutoff/.test(t)), "Knobs screen opens on bank 1: "
 H.printed.length = 0; cc(SAMPLE, 127); cc(SAMPLE, 0); tick();
 check(H.printed.some(t => /C1 Wave/.test(t)) && !H.printed.some(t => /Cutoff/.test(t)),
       "Sample: bank 2's mappings: " + JSON.stringify(H.printed));
+
+/* The Knobs screen's footer names Sample's bank switch. */
+check(JSON.stringify(ui.footerHints()) === '[["CLK","OPEN"],["SMPL","BANK"]]', "footer: CLK OPEN, SMPL BANK: " + JSON.stringify(ui.footerHints()));
 
 console.log(`${passes} passed, ${failures} failed`);
 process.exit(failures ? 1 : 0);

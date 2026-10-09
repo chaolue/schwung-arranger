@@ -14100,7 +14100,7 @@ function editMenuHints(editing) {
         : [["JOG", "SEL"], ["CLK", "EDIT"], ["BACK", "OUT"]];
 }
 
-function footerHints() {
+export function footerHints() {
     switch (currentView) {
         case VIEW_ROOT:
             return [["JOG", "SEL"], ["CLK", "OPEN"], ["BACK", "EXIT"]];
@@ -14119,7 +14119,10 @@ function footerHints() {
         case VIEW_KNOB_PICK:
             return HINTS_LIST;
         case VIEW_KNOB_MAP:
-            return shiftHeld ? [["JOG", "MOVE"], ["BACK", "OUT"]] : HINTS_LIST;
+            /* Sample switches the bank being edited. With Back (pinned right)
+             * no three pairs naming it fit the 128px band, so Back -- lit, and
+             * the same on every screen -- gives way. */
+            return shiftHeld ? [["JOG", "MOVE"], ["BACK", "OUT"]] : [["CLK", "OPEN"], ["SMPL", "BANK"]];
         case VIEW_OPTIONS: return editMenuHints(optionsEditing);
         case VIEW_OPTIONS_DRUMS: case VIEW_OPTIONS_INST: case VIEW_OPTIONS_CLICK:
         case VIEW_OPTIONS_CHAINS:
