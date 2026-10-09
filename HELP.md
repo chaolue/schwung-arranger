@@ -773,6 +773,7 @@ shape a synth while it plays the part.
 | Track 1–4 (tap) | Switch to that Track's chain; tap it again for its second chain (Track 1: Chain 1 ↔ 5 … Track 4: Chain 4 ↔ 8). Only on a Schwung with 8 chain slots |
 | Track 1–4 (hold) | Switch to that chain; hold the open chain's Track (either of its pair) again to return to the Arranger |
 | Menu (hold) | Switch to Master FX; hold again to return to the Arranger |
+| Track 1–4 (tap, in Master FX) | Go to that Track's chain |
 
 Shift + Track and Shift + Menu do nothing while a chain is open, so they cannot
 open an Arranger menu out of sight.

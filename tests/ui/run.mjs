@@ -213,6 +213,15 @@ check(H.corun.id === 6, "tap Track 3 again: chain 7 (" + H.corun.id + ")");
 hold(TR3);
 check(H.corun.target === 0, "hold Track 3 on chain 7 closes the view");
 
+/* 14d. Under Master FX (hold Menu), a Track tap goes to that Track's chain. */
+cc(MENU, 127); tick(Math.ceil(600 / 23)); cc(MENU, 0); tick(3);
+check(H.corun.overlay === "master_fx", "Master FX open");
+tap(TR2); tick(3);
+check(H.corun.target === 1 && H.corun.id === 1 && H.corun.overlay !== "master_fx",
+      "tap Track 2 under Master FX: chain 2 (" + H.corun.id + ", overlay " + H.corun.overlay + ")");
+hold(TR2);
+check(H.corun.target === 0, "hold Track 2 closes it");
+
 /* 15. onUnload ends a session. */
 hold(TR3);
 check(H.corun.target === 1, "chain 3 open");

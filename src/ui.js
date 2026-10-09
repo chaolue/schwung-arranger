@@ -725,11 +725,18 @@ function fireLongPressAction(cc) {
 
 /* A Track tap under a chain view (no Shift): its chain, or -- tapped again
  * on its own chain -- the other of its pair (Chain 1 <-> 5 ... 4 <-> 8).
+ * Under Master FX it goes to the Track's chain.
  * Returns true if the tap was used. */
 function chainViewTrackTap(cc) {
-    if (!chainViewActive() || chainViewMfx || chainViewMfxPending || !isTrackCc(cc)) return false;
+    if (!chainViewActive() || !isTrackCc(cc)) return false;
     const base = trackCcToChainSlot(cc);
     if (base < 0 || base >= TRACK_CHAIN_COUNT) return false;
+    if (chainViewMfx || chainViewMfxPending) {
+        /* From Master FX, a Track tap goes to that Track's chain (openChainView
+         * closes the overlay first). */
+        openChainView(base);
+        return true;
+    }
     const alt = base + TRACK_CHAIN_COUNT;
     let target = base;
     if (chainViewSlot === base && alt < chainSlotCount()) target = alt;
