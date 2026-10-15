@@ -71,7 +71,10 @@ static int g_held_seen;
 #define HOLD_BLOCKS 3446
 #define CC_DELAY_BLOCKS 690
 
-static int run(plugin_api_v2_t *api, const char *lib, int drop_note_offs, int blocks, int with_insts, int from_bar) {
+/* mode: 0 plain; 1 = the UI's repeat Stops during the hold (one every ~3 s)
+ * must not put the release off; 2 = "release_notes" (the module closing)
+ * releases the held notes and sends All Notes Off at once. */
+static int run(plugin_api_v2_t *api, const char *lib, int drop_note_offs, int blocks, int with_insts, int from_bar, int mode) {
     char folder[128], json[2048];
     int16_t audio[MOVE_FRAMES_PER_BLOCK * 2];
     void *inst = api->create_instance("/tmp/test_stop", NULL);
@@ -111,6 +114,13 @@ static int run(plugin_api_v2_t *api, const char *lib, int drop_note_offs, int bl
     int left = notes_left_on(0);
     if (with_insts && notes_left_sounding() > 0) g_held_seen = 1;
     if (any_cc123()) left += 1000;
+    if (mode == 2) {
+        api->set_param(inst, "release_notes", "1");
+        left += notes_left_sounding();
+        if (!cc123_on_played_channels(with_insts)) left += 1000;
+        api->destroy_instance(inst);
+        return left;
+    }
     if (from_bar) {
         /* A restart during the hold releases the held notes and sends All
          * Notes Off before any new note-on -- never after one. */
@@ -133,7 +143,10 @@ static int run(plugin_api_v2_t *api, const char *lib, int drop_note_offs, int bl
      * which follows 2 s later. With nothing held, it follows the Stop by 2 s. */
     int held = notes_left_sounding() > notes_left_on(0);
     if (held) {
-        for (int b = 0; b < HOLD_BLOCKS + 5; b++) api->render_block(inst, audio, MOVE_FRAMES_PER_BLOCK);
+        for (int b = 0; b < HOLD_BLOCKS + 5; b++) {
+            if (mode == 1 && b % 1000 == 999) api->set_param(inst, "stop", "1");
+            api->render_block(inst, audio, MOVE_FRAMES_PER_BLOCK);
+        }
         left += notes_left_sounding();
         if (any_cc123()) left += 1000;
     }
@@ -152,13 +165,17 @@ int main(int argc, char **argv) {
     plugin_api_v2_t *api = move_plugin_init_v2(&host);
 
     /* Stop at a spread of points mid-groove, so some land inside notes. */
-    int worst_drop = 0, worst_plain = 0, worst_inst = 0, worst_inst_bar = 0;
+    int worst_drop = 0, worst_plain = 0, worst_inst = 0, worst_inst_bar = 0, worst_restop = 0, worst_release = 0;
     for (int blocks = 100; blocks <= 2500; blocks += 137) {
-        int a = run(api, argv[1], 1, blocks, 0, 0);
-        int b = run(api, argv[1], 0, blocks, 0, 0);
-        int c = run(api, argv[1], 0, blocks, 1, 0);
-        int d = run(api, argv[1], 0, blocks, 1, 1);
-        if (a < 0 || b < 0 || c < 0 || d < 0) { fprintf(stderr, "setup failed\n"); return 1; }
+        int a = run(api, argv[1], 1, blocks, 0, 0, 0);
+        int b = run(api, argv[1], 0, blocks, 0, 0, 0);
+        int c = run(api, argv[1], 0, blocks, 1, 0, 0);
+        int d = run(api, argv[1], 0, blocks, 1, 1, 0);
+        int e = run(api, argv[1], 0, blocks, 1, 0, 1);
+        int f = run(api, argv[1], 0, blocks, 1, 0, 2);
+        if (a < 0 || b < 0 || c < 0 || d < 0 || e < 0 || f < 0) { fprintf(stderr, "setup failed\n"); return 1; }
+        if (e > worst_restop) worst_restop = e;
+        if (f > worst_release) worst_release = f;
         if (a > worst_drop) worst_drop = a;
         if (b > worst_plain) worst_plain = b;
         if (c > worst_inst) worst_inst = c;
@@ -173,6 +190,9 @@ int main(int argc, char **argv) {
     CHECK(worst_inst == 0, "stop with a bass and a once-per-bar chord: no note left sounding");
     CHECK(g_held_seen, "stop with instruments sounding holds them (they ring out)");
     CHECK(worst_inst_bar == 0, "same, started with play_from_bar (as Perform does): no note left sounding");
+    CHECK(worst_restop == 0, "repeat Stops during the hold don't put off the release: no note left sounding 10 s after the first");
+    CHECK(worst_release == 0, "release_notes (module closing) releases held notes and sends All Notes Off at once");
+    printf("info: repeat stops %d, release_notes %d\n", worst_restop, worst_release);
 
     if (g_failures == 0) printf("\nALL TESTS PASSED\n");
     else printf("\n%d TEST(S) FAILED\n", g_failures);

@@ -6371,10 +6371,16 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
         return;
     }
     if (strcmp(key, "stop") == 0) {
+        int was_running = e->running;
         e->running = 0;
         e->flash_end_tick = 0;
         queue_clear(e);
-        begin_stop_tail(e);
+        /* A Stop while already stopped -- the UI sends one after the engine
+         * stopped itself at a song's end, and from screens it leaves -- must
+         * not restart the ring-on hold: each restart put the held notes'
+         * note-offs another STOP_INST_HOLD_MS away, so a Stop shortly before
+         * leaving the module left them sounding for good. */
+        if (was_running || !e->inst_hold_frames) begin_stop_tail(e);
         /* Discard any not-yet-promoted Jam chord pick -- it was queued for
          * a future bar boundary that will now never arrive, so resuming it
          * later (see "play"'s apply_pending_jam_chord call) would be
@@ -6393,6 +6399,17 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
          * re-synced to this stale value. */
         e->active_source[0] = '\0';
         dsp_log_enqueue_worker("STOP");
+        return;
+    }
+    /* Release every held instrument note, and send All Notes Off, now: the
+     * module is closing, so the ring-on hold would never end -- and the
+     * notes would hang in Schwung's chains, which outlive the module. */
+    if (strcmp(key, "release_notes") == 0) {
+        if (e->inst_hold_frames) end_inst_hold(e);
+        else emit_instrument_notes_release(e);
+        e->notes_off_cc_frames = 1;
+        flush_notes_off_cc(e);
+        dsp_log_enqueue_worker("RELEASE_NOTES");
         return;
     }
     if (strcmp(key, "events_ack") == 0) {
