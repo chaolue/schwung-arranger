@@ -1950,6 +1950,10 @@ let editingSetlist = false;
 let setlistPendingName = "My Setlist";
 let setlistPickIndex = 0; /* selected song in the add-song picker */
 let sectionPickIndex = 0; /* selected name in the add-section picker */
+/* The picker names a new section (Shift + Loop), or renames sectionPickTarget
+ * (the jog click on a section row), with "Custom..." first for the keyboard. */
+let sectionPickRename = false;
+let sectionPickTarget = null;
 let perfSetlistIndex = 0; /* selected setlist in the performance picker */
 let clickSettingsFocus = 0; /* 0 = bars, 1 = note */
 let clickSettingsEditing = false;
@@ -5150,6 +5154,10 @@ function updateButtonLEDs() {
                     if (!ledLocked && ledOnItem) {
                         active.set(MoveCopy, WhiteLedFull);
                         active.set(MoveDelete, WhiteLedFull);
+                    }
+                    /* Loop copies the track to the same-named sections. */
+                    if (!ledLocked && sameNamedSections(currentSong, chordDisplaySectionIndex()).length > 0) {
+                        active.set(MoveLoop, WhiteLedFull);
                     }
                     if (!ledLocked) active.set(MoveShift, shiftHeld ? WhiteLedFull : WhiteLedDim);
                     else if (shiftHeld) active.set(MoveShift, WhiteLedFull);
@@ -9316,9 +9324,13 @@ function drawSetlistPick() {
     });
 }
 
+function sectionPickNames() {
+    return sectionPickRename ? ["Custom..."].concat(SECTION_NAMES) : SECTION_NAMES;
+}
+
 function drawSectionPick() {
-    drawMenuHeader("New Section Name", "");
-    const items = SECTION_NAMES.map(n => ({ label: n }));
+    drawMenuHeader(sectionPickRename ? "Rename Section" : "New Section Name", "");
+    const items = sectionPickNames().map(n => ({ label: n }));
     drawMenuList({
         labelX: 3,
         items,
@@ -9935,8 +9947,14 @@ function handleBuilderInput(cc, value) {
             (!shiftHeld && (cc === MoveMainKnob || cc === MoveMainButton)) ||
             /* The Chord, Inst and Click tracks' lists edit like the Drum
              * track's: Shift+jog nudges, Delete removes, Copy duplicates. */
-            cc === MoveMainKnob || (!shiftHeld && (cc === MoveDelete || cc === MoveCopy));
+            cc === MoveMainKnob || (!shiftHeld && (cc === MoveDelete || cc === MoveCopy)) ||
+            /* Loop copies the track's section to its same-named sections. */
+            (!shiftHeld && cc === MoveLoop);
         if (!allowed) return;
+    }
+    if (builderTrack !== TRACK_DRUM && cc === MoveLoop && value > 0) {
+        if (!locked) copyTrackToSameNamedSections();
+        return;
     }
     if (cc === MoveMute && value > 0) {
         /* Mute merges this section with the next; Shift+Mute splits it at
@@ -10047,6 +10065,7 @@ function handleBuilderInput(cc, value) {
             /* Shift + Loop opens a picker of common section names, then adds
              * a new empty section with the chosen name after the current one. */
             sectionPickIndex = 0;
+            sectionPickRename = false;
             menuStack.push({ title: "New Section", selectedIndex: 0 });
             currentView = VIEW_SECTION_PICK;
             needsRedraw = true;
@@ -10198,7 +10217,21 @@ function applyOpenEditForPlay() {
 }
 
 /* Rename a section (Song Builder's section row; blocked when locked). */
+/* Rename a section: pick one of the section names (as for a new section), or
+ * "Custom..." for the keyboard. */
 function renameSectionPrompt(section) {
+    if (!section || songIsLocked()) return;
+    sectionPickRename = true;
+    sectionPickTarget = section;
+    const i = SECTION_NAMES.indexOf(section.name);
+    sectionPickIndex = i >= 0 ? i + 1 : 0;
+    menuStack.push({ title: "Rename Section", selectedIndex: 0 });
+    currentView = VIEW_SECTION_PICK;
+    needsRedraw = true;
+}
+
+/* Name a section with the keyboard. */
+function renameSectionKeyboard(section) {
     if (!section || songIsLocked()) return;
     openTextEntry({
         title: "Rename",
@@ -10886,13 +10919,27 @@ function handleSetlistPickInput(cc, value) {
 }
 
 function handleSectionPickInput(cc, value) {
+    const names = sectionPickNames();
     if (cc === MoveMainKnob) {
         const delta = decodeDelta(value);
-        const newIdx = Math.max(0, Math.min(SECTION_NAMES.length - 1, sectionPickIndex + delta));
+        const newIdx = Math.max(0, Math.min(names.length - 1, sectionPickIndex + delta));
         if (newIdx !== sectionPickIndex) {
             sectionPickIndex = newIdx;
             needsRedraw = true;
         }
+    } else if (cc === MoveMainButton && value > 0 && sectionPickRename) {
+        const section = sectionPickTarget;
+        sectionPickRename = false;
+        sectionPickTarget = null;
+        menuStack.pop();
+        currentView = VIEW_BUILDER;
+        if (sectionPickIndex === 0) {
+            renameSectionKeyboard(section);
+        } else if (section && names[sectionPickIndex]) {
+            section.name = names[sectionPickIndex];
+            unsavedChanges = true;
+        }
+        needsRedraw = true;
     } else if (cc === MoveMainButton && value > 0) {
         const name = SECTION_NAMES[sectionPickIndex];
         if (name && currentSong) {
@@ -10907,6 +10954,8 @@ function handleSectionPickInput(cc, value) {
         currentView = VIEW_BUILDER;
         needsRedraw = true;
     } else if (cc === MoveBack && value > 0) {
+        sectionPickRename = false;
+        sectionPickTarget = null;
         menuStack.pop();
         currentView = VIEW_BUILDER;
         needsRedraw = true;
@@ -12728,6 +12777,69 @@ function duplicateCurrentSection() {
     unsavedChanges = true;
     stepLedsDirty = true;
     needsRedraw = true;
+}
+
+/* A section name without a trailing number: "Chorus 2" -> "Chorus". */
+function sectionBaseName(name) {
+    return String(name || "Section").replace(/\s*\d+$/, "").trim().toLowerCase();
+}
+
+/* The other sections named like section `idx` ("Chorus", "Chorus 2", ...). */
+export function sameNamedSections(song, idx) {
+    if (!song || !song.sections[idx]) return [];
+    const base = sectionBaseName(song.sections[idx].name);
+    const out = [];
+    song.sections.forEach((s, i) => { if (i !== idx && sectionBaseName(s.name) === base) out.push(i); });
+    return out;
+}
+
+/* Copy one track's content -- chords, Inst 1/2 items or click items -- from
+ * section `from` over sections `to`, keeping what fits each (a shorter
+ * section drops what falls past its end). */
+export function copyTrackToSections(song, track, from, to) {
+    const src = song.sections[from];
+    for (const i of to) {
+        const dst = song.sections[i];
+        const bars = sectionChordBars(dst);
+        if (track === TRACK_CHORD) {
+            dst.chords = JSON.parse(JSON.stringify((src.chords || []).slice(0, bars)));
+        } else {
+            const items = JSON.parse(JSON.stringify(sectionItems(src, track))).filter(it => it.bar < bars);
+            const list = sectionItems(dst, track);
+            list.length = 0;
+            for (const it of items) list.push(it);
+        }
+    }
+}
+
+/* Loop on the Chord, Inst or Click track: copy this section's chords/items
+ * to every other section named like it, after a confirm. */
+function copyTrackToSameNamedSections() {
+    if (!currentSong) return;
+    const from = chordDisplaySectionIndex();
+    const to = sameNamedSections(currentSong, from);
+    const sec = currentSong.sections[from];
+    const what = builderTrack === TRACK_CHORD ? "Chords" : itemTrackName(builderTrack);
+    if (!sec) return;
+    if (to.length === 0) {
+        showPopup(what, "No other " + (sec.name || "Section") + " section", 2000);
+        needsRedraw = true;
+        return;
+    }
+    const track = builderTrack;
+    openConfirm({
+        title: "Copy " + what + "?",
+        name: "To " + to.length + " more " + String(sec.name || "Section").replace(/\s*\d+$/, ""),
+        labels: ["No", "Copy"],
+        onConfirm: () => {
+            copyTrackToSections(currentSong, track, from, to);
+            unsavedChanges = true;
+            stepLedsDirty = true;
+            showPopup(what, "Copied to " + to.length + " section" + (to.length === 1 ? "" : "s"), 2000);
+            needsRedraw = true;
+        },
+        onCancel: () => { needsRedraw = true; }
+    });
 }
 
 /* Increment a trailing number in a section name for duplication. "Verse 1" ->

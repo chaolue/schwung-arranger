@@ -14,6 +14,10 @@
 - A chord set on a bar that repeats the previous bar's chord is heard again:
   the held chord is released note-gap before it, as for a chord change.
 - Follow Note: with Bass voicing, turning up from Off jumps to 36 (kick).
+- Renaming a section offers the section names (as for a new section), or
+  Custom... for the keyboard.
+- Loop on the Chord, Inst or Click track copies the section's chords/items
+  to every other section with the same name (Chorus, Chorus 2, ...).
 
 ### Playback
 - Stop sends every instrument note-off at once, so each synth plays its own

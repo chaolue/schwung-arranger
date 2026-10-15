@@ -12,10 +12,16 @@ const song = (name, extra) => JSON.stringify(Object.assign({ name, tempo_bpm: 12
     sections: [{ name: "Verse", clips: [{ source: "Grooves/beat.mid", name: "beat", start_bar: 0, end_bar: 2 }] }] }, extra || {}));
 H.files.set(SONGS + "/plain.json", song("Plain"));
 H.files.set(SONGS + "/locked.json", song("Locked", { locked: true }));
+const sec = (name, bars, chords) => ({ name, clips: [{ source: "Grooves/beat.mid", name: "beat", start_bar: 0, end_bar: bars }], chords });
+H.files.set(SONGS + "/multi.json", song("Multi", { sections: [
+    sec("Chorus", 2, [{ root: "C", quality: "maj" }, { root: "G", quality: "maj" }]),
+    sec("Verse", 2, [{ root: "A", quality: "min" }]),
+    sec("Chorus 2", 1, [{ root: "F", quality: "maj" }])] }));
 H.files.set(SETLISTS + "/gig.json", JSON.stringify({ id: "s1", name: "Gig", songs: [
     { id: "e1", name: "Plain", path: SONGS + "/plain.json", click_bars: 2 }], knobs: [] }));
 /* The DSP's song list. */
-const songList = [{ name: "Locked", path: SONGS + "/locked.json" }, { name: "Plain", path: SONGS + "/plain.json" }];
+const songList = [{ name: "Locked", path: SONGS + "/locked.json" }, { name: "Plain", path: SONGS + "/plain.json" },
+                  { name: "Multi", path: SONGS + "/multi.json" }];
 globalThis.host_module_get_param = (k) =>
     k === "songs_json" ? JSON.stringify({ count: songList.length, start: 0, items: songList }) : null;
 
@@ -94,6 +100,46 @@ check(c.name === "Gig copy" && c.id !== "s1" && c.songs && c.songs.length === 1 
 press(C.MoveCopy);
 check(!!H.files.get(SETLISTS + "/Gig_copy_2.json") || !!H.files.get(SETLISTS + "/Gig_copy_copy.json"),
       "copying again makes another: " + [...H.files.keys()].filter(k => k.startsWith(SETLISTS)).join(", "));
+
+back();                       /* to the root */
+
+/* ---- renaming a section: the section names, or Custom for the keyboard ---- */
+const TE = await import('./shared/text_entry.mjs');
+root(0); click(); jog(-8); jog(3); click();   /* Multi, section 1 (Chorus) */
+jog(-1); click();             /* the section row */
+check(H.printed.includes("Chorus") && !H.printed.includes("Custom..."),
+      "rename opens at the section's own name: " + JSON.stringify(H.printed));
+H.printed.length = 0; jog(-20);
+check(H.printed.includes("Custom...") && H.printed.includes("Intro"), "Custom first, then the names: " + JSON.stringify(H.printed));
+jog(3); click();              /* Custom, Intro, Verse, Prechorus */
+check(!TE.isTextEntryActive(), "a name from the list needs no keyboard");
+back();                       /* saves */
+let multi = JSON.parse(H.files.get(SONGS + "/multi.json"));
+check(multi.sections[0].name === "Prechorus", "renamed from the list: " + multi.sections.map(s => s.name));
+jog(-8); jog(3); click();     /* Back went to the Song Bank: Multi again */
+jog(-1); click(); jog(-20); click();          /* Custom... */
+check(TE.isTextEntryActive(), "Custom opens the keyboard");
+back(); tick(3);
+check(!TE.isTextEntryActive(), "Back closes it");
+back();                       /* to the Song Bank */
+
+/* ---- Loop copies a track's section to its same-named sections ---- */
+H.files.set(SONGS + "/multi.json", song("Multi", { sections: [
+    sec("Chorus", 2, [{ root: "C", quality: "maj" }, { root: "G", quality: "maj" }]),
+    sec("Verse", 2, [{ root: "A", quality: "min" }]),
+    sec("Chorus 2", 1, [{ root: "F", quality: "maj" }])] }));
+jog(-8); jog(3); click();
+press(C.MoveRow1);            /* Chord track, section 1 (Chorus) */
+press(C.MoveLoop);
+check(H.printed.some(t => /To 1 more Chorus/.test(t)), "Loop asks to copy the chords to the 1 other Chorus: " + JSON.stringify(H.printed));
+jog(1); click();              /* Copy */
+back();
+multi = JSON.parse(H.files.get(SONGS + "/multi.json"));
+const ch = (i) => JSON.stringify((multi.sections[i].chords || []).filter(Boolean).map(c => c.root));
+check(ch(2) === '["C"]', "Chorus 2 (1 bar) gets the Chorus's first bar: " + ch(2));
+check(ch(1) === '["A"]', "Verse is untouched: " + ch(1));
+const S = { sections: [sec("Chorus", 2, []), sec("chorus 3", 1, []), sec("Bridge", 1, [])] };
+check(JSON.stringify(M.sameNamedSections(S, 0)) === "[1]", "same-named ignores case and the number");
 
 /* ---- Follow Note: with Bass voicing, up from Off jumps to the kick ---- */
 check(M.stepFollowNote(0, 1, true) === 36 && M.stepFollowNote(0, 1, false) === 1, "Off +1: 36 for Bass, 1 for Chord");

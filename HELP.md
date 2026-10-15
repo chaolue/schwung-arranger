@@ -96,7 +96,7 @@ playback (Play, Back) work the same on every track.
 | Jog wheel | Move the clip cursor up/down in the current section |
 | Shift + Jog wheel | Move the clip at the cursor up/down within the section (when cursor is on a clip) |
 | Jog click (on clip) | Open Trim Clip for that clip |
-| Jog click (on section header) | Rename the current section |
+| Jog click (on section header) | Rename the current section: pick a section name (as for a new section), or **Custom...** to type one |
 | Menu | Open Song Settings |
 | Shift + Jog click | Open Song Settings (song name, BPM, time signature, key) |
 | Play (during playback) | Stop playback (LED turns red) |
@@ -147,10 +147,11 @@ The display lists the section, then its chords in order with where each starts
 | Jog wheel | Select the section row, a chord, or **+ Add** |
 | Jog click (on a chord) | Open Chord Settings for it |
 | Jog click (on + Add) | Add a chord after the last one — on the next bar, or, when no bar is left, halfway through what remains of the last chord's bar (beat 1 → 3 → 4 in 4/4) — and open it |
-| Jog click (on the section row) | Rename the section |
+| Jog click (on the section row) | Rename the section: pick a section name, or **Custom...** to type one |
 | Shift + Jog wheel | Move the selected chord a beat (half a beat in Advanced) — past other chords, across bars, stopping at the section's ends |
 | Delete | Delete the selected chord |
 | Copy | Duplicate the selected chord after the section's last chord |
+| Loop | Copy this section's chords to every other section with the same name (Chorus, Chorus 2, ...), after a confirm — replacing theirs; a shorter section keeps what fits. Works the same on the Inst and Click tracks for their items |
 | Step buttons | Select that bar's first chord (the selected chord's bar is white) |
 | Left / Right | Move to the previous / next section |
 | Mute / Shift + Mute | Merge / split sections (see Edit Song) |
@@ -158,7 +159,7 @@ The display lists the section, then its chords in order with where each starts
 | Play / Back | Same as the Drum track |
 
 **Button LED hints:** Track 1 is lit azure blue. Copy and Delete are lit when a
-chord is selected.
+chord is selected; Loop when another section has the same name.
 
 ---
 
