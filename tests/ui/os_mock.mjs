@@ -10,7 +10,25 @@ export function readdir(dir) {
     return [[...names], 0];
 }
 export function stat() { return [null, -2]; }
-export function open() { return -1; }
-export function write() { return 0; }
-export function close() { return 0; }
+/* Binary writes (os.open/os.write) fail unless a suite opts in with
+ * captureWrites(true); then each file's bytes land in `written`. */
+export const written = new Map();
+let capture = false;
+const fds = new Map();
+export function captureWrites(on) { capture = on; }
+export function open(path) {
+    if (!capture) return -1;
+    const fd = 100 + fds.size;
+    fds.set(fd, path);
+    written.set(path, []);
+    return fd;
+}
+export function write(fd, buffer, offset, length) {
+    const path = fds.get(fd);
+    if (!path) return 0;
+    const bytes = new Uint8Array(buffer, offset, length);
+    written.get(path).push(...bytes);
+    return length;
+}
+export function close(fd) { fds.delete(fd); return 0; }
 export function remove() { return 0; }

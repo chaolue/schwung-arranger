@@ -2363,6 +2363,78 @@ function writeSongBackup(name, text) {
 /* Generate a click MIDI file (a single note per beat, for `bars` bars) and
  * write it to the given path. Returns true on success. The click note is
  * `note` (0 = no note, pad-flash only). */
+/* A deleted drum clip in a section with chords or items leaves a placeholder
+ * clip of the same length -- silence -- so the chords and items after it stay
+ * on their drums (they are placed by bar, not by clip). A pad tapped on it
+ * replaces it; Delete on it removes it. In the song it is a clip with
+ * placeholder: true and the deleted clip's timing (bars, beat trims, speed);
+ * the engine is sent a silent MIDI file long enough for it. */
+const PLACEHOLDER_DIR = "/data/UserData/UserLibrary/Arranger/.placeholders";
+const PLACEHOLDER_DIVISION = 240;
+
+/* The silent MIDI file for a placeholder of up to `bars` bars in num/den:
+ * written once, then reused. Its only event, a note-off on its last tick,
+ * sets its length (the engine takes a clip's end from its last event) and
+ * falls just past what plays. */
+function placeholderMidiPath(bars, num, den) {
+    const path = PLACEHOLDER_DIR + "/silence_" + bars + "_" + num + "-" + den + ".mid";
+    try {
+        if (typeof host_file_exists === "function" && host_file_exists(path)) return path;
+        ensureDir(PLACEHOLDER_DIR);
+        const ticks = Math.round(bars * PLACEHOLDER_DIVISION * 4 * num / den);
+        const bytes = [];
+        const push = (b) => bytes.push(b & 0xFF);
+        const push32 = (v) => { push(v >>> 24); push(v >>> 16); push(v >>> 8); push(v); };
+        const pushVlq = (v) => {
+            const buf = [v & 0x7F];
+            v >>>= 7;
+            while (v > 0) { buf.unshift((v & 0x7F) | 0x80); v >>>= 7; }
+            for (const b of buf) push(b);
+        };
+        push(0x4D); push(0x54); push(0x68); push(0x64); push32(6);
+        push(0); push(0); push(0); push(1); push(PLACEHOLDER_DIVISION >> 8); push(PLACEHOLDER_DIVISION);
+        push(0x4D); push(0x54); push(0x72); push(0x6B);
+        const lenAt = bytes.length;
+        push32(0);
+        pushVlq(ticks); push(0x80); push(0); push(0);
+        pushVlq(0); push(0xFF); push(0x2F); push(0x00);
+        const len = bytes.length - lenAt - 4;
+        bytes[lenAt] = len >>> 24; bytes[lenAt + 1] = (len >>> 16) & 0xFF;
+        bytes[lenAt + 2] = (len >>> 8) & 0xFF; bytes[lenAt + 3] = len & 0xFF;
+        const fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC);
+        if (fd < 0) return path;
+        const buf = new Uint8Array(bytes);
+        let written = 0;
+        while (written < buf.length) {
+            const n = os.write(fd, buf.buffer, written, buf.length - written);
+            if (n <= 0) break;
+            written += n;
+        }
+        os.close(fd);
+    } catch (e) {
+        logDebug("placeholderMidiPath: " + e);
+    }
+    return path;
+}
+
+/* A placeholder for `clip`: its timing, no source. */
+function placeholderFor(clip) {
+    return {
+        placeholder: true, source: "", name: "(empty)", type: "",
+        start_bar: clip.start_bar, start_beat: clip.start_beat, end_bar: clip.end_bar, end_beat: clip.end_beat,
+        speed: clip.speed, advanced: !!clip.advanced
+    };
+}
+
+/* Whether a section has chords or Inst/Click items, which deleting one of
+ * its clips would leave over the wrong drums. */
+function sectionHasTrackContent(sec) {
+    if (!sec) return false;
+    if (Array.isArray(sec.chords) && sec.chords.some(Boolean)) return true;
+    if (Array.isArray(sec.click) && sec.click.length) return true;
+    return Array.isArray(sec.inst) && sec.inst.some(l => Array.isArray(l) && l.length);
+}
+
 function writeClickMidi(path, note, beatsPerBar, division, bars, ticksPerBeat) {
     if (note <= 0) return false;
     const ppq = division || 240;
@@ -2997,10 +3069,13 @@ export function toEngineSongJson(song) {
     for (const sec of song.sections) {
         const clipsOut = [];
         for (const c of sec.clips || []) {
-            const src = resolveClipSource(c.source, song.source_folder);
             /* Clamp end_bar to a sane value so corrupt end_bar:72 songs still play one bar. */
             let endBar = c.end_bar;
             if (typeof endBar !== "number" || endBar <= 0 || endBar > 256) endBar = 1;
+            /* A placeholder plays a silent file at least as long as it. */
+            const src = c.placeholder
+                ? placeholderMidiPath(Math.ceil(endBar) + 1, song.time_sig_num || 4, song.time_sig_den || 4)
+                : resolveClipSource(c.source, song.source_folder);
             let startBar = c.start_bar;
             if (typeof startBar !== "number" || startBar < 0 || startBar >= endBar) startBar = 0;
             const startBeat = (typeof c.start_beat === "number" && c.start_beat > 0) ? c.start_beat : 0;
@@ -3029,7 +3104,7 @@ export function toEngineSongJson(song) {
             /* A clip added from a different folder than the song's primary one
              * stores its own source_folder so the DSP resolves it correctly.
              * Only emit it when it differs from the song's primary folder. */
-            if (c.source_folder && c.source_folder !== song.source_folder) {
+            if (c.source_folder && c.source_folder !== song.source_folder && !c.placeholder) {
                 clipOut.source_folder = c.source_folder;
             }
             clipsOut.push(clipOut);
@@ -3218,7 +3293,8 @@ export function toUiSong(engineLike) {
                     kick_note: c.kick_note !== undefined ? c.kick_note : 36,
                     kick_target: c.kick_target !== undefined ? c.kick_target : 0,
                     channel: c.channel !== undefined ? c.channel : 0,
-                    advanced: !!(c.advanced)
+                    advanced: !!(c.advanced),
+                    ...(c.placeholder ? { placeholder: true, name: "(empty)", type: "" } : {})
                 };
             })
         })),
@@ -5429,6 +5505,8 @@ function genericColourIndex(name) {
  * matching section or instrument) picks a colour from GENERIC_COLOURS. */
 function clipColor(clip, dim) {
     if (!clip) return dim ? GROOVE_DARK_COLOUR : GROOVE_COLOUR_BASE;
+    /* A placeholder's bars: grey, as empty. */
+    if (clip.placeholder) return DarkGrey;
     const inst = instrumentColor(clip.name, dim);
     if (inst >= 0) return inst;
     const name = clip.name || clip.path || "";
@@ -6815,6 +6893,7 @@ function drawClickStepLEDs(force) {
 /* ── Drawing ─────────────────────────────────────────────────────────── */
 
 function clipShortName(clip) {
+    if (clip.placeholder) return "(empty)";
     let name = clip.name || clipDisplayName(clip.source || clip.path || "");
     const folder = currentSong ? currentSong.source_folder : "";
     if (folder && name.startsWith(folder)) {
@@ -10019,8 +10098,9 @@ function handleBuilderInput(cc, value) {
             /* Section header -> rename (blocked when locked). */
             renameSectionPrompt(sec);
         } else if (builderCursor < sec.clips.length) {
-            /* Clip -> open trim (blocked when locked). */
-            if (!locked) openTrimView();
+            /* Clip -> open trim (blocked when locked; a placeholder has
+             * nothing to trim). */
+            if (!locked && !sec.clips[builderCursor].placeholder) openTrimView();
         }
         /* Otherwise the cursor is on the "(add clip)" row of an empty section,
          * which is not clickable. */
@@ -12521,6 +12601,15 @@ function insertClipAtCursor(clip) {
     /* Insert AFTER the current clip (or at the start when the cursor is on
      * the section header / empty section), then move the cursor onto the
      * newly inserted clip. */
+    /* On a placeholder, the clip takes its place. */
+    const onPlaceholder = sec.clips[builderCursor] && sec.clips[builderCursor].placeholder;
+    if (onPlaceholder) {
+        sec.clips[builderCursor] = newClip;
+        unsavedChanges = true;
+        stepLedsDirty = true;
+        needsRedraw = true;
+        return;
+    }
     const insertIdx = Math.max(0, Math.min(sec.clips.length, builderCursor + 1));
     sec.clips.splice(insertIdx, 0, newClip);
     builderCursor = Math.min(insertIdx, sec.clips.length);
@@ -12559,6 +12648,17 @@ function builderDisplaySectionIndex() {
 function deleteClipAtCursor() {
     const sec = currentSong ? currentSong.sections[builderDisplaySectionIndex()] : null;
     if (!sec || builderCursor < 0 || builderCursor >= sec.clips.length) return;
+    const clip = sec.clips[builderCursor];
+    /* With chords or items in the section, a clip leaves a placeholder of
+     * its length, so what follows stays on its drums; Delete on the
+     * placeholder removes it. */
+    if (!clip.placeholder && sectionHasTrackContent(sec)) {
+        sec.clips[builderCursor] = placeholderFor(clip);
+        unsavedChanges = true;
+        stepLedsDirty = true;
+        needsRedraw = true;
+        return;
+    }
     sec.clips.splice(builderCursor, 1);
     /* Select the clip before the deleted one (or the first clip when deleting
      * the first clip). */
@@ -13181,6 +13281,7 @@ function previewClipAtCursor() {
      * song. The first section keeps only the clips from the cursor onward,
      * preserving their original trims. */
     const fromCursorClips = sec.clips.slice(builderCursor).map(c => ({
+        placeholder: c.placeholder,
         source: c.source,
         /* The clip's own folder. Leaving it out made the DSP look for a clip
          * borrowed from another folder in the song's folder, find it by
@@ -14487,7 +14588,8 @@ function builderClickAction() {
         const sec = currentSong ? currentSong.sections[builderDisplaySectionIndex()] : null;
         if (!sec) return null;
         if (builderCursor < 0) return "NAME";
-        return builderCursor < sec.clips.length ? "TRIM" : null;
+        const clip = sec.clips[builderCursor];
+        return clip && !clip.placeholder ? "TRIM" : null;
     }
     const sec = currentSong ? currentSong.sections[chordDisplaySectionIndex()] : null;
     if (!sec) return null;
@@ -14511,7 +14613,11 @@ function builderFooterHints() {
     const first = clk ? ["CLK", clk] : ["MENU", "SET"];
     if (builderTrack === TRACK_DRUM) {
         if (shiftHeld) return [["CLK", "SET"], ["PLAY", "SONG"], ["BACK", "OUT"]];
-        return locked ? [["T1", "CHORD"], first, ["BACK", "OUT"]] : [["PAD", "ADD"], ["T1", "CHORD"], first];
+        if (locked) return [["T1", "CHORD"], first, ["BACK", "OUT"]];
+        /* A pad fills a selected placeholder rather than adding after it. */
+        const dsec = currentSong ? currentSong.sections[builderDisplaySectionIndex()] : null;
+        const onPh = dsec && dsec.clips[builderCursor] && dsec.clips[builderCursor].placeholder;
+        return [["PAD", onPh ? "FILL" : "ADD"], ["T1", "CHORD"], first];
     }
     if (shiftHeld) {
         /* Shift + jog moves the selected chord or item. */

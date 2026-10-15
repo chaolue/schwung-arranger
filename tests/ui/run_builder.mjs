@@ -13,6 +13,10 @@ const song = (name, extra) => JSON.stringify(Object.assign({ name, tempo_bpm: 12
 H.files.set(SONGS + "/plain.json", song("Plain"));
 H.files.set(SONGS + "/locked.json", song("Locked", { locked: true }));
 const sec = (name, bars, chords) => ({ name, clips: [{ source: "Grooves/beat.mid", name: "beat", start_bar: 0, end_bar: bars }], chords });
+H.files.set(SONGS + "/chorded.json", song("Chorded", { sections: [
+    { name: "A", clips: [1, 2, 3].map(n => ({ source: "Grooves/g" + n + ".mid", name: "g" + n, start_bar: 0, end_bar: 2 })),
+      chords: [{ root: "C", quality: "maj" }] },
+    { name: "B", clips: [1, 2].map(n => ({ source: "Grooves/g" + n + ".mid", name: "g" + n, start_bar: 0, end_bar: 1 })) }] }));
 H.files.set(SONGS + "/multi.json", song("Multi", { sections: [
     sec("Chorus", 2, [{ root: "C", quality: "maj" }, { root: "G", quality: "maj" }]),
     sec("Verse", 2, [{ root: "A", quality: "min" }]),
@@ -21,7 +25,7 @@ H.files.set(SETLISTS + "/gig.json", JSON.stringify({ id: "s1", name: "Gig", song
     { id: "e1", name: "Plain", path: SONGS + "/plain.json", click_bars: 2 }], knobs: [] }));
 /* The DSP's song list. */
 const songList = [{ name: "Locked", path: SONGS + "/locked.json" }, { name: "Plain", path: SONGS + "/plain.json" },
-                  { name: "Multi", path: SONGS + "/multi.json" }];
+                  { name: "Multi", path: SONGS + "/multi.json" }, { name: "Chorded", path: SONGS + "/chorded.json" }];
 globalThis.host_module_get_param = (k) =>
     k === "songs_json" ? JSON.stringify({ count: songList.length, start: 0, items: songList }) : null;
 
@@ -140,6 +144,41 @@ check(ch(2) === '["C"]', "Chorus 2 (1 bar) gets the Chorus's first bar: " + ch(2
 check(ch(1) === '["A"]', "Verse is untouched: " + ch(1));
 const S = { sections: [sec("Chorus", 2, []), sec("chorus 3", 1, []), sec("Bridge", 1, [])] };
 check(JSON.stringify(M.sameNamedSections(S, 0)) === "[1]", "same-named ignores case and the number");
+
+/* ---- deleting a drum clip in a section with chords leaves a placeholder ---- */
+jog(-8); jog(4); click();     /* Chorded, section A */
+if (has(["T1", "DRUM"])) press(C.MoveRow1);    /* the Drum track */
+jog(-8); jog(2);              /* clip 2 */
+press(C.MoveDelete);
+check(H.printed.includes("(empty)") && H.printed.includes("g3"), "Delete leaves (empty) in its place: " + JSON.stringify(H.printed));
+check(has(["PAD", "FILL"]) && clk() === null, "on it, pads fill it and the click has nothing to trim: " + hints());
+press(C.MoveDelete);
+check(!H.printed.includes("(empty)") && H.printed.includes("g3"), "Delete on the placeholder removes it: " + JSON.stringify(H.printed));
+press(C.MoveRight);           /* section B: no chords */
+jog(1); press(C.MoveDelete);
+check(!H.printed.includes("(empty)"), "without chords or items, Delete removes the clip as before: " + JSON.stringify(H.printed));
+back();
+let chorded = JSON.parse(H.files.get(SONGS + "/chorded.json"));
+check(chorded.sections[0].clips.length === 2 && chorded.sections[1].clips.length === 1, "saved: " +
+      chorded.sections.map(s => s.clips.length));
+
+/* The engine gets a silent file at least as long as the placeholder. */
+const OS = await import('./os_mock.mjs');
+OS.captureWrites(true);
+const ph = { placeholder: true, source: "", name: "(empty)", start_bar: 0, end_bar: 2 };
+const engOut = M.toEngineSongJson({ name: "P", time_sig_num: 4, time_sig_den: 4, source_folder: "F",
+    sections: [{ name: "A", clips: [ph], chords: [] }] });
+const eng = typeof engOut === "string" ? JSON.parse(engOut) : engOut;
+const c0 = eng.sections[0].clips[0];
+check(/\/\.placeholders\/silence_3_4-4\.mid$/.test(c0.source) && c0.end_bar === 2 && !c0.source_folder,
+      "a placeholder is sent as the silent file, keeping its bars: " + JSON.stringify(c0));
+const bytes = OS.written.get(c0.source) || [];
+/* MThd(14) MTrk(8), then a note-off at 3 bars * 960 = 2880 (VLQ 0x96 0x40), end of track. */
+check(JSON.stringify(bytes.slice(22)) === JSON.stringify([0x96, 0x40, 0x80, 0, 0, 0, 0xFF, 0x2F, 0]) && bytes[13] === 240,
+      "the silent file: one note-off on its last tick, division 240: " + JSON.stringify(bytes));
+OS.captureWrites(false);
+check(M.toUiSong({ name: "P", sections: [{ name: "A", clips: [ph] }] }).sections[0].clips[0].placeholder === true,
+      "a placeholder survives loading");
 
 /* ---- Follow Note: with Bass voicing, up from Off jumps to the kick ---- */
 check(M.stepFollowNote(0, 1, true) === 36 && M.stepFollowNote(0, 1, false) === 1, "Off +1: 36 for Bass, 1 for Chord");

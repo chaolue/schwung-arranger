@@ -103,7 +103,7 @@ playback (Play, Back) work the same on every track.
 | Play (stopped) | Preview the clip at the cursor (LED green) |
 | Shift + Play | Save and play from the start of the song |
 | Record (blue)| Change the MIDI song's source folder (reloads the clip palette from the selected folder) |
-| Delete | Delete the clip at the cursor |
+| Delete | Delete the clip at the cursor. In a section with chords or Inst/Click items it leaves an **(empty)** placeholder of the same length, so what follows stays on its drums; tap a pad to fill it, or Delete again to remove it |
 | Shift + Delete | Delete the current section (must keep at least one) |
 | Copy | Duplicate the clip at the cursor |
 | Shift + Copy | Duplicate the current section |

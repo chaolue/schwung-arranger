@@ -18,6 +18,9 @@
   Custom... for the keyboard.
 - Loop on the Chord, Inst or Click track copies the section's chords/items
   to every other section with the same name (Chorus, Chorus 2, ...).
+- Deleting a drum clip in a section with chords or items leaves an (empty)
+  placeholder of the same length, so the chords and items after it stay on
+  their drums. A pad fills it; Delete again removes it.
 
 ### Playback
 - Stop sends every instrument note-off at once, so each synth plays its own
