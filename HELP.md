@@ -127,7 +127,7 @@ is named like a duplicate (Verse → Verse 2).
 
 Playback keeps running while you browse: moving the cursor with the jog wheel, changing the palette page (Up/Down), or moving sections (Left/Right) does not stop playback. While playing, the display and step LEDs follow the section you navigate to, then resume following the playhead on the next section change.
 
-**Button LED hints:** Back, Main, Copy, arrows, Delete, Play and Record are lit. Shift is dim; hold it to see Main, Copy, Loop, Delete, Left/Right and Play brighten for their alternate functions. Track 1 is lit white for the Drum track.
+**Button LED hints:** Back, Copy, arrows, Delete, Play and Record are lit, and Main where the jog click does something (not on a locked song). Shift is dim; hold it to see Main, Copy, Loop, Delete, Left/Right and Play brighten for their alternate functions. Track 1 is lit white for the Drum track.
 
 ---
 
@@ -200,7 +200,8 @@ change is kept exactly as it was, even one whose root is outside the key.
 
 Play a synth/bass part alongside the drums, following the Chord Track's harmony.
 There are two independent instrument tracks — press **Track 2** for Instrument 1
-and **Track 3** for Instrument 2. Each plays with its track settings (Menu) by
+and **Track 3** for Instrument 2, and press it again to turn that instrument on
+or off (its Enabled setting). Each plays with its track settings (Menu) by
 default; an **item** changes them from a bar and beat until the section's next
 item — mute it, change its octave, follow note, voicing, inversion or note gap.
 Each section starts on the track settings.
@@ -213,7 +214,11 @@ Shift + jog, Delete, Copy, step buttons, Mute, Left/Right), plus:
 |---------|--------|
 | Jog click (on an item) | Open Item Settings for it |
 | Jog click (on + Add) | Add an item after the last one and open it |
+| Track 2 / 3 (on its own track) | Turn the instrument on or off — heard at once while playing (switching on an instrument that was off when playback started sounds from the next Play) |
 | Menu | Open Instrument Settings for this track |
+
+Items play against the chords, so while the song has no chords the Inst and
+Click tracks show **(add chords first)** in place of **+ Add**.
 
 | Item field | Meaning |
 |------------|---------|
@@ -262,7 +267,7 @@ Instrument track.
 |-------|---------|
 | Enabled | On/Off for this instrument track |
 | Octave | Octave shift applied to the chord/note (-1 to 8) |
-| Follow Note | When set (1–127), the instrument fires alongside that drum note instead of on the chord/bar grid (e.g. a bass that follows the kick). 0 = off, follows the bar grid instead |
+| Follow Note | When set (1–127), the instrument fires alongside that drum note instead of on the chord/bar grid (e.g. a bass that follows the kick). 0 = off, follows the bar grid instead. With Bass voicing, turning up from Off jumps straight to 36 (the kick) |
 | Voicing | **Chord** plays the full chord; **Bass** plays only the chord's root/bass note |
 | Inversion | Which chord note is at the bottom (Chord voicing only): **Root**, **1st**, **2nd**, **3rd**, or **Auto** (see below) |
 | Note Gap | How far before the next note-on this instrument's current note is cut short (0 to 1 beat), so notes don't run into each other |
@@ -328,7 +333,7 @@ key and the song lock, or restore an earlier version of the song.
 | Tempo | Song tempo in BPM |
 | Time Signature | Beats per bar / beat unit |
 | Key | The song's key — changing it transposes every existing chord to the same relative harmony in the new key |
-| Lock Song | When On, the song cannot be renamed, deleted, or edited |
+| Lock Song | When On, the song cannot be renamed, deleted, or edited — clips, chords and items included. The footer then offers Menu (to reach this setting) in place of the click |
 | Restore Backup | Opens the list of saved versions of this song (the value is how many there are) |
 
 #### Restore Backup
@@ -356,17 +361,18 @@ locked.
 
 ### Setlist Bank
 
-Browse, create, rename, and delete setlists.
+Browse, create, rename, copy and delete setlists.
 
 | Control | Action |
 |---------|--------|
 | Jog wheel | Scroll the list (first item is "+ New Setlist") |
 | Jog click | Open the selected setlist for editing |
 | Shift + Jog click (on existing setlist) | Rename the selected setlist |
+| Copy (on existing setlist) | Duplicate the selected setlist (songs, their settings and knobs) as "<name> copy" |
 | Delete (on existing setlist) | Delete the selected setlist |
 | Back | Return to Root Menu |
 
-**Button LED hints:** Back, Main and Delete are lit; Shift is dim and brightens when held for renaming.
+**Button LED hints:** Back, Main, Copy and Delete are lit; Shift is dim and brightens when held for renaming.
 
 ---
 
@@ -378,14 +384,13 @@ Add, reorder, remove songs, and configure per-song options.
 |---------|--------|
 | Jog wheel | Scroll the songs in the setlist (then "(add song)" and "(knobs)") |
 | Shift + Jog wheel | Move the selected song up / down in the set |
-| Jog click (on a song) | Open Click Settings for that song |
+| Jog click (on a song) | Open that song's settings — count-in click, stop at end, knobs (see **Setlist Song Settings**) |
 | Jog click (on "(add song)") | Open the Song Bank to add a song |
 | Jog click (on "(knobs)") | Map the setlist's Performance knobs — see **Performance Knobs** below |
 | Delete | Remove the selected song from the setlist |
-| Left / Right | Move the selected song earlier / later in the setlist |
 | Back | Return to Setlist Bank |
 
-**Button LED hints:** Back, Main, Delete and Left/Right are lit; Shift is dim and brightens when held for moving songs.
+**Button LED hints:** Back, Main and Delete are lit; Shift is dim and brightens when held for moving songs.
 
 ---
 
@@ -580,6 +585,7 @@ Press Track 2 or Track 3 to turn on Inst 1 or Inst 2 and play chords over the gr
 | Track 1 / 2 / 3 | Turn Drums / Inst 1 / Inst 2 on or off |
 | Track 4 | Turn the click on or off (lit orange while on) |
 | Shift + Track 2 / 3 | Open the settings for Inst 1 / Inst 2 |
+| Record | Start or stop recording the Schwung mix to a WAV file (see below) |
 | Play | Stop (if a preview is playing) |
 | Back | Return to the Jam Folder picker |
 
@@ -600,6 +606,7 @@ Press Track 2 or Track 3 to turn on Inst 1 or Inst 2 and play chords over the gr
 | Track 1 / 2 / 3 | Turn Drums / Inst 1 / Inst 2 on or off immediately |
 | Track 4 | Turn the click on or off (lit orange while on) |
 | Shift + Track 2 / 3 | Open the settings for Inst 1 / Inst 2 |
+| Record | Start or stop recording the Schwung mix to a WAV file (see below) |
 | Play | Stop playback |
 | Back | Stop and return to the Jam Folder picker |
 
@@ -607,16 +614,18 @@ While a fill plays, the groove it will return to is shown in green; once the ret
 
 Step LEDs show the current clip's bar layout, flashing white-to-black on the current bar as it plays. Fills overlay the groove's bars where they fall.
 
-**Button LED hints:** Back, Up, Down, Left and Right are lit; Play is green while playing. Track 1, 2 and 3 are lit in their track colour while that part is on.
+**Recording:** as in Perform, Record records Schwung's audio output to `UserLibrary/Recordings/Arranger/Jam_<folder>_<date-time>.wav` until you press it again or leave Jam, independently of Play/Stop. Record is red while recording and white otherwise.
+
+**Button LED hints:** Back, Up, Down, Left and Right are lit; Play is green while playing (it stops playback) and off while stopped — a pad starts playback. Track 1, 2 and 3 are lit in their track colour while that part is on.
 
 #### Jam Chord Pads
 
-Turn on Inst 1 or Inst 2 with Track 2 or Track 3 to show the chord pads. The two left columns hold the 8 chords of the current key, starting at the bottom-left pad and going up each column: I, ii, iii, IV (column 1), then V, vi, vii° and the root chord an octave up (column 2). Shift + Jog wheel changes the key. Changing the key moves the current chord into the new key once you release Shift, taking effect at the start of the next bar (or when you press Play, if stopped); its pad shows red until then.
+Turn on Inst 1 or Inst 2 with Track 2 or Track 3 to show the chord pads. The two left columns hold the 8 chords of the current key, starting at the bottom-left pad and going up each column: I, ii, iii, IV (column 1), then V, vi, vii° and the root chord an octave up (column 2). Shift + Jog wheel changes the key. Changing the key moves the current chord into the new key once you release Shift, taking effect at the start of the next bar (or when playback starts, if stopped); its pad shows red until then.
 
 Both instruments play the same chosen chord.
 
 - **While playing:** a tapped chord pad turns red and takes effect at the start of the next bar, then turns white. If a groove or fill change is queued for the same bar, the chord changes with it.
-- **While stopped:** the chord that was playing stays lit green and resumes when you press Play. Tap another pad to choose a different starting chord, or tap the green pad again to clear it.
+- **While stopped:** the chord that was playing stays lit green and resumes when playback starts (by tapping a groove or intro fill pad). Tap another pad to choose a different starting chord, or tap the green pad again to clear it.
 
 The chord keeps playing until you pick another one, turn the instrument off, or stop playback. Leaving Jam clears the chord.
 
@@ -637,7 +646,7 @@ Hold Shift and press Track 2 or Track 3 to open that instrument's settings. Chan
 | Setting | Effect |
 |---------|--------|
 | Octave | Octave the chord is played in |
-| Follow Note | The drum note that triggers each chord hit. A hit just before the barline plays the next bar's chord. **Off** plays the chord once at the start of every bar |
+| Follow Note | The drum note that triggers each chord hit. A hit just before the barline plays the next bar's chord. **Off** plays the chord once at the start of every bar. With Bass voicing, turning up from Off jumps straight to 36 (the kick) |
 | Voicing | **Bass** plays the chord's root note; **Chord** plays the full chord |
 | Inversion | Which chord note is at the bottom (Chord voicing only). **Auto**, the default, voice-leads by the chord's place in the key, the same as Song Builder's Auto |
 | Note Gap | How early each note is cut before the next one |

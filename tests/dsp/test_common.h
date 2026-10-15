@@ -64,7 +64,9 @@ static int g_failures = 0;
 #define ROUTE_INTERNAL 0
 #define ROUTE_MOVE 1
 #define ROUTE_EXTERNAL 2
-typedef struct { uint8_t status; uint8_t note; uint8_t vel; uint8_t channel; uint8_t route; } captured_event_t;
+typedef struct { uint8_t status; uint8_t note; uint8_t vel; uint8_t channel; uint8_t route; int block; } captured_event_t;
+/* The render block an event was sent in, when a test sets it per block. */
+static int g_block = 0;
 #define MAX_CAPTURED 4096
 static captured_event_t g_captured[MAX_CAPTURED];
 static int g_captured_count = 0;
@@ -90,6 +92,7 @@ static int host_capture_midi(const uint8_t *m, int l, uint8_t route) {
             g_captured[g_captured_count].note = m[2];
             g_captured[g_captured_count].vel = m[3];
             g_captured[g_captured_count].route = route;
+            g_captured[g_captured_count].block = g_block;
             g_captured_count++;
         }
     }

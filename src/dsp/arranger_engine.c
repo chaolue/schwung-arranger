@@ -2864,8 +2864,11 @@ static void emit_instruments_at_tick(engine_t *e, uint32_t tick) {
             }
             /* Schedule the note-off `note_gap` before the next chord change
              * (or the song end), so the note is cut short rather than the new
-             * note being delayed. */
-            if (!next_ch || !next_ch->set || !chord_equal(ch, next_ch)) {
+             * note being delayed. The same chord set again there is a change
+             * too: without the gap its note-off and fresh note-on landed on
+             * the same tick, and the repeat was not heard as a new attack. */
+            int next_explicit = next_ch ? np.explicit_here : 0;
+            if (!next_ch || !next_ch->set || !chord_equal(ch, next_ch) || next_explicit) {
                 uint32_t gap = (uint32_t)(resolved.note_gap * e->ticks_per_beat);
                 uint32_t off_tick = bar_end_tick > gap ? bar_end_tick - gap : 0;
                 if (off_tick <= tick) off_tick = tick + 1;

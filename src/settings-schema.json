@@ -4,31 +4,15 @@
     "items": [
         {
             "key": "output",
-            "label": "Default MIDI Output",
+            "label": "Drums MIDI Output",
             "type": "enum",
             "options": ["External", "Move", "Schwung"],
             "values": ["external", "move", "schwung"],
             "default": "schwung"
         },
         {
-            "key": "output_channel",
-            "label": "Default External Output Channel",
-            "type": "int",
-            "min": 1,
-            "max": 16,
-            "default": 10
-        },
-        {
-            "key": "move_channel",
-            "label": "Default Move Output Channel",
-            "type": "int",
-            "min": 1,
-            "max": 16,
-            "default": 10
-        },
-        {
-            "key": "schwung_channel",
-            "label": "Default Schwung Output Channel",
+            "key": "drums_channel",
+            "label": "Drums MIDI Channel",
             "type": "int",
             "min": 1,
             "max": 16,

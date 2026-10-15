@@ -82,6 +82,7 @@ int main(int argc, char **argv) {
     /* 3 bars at 120bpm 4/4 = 6s; bounded generously. */
     int16_t audio[MOVE_FRAMES_PER_BLOCK * 2];
     for (int b = 0; b < 5000; b++) {
+        g_block = b;
         api->render_block(inst, audio, MOVE_FRAMES_PER_BLOCK);
     }
     api->set_param(inst, "stop", "1");
@@ -107,6 +108,21 @@ int main(int argc, char **argv) {
      * carry an explicit C chord -- must be two separate attacks (note-on
      * fired twice), not one bar silently holding into the next. */
     CHECK(c_on_count >= 2, "fix 2: explicit repeated chord on consecutive bars retriggers (2+ note-ons)");
+
+    /* ...and the first C is released note_gap (1/8 beat, ~62 ms: ~20
+     * blocks) BEFORE the second attack, not on the same tick -- an off and
+     * on together were not heard as a new attack. */
+    int first_on = -1, off_block = -1, second_on = -1;
+    for (int i = 0; i < g_captured_count; i++) {
+        const captured_event_t *ev = &g_captured[i];
+        if (ev->note != 48) continue;
+        if (ev->status == 0x90 && first_on < 0) first_on = ev->block;
+        else if (ev->status == 0x80 && first_on >= 0 && off_block < 0) off_block = ev->block;
+        else if (ev->status == 0x90 && off_block >= 0 && second_on < 0) second_on = ev->block;
+    }
+    CHECK(off_block >= 0 && second_on >= 0 && second_on - off_block >= 10,
+          "fix 2: the repeated chord is released note_gap before its fresh attack");
+    printf("C on@%d off@%d on@%d (blocks)\n", first_on, off_block, second_on);
 
     printf("captured %d events total (C note-ons=%d, D note-ons=%d)\n",
            g_captured_count, c_on_count, d_on_count);

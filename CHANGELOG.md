@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased
+
+### Song Builder
+- The footer names only what works on the selected row: **NAME** on a
+  section row, **ADD** on "+ Add", and **MENU** where the click does nothing.
+  A locked song shows no click, pad or move actions; its chords and items
+  no longer open for editing.
+- With no chords in the song, the Inst and Click tracks show
+  "(add chords first)" in place of "+ Add".
+- Track 2 / 3 on the Inst 1 / 2 track turn that instrument on or off, as
+  Track 4 does the click.
+- A chord set on a bar that repeats the previous bar's chord is heard again:
+  the held chord is released note-gap before it, as for a chord change.
+- Follow Note: with Bass voicing, turning up from Off jumps to 36 (kick).
+
+### Setlists
+- Copy duplicates a setlist.
+- Setlist Edit: Left/Right no longer move songs (Shift + jog does).
+
+### Jam
+- Record records the Schwung mix to a WAV, as in Perform.
+
+### Options
+- The web UI shows one Drums MIDI Channel (the selected output's) instead
+  of one per output type.
+
 ## 0.6.0
 
 ### Song Builder

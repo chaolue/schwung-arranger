@@ -1228,11 +1228,12 @@ function refreshPerfKnobs() {
     needsRedraw = true;
 }
 
-/* Perform-mode recording: Record toggles Schwung's own sampler, recording
+/* Perform and Jam recording: Record toggles Schwung's own sampler, recording
  * the Schwung mix ("Resample") to a WAV under RECORDINGS_DIR -- the same
  * host_sampler_* calls Schwung's Song Mode tool uses. Independent of
  * playback, so a set can be recorded across several Play/Stops. Stops when
- * leaving Perform. */
+ * leaving Perform or Jam. The file is named after the setlist, or the Jam
+ * folder. */
 const RECORDINGS_DIR = "/data/UserData/UserLibrary/Recordings/Arranger";
 let perfRecording = false;
 
@@ -1240,7 +1241,7 @@ function perfRecordingAvailable() {
     return typeof host_sampler_start === "function" && typeof host_sampler_stop === "function";
 }
 
-function perfToggleRecording() {
+function perfToggleRecording(label) {
     if (perfRecording) { perfStopRecording(); return; }
     if (!perfRecordingAvailable()) {
         showPopup("Recording", "Not available on this Schwung", 3000);
@@ -1248,7 +1249,7 @@ function perfToggleRecording() {
         return;
     }
     const stamp = new Date().toISOString().replace(/[:.]/g, "-").substring(0, 19);
-    const name = safeFileName(currentSetlist ? (currentSetlist.name || "set") : "set");
+    const name = safeFileName(label || "set");
     const path = RECORDINGS_DIR + "/" + name + "_" + stamp + ".wav";
     try { ensureDir(RECORDINGS_DIR); } catch (e) {}
     if (typeof host_sampler_set_source === "function") host_sampler_set_source(0); /* Schwung mix */
@@ -3471,6 +3472,16 @@ function loadSettings() {
     if (typeof mc === "number") moveChannel = mc;
     const sc = pick("schwung_channel", "number");
     if (typeof sc === "number") schwungChannel = sc;
+    /* The web UI shows the drums one channel -- the selected output's --
+     * as drums_channel; the per-output channels above remember each
+     * output's, and are written for that. drums_channel, when saved, is
+     * the selected output's channel. */
+    const dc = saved.drums_channel;
+    if (typeof dc === "number") {
+        if (outputTarget === "move") moveChannel = dc;
+        else if (outputTarget === "schwung") schwungChannel = dc;
+        else outputChannel = dc;
+    }
     const co = pick("click_output", "string");
     if (typeof co === "string") clickOutput = co;
     const cmc = pick("click_midi_channel", "number");
@@ -3572,6 +3583,7 @@ function saveOutputSettings() {
         output_channel: outputChannel,
         move_channel: moveChannel,
         schwung_channel: schwungChannel,
+        drums_channel: activeOutputChannel(),
         click_output: clickOutput,
         click_midi_channel: clickMidiChannel,
         click_accent_note: clickAccentNote,
@@ -5085,7 +5097,9 @@ function updateButtonLEDs() {
                     const ledTotalPages = builderPageCount();
                     const ledHasUp = builderPage > 0;
                     const ledHasDown = builderPage < ledTotalPages - 1;
-                    active.set(MoveMainButton, WhiteLedFull);
+                    /* Lit where the click does something (as the footer
+                     * says -- see builderClickAction). */
+                    if (builderClickAction()) active.set(MoveMainButton, WhiteLedFull);
                     /* Loop, Copy, and Delete do nothing on a locked song, so keep
                      * them black (not added to the active map). */
                     if (!ledLocked) {
@@ -5125,13 +5139,14 @@ function updateButtonLEDs() {
                     }
                 } else {
                     /* The Chord, Inst and Click tracks' lists: the jog click
-                     * always does something (edit, rename, add); Copy and
+                     * edits, renames or adds where it can (builderClickAction,
+                     * as the footer shows); Copy and
                      * Delete act on a selected chord/item, so they light only
                      * there -- and not on a locked song. Shift+jog moves the
                      * selected one. */
                     const ledListSec = currentSong ? currentSong.sections[chordDisplaySectionIndex()] : null;
                     const ledOnItem = listCursorBar(ledListSec) >= 0;
-                    active.set(MoveMainButton, WhiteLedFull);
+                    if (builderClickAction()) active.set(MoveMainButton, WhiteLedFull);
                     if (!ledLocked && ledOnItem) {
                         active.set(MoveCopy, WhiteLedFull);
                         active.set(MoveDelete, WhiteLedFull);
@@ -5190,6 +5205,7 @@ function updateButtonLEDs() {
                 active.set(MoveMainButton, WhiteLedFull);
                 if (selectedSetlistIndex > 0) {
                     active.set(MoveDelete, WhiteLedFull);
+                    active.set(MoveCopy, WhiteLedFull);
                     /* Shift (rename) only applies to an existing setlist, not
                      * the "+ New Setlist" row. */
                     active.set(MoveShift, WhiteLedDim);
@@ -5202,8 +5218,6 @@ function updateButtonLEDs() {
                 active.set(MoveBack, WhiteLedFull);
                 active.set(MoveMainButton, WhiteLedFull);
                 if (!onAddSong) active.set(MoveDelete, WhiteLedFull);
-                if (!onAddSong && setlistSongIndex > 0) active.set(MoveLeft, WhiteLedFull);
-                if (!onAddSong && setlistSongIndex < songs.length - 1) active.set(MoveRight, WhiteLedFull);
                 if (!onAddSong) {
                     /* Shift has no action on "(add song)", so leave it black. */
                     active.set(MoveShift, WhiteLedDim);
@@ -5283,6 +5297,7 @@ function updateButtonLEDs() {
                     if (jamFillScroll < maxFillScroll) active.set(MoveRight, WhiteLedFull);
                 }
                 active.set(MovePlay, jamPlaying ? PureGreen : Black);
+                if (perfRecordingAvailable()) active.set(MoveRec, perfRecording ? PureRed : White);
                 active.set(MoveRow1, jamDrumEnabled ? TRACK_ROW_COLOUR[TRACK_DRUM] : Black);
                 active.set(MoveRow2, jamInst1Enabled ? TRACK_ROW_COLOUR[TRACK_INSTRUMENT_1] : Black);
                 active.set(MoveRow3, jamInst2Enabled ? TRACK_ROW_COLOUR[TRACK_INSTRUMENT_2] : Black);
@@ -7181,6 +7196,8 @@ function chordListClick() {
     const sec = currentSong ? currentSong.sections[secIndex] : null;
     if (!sec) return;
     const evs = sectionChordEvents(sec);
+    /* A locked song's chords are read-only, as its clips are. */
+    if (songIsLocked()) return;
     if (chordListCursor < 0) {
         renameSectionPrompt(sec);
         return;
@@ -7621,7 +7638,7 @@ function handleInstrumentInput(cc, value) {
             } else if (instrumentFocus === 1) {
                 inst.octave = Math.max(-1, Math.min(8, inst.octave + delta));
             } else if (instrumentFocus === 2) {
-                inst.follow_note = Math.max(0, Math.min(127, inst.follow_note + delta));
+                inst.follow_note = stepFollowNote(inst.follow_note, delta, inst.voicing !== "chord");
             } else if (instrumentFocus === 3) {
                 inst.voicing = (inst.voicing === "chord") ? "bass" : "chord";
             } else if (instrumentFocus === 4) {
@@ -7663,6 +7680,16 @@ function handleInstrumentInput(cc, value) {
 }
 
 /* ── Instrument per-bar override menu ───────────────────────────────── */
+
+/* Follow Note, turned by `delta` from `cur` (0 = Off). With Bass voicing,
+ * turning up from Off jumps straight to 36 -- the kick -- which is what a
+ * bass line nearly always follows, instead of 36 detents through notes no
+ * drum kit uses. Down from there steps normally (35 is a kick too). */
+export function stepFollowNote(cur, delta, bass) {
+    const v = typeof cur === "number" ? cur : 0;
+    if (bass && v === 0 && delta > 0) return Math.min(127, 36 + delta - 1);
+    return Math.max(0, Math.min(127, v + delta));
+}
 
 /* Cycle an "optional integer" field (Octave, Follow Note) between an
  * explicit value in [min, max] and null ("Default"), which sits one step
@@ -7734,6 +7761,18 @@ function itemAtBarStart(list, bar) {
     return last;
 }
 
+/* Whether the song has a chord anywhere: the Inst and Click tracks' items
+ * play against the chords, so "+ Add" needs one. */
+export function songHasChords(song) {
+    if (!song || !Array.isArray(song.sections)) return false;
+    return song.sections.some(sec => sec && Array.isArray(sec.chords) &&
+        sec.chords.some((e, bar) => e && barChords(sec, bar).some(c => c && !c.none)));
+}
+
+function itemAddAvailable() {
+    return songHasChords(viewSong() || currentSong);
+}
+
 function itemTrackSection() {
     const secIndex = chordDisplaySectionIndex();
     return { secIndex, sec: currentSong ? currentSong.sections[secIndex] : null };
@@ -7768,7 +7807,7 @@ function drawItemTrack() {
     if (itemListCursor > list.length) itemListCursor = list.length;
     const items = [{ type: "section" }];
     for (const it of list) items.push({ type: "item", it });
-    items.push({ type: "add" });
+    items.push({ type: itemAddAvailable() ? "add" : "nochords" });
     drawMenuList({
         ...LIST_ROW_FIT,
         labelX: 3,
@@ -7777,6 +7816,8 @@ function drawItemTrack() {
         getLabel: (row) => {
             if (row.type === "section") return sec.name || "Section";
             if (row.type === "item") return itemLabel(track, row.it);
+            /* Nothing to play an item against yet: say why instead. */
+            if (row.type === "nochords") return "(add chords first)";
             return "+ Add";
         },
         getValue: (row) => {
@@ -7843,10 +7884,15 @@ function itemListClick() {
     const { secIndex, sec } = itemTrackSection();
     if (!sec) return;
     const list = sortItems(sectionItems(sec, builderTrack));
+    /* A locked song's items are read-only, as its clips are. */
+    if (songIsLocked()) return;
     if (itemListCursor < 0) { renameSectionPrompt(sec); return; }
     const it = list[itemListCursor];
     if (it) { openItemEdit(builderTrack, secIndex, it); return; }
-    if (songIsLocked()) return;
+    if (!itemAddAvailable()) {
+        showPopup(itemTrackName(builderTrack), "Add a chord to the Chord track first", 2000);
+        return;
+    }
     const last = list[list.length - 1];
     const pos = itemAppendPos(list, sec);
     if (!pos) { showPopup(itemTrackName(builderTrack), "No free beat after the last item", 2000); return; }
@@ -8050,7 +8096,11 @@ function handleInstrumentBarMenuInput(cc, value) {
             } else if (row.key === "octave") {
                 w.octave = cycleOptionalInt(w.octave, delta, -1, 8);
             } else if (row.key === "follow") {
-                w.follow_note = cycleOptionalInt(w.follow_note, delta, 0, 127);
+                const inst = instrumentForTrack(itemEditTrack);
+                const voicing = w.voicing || (inst ? inst.voicing : "bass");
+                w.follow_note = w.follow_note === 0 && delta > 0 && voicing !== "chord"
+                    ? stepFollowNote(0, delta, true)
+                    : cycleOptionalInt(w.follow_note, delta, 0, 127);
             } else if (row.key === "voicing") {
                 const states = [null, "bass", "chord"];
                 const cur = states.indexOf(w.voicing === undefined ? null : w.voicing);
@@ -8205,7 +8255,7 @@ function handleJamInstrumentMenuInput(cc, value) {
                 cfg.octave = Math.max(-1, Math.min(8, cfg.octave + delta));
                 if (typeof host_module_set_param === "function") host_module_set_param(key + "octave", String(cfg.octave));
             } else if (jamInstrumentFocus === 1) {
-                cfg.follow_note = Math.max(0, Math.min(127, cfg.follow_note + delta));
+                cfg.follow_note = stepFollowNote(cfg.follow_note, delta, cfg.voicing !== "chord");
                 if (typeof host_module_set_param === "function") host_module_set_param(key + "follow_note", String(cfg.follow_note));
             } else if (jamInstrumentFocus === 2) {
                 cfg.voicing = (cfg.voicing === "chord") ? "bass" : "chord";
@@ -9495,7 +9545,9 @@ function drawPerfSetlist() {
 /* ── Jam mode ───────────────────────────────────────────────────────── */
 
 /* Load the clips for the given folder index into the Jam groove/fill lists. */
+let jamFolderLabel = "";   /* the Jam folder's name, for recordings */
 function jamLoadFolder(folderIndex) {
+    jamFolderLabel = String(libraryFolders[folderIndex] || "jam").split("/").pop();
     jamGrooves = [];
     jamFills = [];
     jamVisibleFillList = [];
@@ -9844,7 +9896,11 @@ function handleBuilderInput(cc, value) {
             builderTrack = (builderTrack === TRACK_DRUM) ? TRACK_CHORD : TRACK_DRUM;
             if (builderTrack === TRACK_CHORD) { chordCursorBar = 0; chordCursorIdx = 0; chordListCursor = 0; }
         } else {
-            builderTrack = (cc === MoveRow2) ? TRACK_INSTRUMENT_1 : TRACK_INSTRUMENT_2;
+            const track = (cc === MoveRow2) ? TRACK_INSTRUMENT_1 : TRACK_INSTRUMENT_2;
+            /* Pressed again on its own track, it turns the instrument on or
+             * off, as Track 4 does the click. */
+            if (builderTrack === track) { toggleBuilderInstrument(track); return; }
+            builderTrack = track;
             itemListCursor = 0;
             chordCursorBar = -1;
         }
@@ -10061,6 +10117,24 @@ function handleBuilderInput(cc, value) {
         }
         needsRedraw = true;
     }
+}
+
+/* Song Builder, Track 2/3 on the Inst 1/2 track: turn the instrument on or
+ * off -- the song's Enabled setting (Menu > Enabled). While playing, the
+ * change is heard at once through the engine's live mute; switching on an
+ * instrument that was off when playback started sounds from the next Play,
+ * since the song the engine is playing has it off. */
+function toggleBuilderInstrument(track) {
+    const inst = instrumentForTrack(track);
+    if (!inst) return;
+    inst.enabled = !inst.enabled;
+    unsavedChanges = true;
+    if (playbackState === "playing" && typeof host_module_set_param === "function") {
+        host_module_set_param(track === TRACK_INSTRUMENT_1 ? "inst1_enabled" : "inst2_enabled", inst.enabled ? "1" : "0");
+    }
+    showPopup(itemTrackName(track), inst.enabled ? "On" : "Off", 2000);
+    needsRedraw = true;
+    ledDirtyAll = true;
 }
 
 /* Play in Song Builder: stop while playing; Shift + Play plays the song from
@@ -10695,6 +10769,8 @@ function handleSetlistBankInput(cc, value) {
                 needsRedraw = true;
             }
         }
+    } else if (cc === MoveCopy && value > 0 && selectedSetlistIndex > 0) {
+        duplicateSelectedSetlist();
     } else if (cc === MoveDelete && value > 0 && selectedSetlistIndex > 0) {
         const entry = setlistFiles[selectedSetlistIndex - 1];
         if (entry) {
@@ -10714,6 +10790,28 @@ function handleSetlistBankInput(cc, value) {
         currentView = VIEW_ROOT;
         needsRedraw = true;
     }
+}
+
+/* Copy: duplicate the selected setlist -- its songs, their settings and its
+ * knobs -- as "<name> copy" ("<name> copy 2", ...), and select it. */
+function duplicateSelectedSetlist() {
+    const entry = setlistFiles[selectedSetlistIndex - 1];
+    if (!entry) return;
+    const obj = readJson(entry.path);
+    if (!obj) return;
+    const baseName = (obj.name || entry.name || "Setlist").replace(/ copy( \d+)?$/, "");
+    let newName = baseName + " copy";
+    for (let n = 2; setlistFiles.some(f => f.name === newName); n++) newName = baseName + " copy " + n;
+    const newPath = setlistPath(newName);
+    if (host_file_exists(newPath)) return; /* name collision despite the loop above */
+    const now = new Date().toISOString();
+    const copy = Object.assign(JSON.parse(JSON.stringify(obj)),
+        { id: "setlist-" + Date.now(), name: newName, created: now, path: newPath });
+    saveSetlist(copy);
+    const idx = setlistFiles.findIndex(f => f.path === newPath);
+    if (idx >= 0) selectedSetlistIndex = idx + 1;
+    showPopup("Setlist", "Copied as " + newName, 2000);
+    needsRedraw = true;
 }
 
 function handleSetlistEditInput(cc, value) {
@@ -10756,12 +10854,6 @@ function handleSetlistEditInput(cc, value) {
     } else if (cc === MoveDelete && value > 0 && setlistSongIndex < currentSetlist.songs.length) {
         removeSetlistSong(currentSetlist, setlistSongIndex);
         setlistSongIndex = Math.max(0, Math.min(setlistSongIndex, currentSetlist.songs.length - 1));
-        needsRedraw = true;
-    } else if (cc === MoveLeft && value > 0 && setlistSongIndex < currentSetlist.songs.length) {
-        moveSetlistSong(currentSetlist, setlistSongIndex, -1);
-        needsRedraw = true;
-    } else if (cc === MoveRight && value > 0 && setlistSongIndex < currentSetlist.songs.length) {
-        moveSetlistSong(currentSetlist, setlistSongIndex, 1);
         needsRedraw = true;
     } else if (cc === MoveBack && value > 0) {
         menuStack.pop();
@@ -10924,7 +11016,7 @@ function handlePerformanceInput(cc, value) {
         }
         needsRedraw = true;
     } else if (cc === MoveRec && value > 0) {
-        perfToggleRecording();
+        perfToggleRecording(currentSetlist ? currentSetlist.name : "");
     } else if (cc === MoveRecord && value > 0) {
         /* Sample: the next bank of knob mappings. */
         perfKnobBank = nextKnobBank(perfKnobBank);
@@ -12027,8 +12119,13 @@ function handleJamInput(cc, value) {
         needsRedraw = true;
         stepLedsDirty = true;
         ledDirtyAll = true;
+    } else if (cc === MoveRec && value > 0) {
+        /* Record the Schwung mix, as in Perform. */
+        perfToggleRecording("Jam " + jamFolderLabel);
+        ledDirtyAll = true;
     } else if (cc === MoveBack && value > 0) {
-        /* Stop and return to the folder picker. */
+        /* Stop (and any recording) and return to the folder picker. */
+        perfStopRecording();
         jamPlaying = false;
         jamCurrentClip = null;
         jamReturnGroove = null;
@@ -14241,7 +14338,10 @@ export function footerHints() {
         case VIEW_OPTIONS_DRUMS: case VIEW_OPTIONS_INST: case VIEW_OPTIONS_CLICK:
         case VIEW_OPTIONS_CHAINS:
             return editMenuHints(optionsSubEditing);
-        case VIEW_SONG_SETTINGS: return editMenuHints(songSettingsEditing);
+        case VIEW_SONG_SETTINGS:
+            /* A locked song's settings are read-only: only Lock Song clicks. */
+            if (songIsLocked()) return songSettingsFocus === 4 ? [["JOG", "SEL"], ["CLK", "UNLOCK"], ["BACK", "OUT"]] : [["JOG", "SEL"], ["BACK", "OUT"]];
+            return editMenuHints(songSettingsEditing);
         case VIEW_TRIM: return editMenuHints(trimEditing);
         case VIEW_INSTRUMENT: return editMenuHints(instrumentEditing);
         case VIEW_INSTRUMENT_BAR: return editMenuHints(itemEditing);
@@ -14252,16 +14352,7 @@ export function footerHints() {
          * Builder, T1 (Track 1) names the track it switches to -- Chord from
          * the Drum track, Drum from any other. Shift shows the less obvious
          * Shift actions. */
-        case VIEW_BUILDER:
-            if (builderTrack === TRACK_DRUM) {
-                if (shiftHeld) return [["CLK", "SET"], ["PLAY", "SONG"], ["BACK", "OUT"]];
-                return [["PAD", "ADD"], ["T1", "CHORD"], ["CLK", "TRIM"]];
-            }
-            if (shiftHeld) return [["JOG", "MOVE"], ["PLAY", "SONG"]];
-            /* The click edits the selected item; on the Click track T4
-             * turns the click on or off. */
-            if (builderTrack === TRACK_CLICK) return [["CLK", "EDIT"], ["T4", clickOn ? "OFF" : "ON"], ["T1", "DRUM"]];
-            return [["CLK", "EDIT"], ["T1", "DRUM"], ["MENU", "SET"]];
+        case VIEW_BUILDER: return builderFooterHints();
         case VIEW_PERFORMANCE:
             /* The knob feedback panel covers the footer rows while it shows. */
             if (perfKnobFeedbackVisible()) return null;
@@ -14273,6 +14364,55 @@ export function footerHints() {
             /* The Chord Picker uses the footer rows for its chord line. */
             return null;
     }
+}
+
+/* What the jog click does on the selected Song Builder row, for the footer
+ * -- null where it does nothing (a locked song, the Drum track's empty-
+ * section row, "+ Add" with no chords to add to). */
+function builderClickAction() {
+    if (songIsLocked()) return null;
+    if (builderTrack === TRACK_DRUM) {
+        const sec = currentSong ? currentSong.sections[builderDisplaySectionIndex()] : null;
+        if (!sec) return null;
+        if (builderCursor < 0) return "NAME";
+        return builderCursor < sec.clips.length ? "TRIM" : null;
+    }
+    const sec = currentSong ? currentSong.sections[chordDisplaySectionIndex()] : null;
+    if (!sec) return null;
+    if (builderTrack === TRACK_CHORD) {
+        if (chordListCursor < 0) return "NAME";
+        return chordListCursor < sectionChordEvents(sec).length ? "EDIT" : "ADD";
+    }
+    if (itemListCursor < 0) return "NAME";
+    if (itemListCursor < sectionItems(sec, builderTrack).length) return "EDIT";
+    return itemAddAvailable() ? "ADD" : null;
+}
+
+/* Song Builder's footer: only actions that work on the selected row. Where
+ * the click does nothing (see builderClickAction), Menu -- the settings, and
+ * a locked song's way to unlock -- takes its place. T1 names the track it
+ * switches to; on the Inst and Click tracks their own Track button turns
+ * the track on or off. */
+function builderFooterHints() {
+    const locked = songIsLocked();
+    const clk = builderClickAction();
+    const first = clk ? ["CLK", clk] : ["MENU", "SET"];
+    if (builderTrack === TRACK_DRUM) {
+        if (shiftHeld) return [["CLK", "SET"], ["PLAY", "SONG"], ["BACK", "OUT"]];
+        return locked ? [["T1", "CHORD"], first, ["BACK", "OUT"]] : [["PAD", "ADD"], ["T1", "CHORD"], first];
+    }
+    if (shiftHeld) {
+        /* Shift + jog moves the selected chord or item. */
+        const sec = currentSong ? currentSong.sections[chordDisplaySectionIndex()] : null;
+        const n = !sec ? 0 : (builderTrack === TRACK_CHORD ? sectionChordEvents(sec).length
+                                                           : sectionItems(sec, builderTrack).length);
+        const cursor = builderTrack === TRACK_CHORD ? chordListCursor : itemListCursor;
+        return !locked && cursor >= 0 && cursor < n ? [["JOG", "MOVE"], ["PLAY", "SONG"]] : [["PLAY", "SONG"], ["BACK", "OUT"]];
+    }
+    if (builderTrack === TRACK_CLICK) return [first, ["T4", clickOn ? "OFF" : "ON"], ["T1", "DRUM"]];
+    if (builderTrack === TRACK_CHORD) return [first, ["T1", "DRUM"], clk ? ["MENU", "SET"] : ["BACK", "OUT"]];
+    const inst = instrumentForTrack(builderTrack);
+    return [first, [builderTrack === TRACK_INSTRUMENT_1 ? "T2" : "T3", inst && inst.enabled ? "OFF" : "ON"], ["T1", "DRUM"]];
 }
 
 function drawFooterHints() {
