@@ -15,6 +15,12 @@
   the held chord is released note-gap before it, as for a chord change.
 - Follow Note: with Bass voicing, turning up from Off jumps to 36 (kick).
 
+### Playback
+- Stop sends every instrument note-off at once, so each synth plays its own
+  release; All Notes Off still follows 2 s later. (Notes no longer hold for
+  10 s after Stop.) Leaving the Arranger sends All Notes Off at once, so
+  nothing is left sounding in Schwung's chains.
+
 ### Setlists
 - Copy duplicates a setlist.
 - Setlist Edit: Left/Right no longer move songs (Shift + jog does).

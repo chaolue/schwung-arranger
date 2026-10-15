@@ -63,17 +63,16 @@ static int any_cc123(void) {
     return n;
 }
 
-/* Instrument notes found still sounding right after a Stop (the hold). */
-static int g_held_seen;
+/* Instrument notes were sounding when Stop came (so the test reached them). */
+static int g_inst_sounding_seen;
 
-/* Blocks of 128 frames at 44.1 kHz: the 10 s instrument hold after Stop,
- * and the 2 s before All Notes Off follows it. */
-#define HOLD_BLOCKS 3446
+/* Blocks of 128 frames at 44.1 kHz: the 2 s before All Notes Off follows the
+ * note-offs Stop sends. */
 #define CC_DELAY_BLOCKS 690
 
-/* mode: 0 plain; 1 = the UI's repeat Stops during the hold (one every ~3 s)
- * must not put the release off; 2 = "release_notes" (the module closing)
- * releases the held notes and sends All Notes Off at once. */
+/* mode: 0 plain; 1 = the UI's repeat Stops (one every ~0.6 s) must not put
+ * off All Notes Off; 2 = "release_notes" (the module closing) sends it at
+ * once. */
 static int run(plugin_api_v2_t *api, const char *lib, int drop_note_offs, int blocks, int with_insts, int from_bar, int mode) {
     char folder[128], json[2048];
     int16_t audio[MOVE_FRAMES_PER_BLOCK * 2];
@@ -107,16 +106,15 @@ static int run(plugin_api_v2_t *api, const char *lib, int drop_note_offs, int bl
     memset(g_cc123, 0, sizeof g_cc123);
     api->set_param(inst, from_bar ? "play_from_bar" : "play", from_bar ? "0" : "1");
     for (int b = 0; b < blocks; b++) api->render_block(inst, audio, MOVE_FRAMES_PER_BLOCK);
+    if (with_insts && notes_left_sounding() > notes_left_on(0)) g_inst_sounding_seen = 1;
     api->set_param(inst, "stop", "1");
-    /* Stop releases drums at once but holds instrument notes so they ring
-     * out (asked for), and sends no All Notes Off yet (many synths cut dead
-     * on CC 123). */
-    int left = notes_left_on(0);
-    if (with_insts && notes_left_sounding() > 0) g_held_seen = 1;
+    /* Stop sends every note-off at once -- instruments included, so each
+     * synth plays its own release -- and no All Notes Off yet (many synths
+     * cut dead on CC 123). */
+    int left = notes_left_sounding();
     if (any_cc123()) left += 1000;
     if (mode == 2) {
         api->set_param(inst, "release_notes", "1");
-        left += notes_left_sounding();
         if (!cc123_on_played_channels(with_insts)) left += 1000;
         api->destroy_instance(inst);
         return left;
@@ -139,18 +137,14 @@ static int run(plugin_api_v2_t *api, const char *lib, int drop_note_offs, int bl
         if (any_cc123()) left += 1000; /* no late one */
         api->set_param(inst, "stop", "1");
     }
-    /* After the hold every note is released, still without All Notes Off,
-     * which follows 2 s later. With nothing held, it follows the Stop by 2 s. */
-    int held = notes_left_sounding() > notes_left_on(0);
-    if (held) {
-        for (int b = 0; b < HOLD_BLOCKS + 5; b++) {
-            if (mode == 1 && b % 1000 == 999) api->set_param(inst, "stop", "1");
-            api->render_block(inst, audio, MOVE_FRAMES_PER_BLOCK);
-        }
-        left += notes_left_sounding();
-        if (any_cc123()) left += 1000;
+    /* All Notes Off follows the Stop by 2 s -- not before, and repeat Stops
+     * don't put it off. */
+    for (int b = 0; b < CC_DELAY_BLOCKS - 20; b++) {
+        if (mode == 1 && b % 200 == 199) api->set_param(inst, "stop", "1");
+        api->render_block(inst, audio, MOVE_FRAMES_PER_BLOCK);
     }
-    for (int b = 0; b < CC_DELAY_BLOCKS + 5; b++) api->render_block(inst, audio, MOVE_FRAMES_PER_BLOCK);
+    if (any_cc123()) left += 1000;
+    for (int b = 0; b < 25; b++) api->render_block(inst, audio, MOVE_FRAMES_PER_BLOCK);
     left += notes_left_sounding();
     if (!cc123_on_played_channels(with_insts)) left += 1000;
     api->destroy_instance(inst);
@@ -188,10 +182,10 @@ int main(int argc, char **argv) {
     CHECK(worst_drop == 0, "stop with Drop Note-Offs on: no drum note left sounding");
     CHECK(worst_plain == 0, "stop mid-groove: no drum note left sounding");
     CHECK(worst_inst == 0, "stop with a bass and a once-per-bar chord: no note left sounding");
-    CHECK(g_held_seen, "stop with instruments sounding holds them (they ring out)");
+    CHECK(g_inst_sounding_seen, "the instrument runs stopped with instrument notes sounding");
     CHECK(worst_inst_bar == 0, "same, started with play_from_bar (as Perform does): no note left sounding");
-    CHECK(worst_restop == 0, "repeat Stops during the hold don't put off the release: no note left sounding 10 s after the first");
-    CHECK(worst_release == 0, "release_notes (module closing) releases held notes and sends All Notes Off at once");
+    CHECK(worst_restop == 0, "repeat Stops don't put off All Notes Off: it follows the first Stop by 2 s");
+    CHECK(worst_release == 0, "release_notes (module closing) sends All Notes Off at once");
     printf("info: repeat stops %d, release_notes %d\n", worst_restop, worst_release);
 
     if (g_failures == 0) printf("\nALL TESTS PASSED\n");

@@ -15018,8 +15018,9 @@ globalThis.onUnload = function onUnload() {
     perfStopRecording();
     flushKnobSave();
     stopPlayback();
-    /* Stop lets instrument notes ring on for 10 s; the module is going, so
-     * release them now -- they would otherwise hang in Schwung's chains. */
+    /* Send the All Notes Off backstop now: the module is going, so the
+     * engine's 2 s countdown to it would never finish, and anything left
+     * sounding would hang in Schwung's chains. */
     if (typeof host_module_set_param_blocking === "function") {
         host_module_set_param_blocking("release_notes", "1", 100);
     } else if (typeof host_module_set_param === "function") {
