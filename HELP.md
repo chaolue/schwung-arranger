@@ -505,6 +505,13 @@ loads each one.
   MFX for Master FX, SndA/SndB for the sends. Turning or touching a knob in Perform shows the chain or
   Master FX, the component and its module on one line, and the parameter and
   value on the next.
+- **Changed elsewhere?** A mapped parameter changed in Schwung's Remote UI
+  (or its editor) while you perform becomes that knob's value for the
+  current song, as a turn would: it is saved, the knob light follows, and the
+  feedback at the foot of the display shows it — prefixed with its bank
+  (e.g. `B2`) when the knob is in another bank. Perform reads the mapped
+  parameters back every few tenths of a second, and a knob that just changed
+  far more often, so a drag in the browser is followed closely.
 - **On a Knobs screen**, turning a knob sets the value restored at that
   level, and you hear it as you turn.
 - **Another module in the chain?** A mapping remembers the module it was made

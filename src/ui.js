@@ -849,6 +849,9 @@ const knobTouched = new Array(KNOB_COUNT).fill(false);
 let knobSaveDue = 0;                 /* Date.now() after which currentSetlist is saved */
 let knobShowIndex = -1;
 let knobShowUntil = 0;
+/* The knob slot (bank * 8 + knob) the feedback shows when an outside change
+ * put it up -- possibly in another bank; -1 = this bank's knobShowIndex. */
+let knobShowSlot = -1;
 
 function knobRef(m) {
     return m.slot + "|" + m.comp + "|" + m.key;
@@ -1282,8 +1285,92 @@ function leavePerformanceToSetlists() {
 
 function showKnob(i) {
     knobShowIndex = i;
+    knobShowSlot = -1;
     knobShowUntil = Date.now() + KNOB_SHOW_MS;
     needsRedraw = true;
+}
+
+/* ---- Following outside changes (Remote UI, Schwung's editor, ...) ----
+ *
+ * A mapped parameter changed anywhere but on Move's knobs -- most often the
+ * Remote UI -- is taken up as that knob's value for the current song, as a
+ * turn would be: saved, on the knob light, and in the feedback at the foot
+ * of the display. Schwung tells a module about no parameter change it did
+ * not make, so Perform reads the mapped parameters back: one knob every
+ * KNOB_POLL_MS in turn (each read is a ~3 ms round trip), and the knob that
+ * last changed every KNOB_POLL_HOT_MS for KNOB_POLL_HOT_HOLD_MS after, so a
+ * drag in the browser is followed closely. A knob with a write of ours still
+ * queued is skipped: what it reads is about to change. */
+const KNOB_POLL_MS = 120;
+const KNOB_POLL_HOT_MS = 45;
+const KNOB_POLL_HOT_HOLD_MS = 2000;
+let knobPollNext = 0;          /* round-robin position over KNOB_SLOTS */
+let knobPollDue = 0;
+let knobPollHotSlot = -1;
+let knobPollHotUntil = 0;
+let knobPollHotDue = 0;
+
+/* Two values of a parameter are the same knob position: compared as the
+ * feedback shows them, so float noise ("0.55" / "0.5500") is not a change. */
+function knobValuesMatch(meta, a, b) {
+    if (a === null || a === undefined || b === null || b === undefined) return a === b;
+    return formatKnobValue(meta, a) === formatKnobValue(meta, b);
+}
+
+/* Read knob slot `s` back; if its parameter moved, take the new value.
+ * Returns true when it changed. */
+function pollPerfKnob(s) {
+    const k = perfKnobs[s];
+    if (!k || k.status !== "ok" || !k.meta || knobWriteQueue.has(s)) return false;
+    const m = k.res.m;
+    if (m.key === USER_PRESET_KEY) return false;   /* a preset has no readable value */
+    const live = readKnobLive(m);
+    if (live === null || live === "") return false;
+    /* A knob with nothing saved yet notes where it is first, and follows from
+     * there; it is not a change. */
+    if (k.value === null) {
+        if (k.polled === undefined) { k.polled = live; return false; }
+        if (knobValuesMatch(k.meta, k.polled, live)) return false;
+    } else if (knobValuesMatch(k.meta, k.value, live)) {
+        return false;
+    }
+    k.value = live;
+    k.polled = live;
+    const entry = currentSetlist ? currentSetlist.songs[perfSongIndex] : null;
+    storeKnobValue(entry, s, k.res, live);
+    markKnobSave();
+    if (!knobTouched[s % KNOB_COUNT] || Math.floor(s / KNOB_COUNT) !== perfKnobBank) {
+        knobShowIndex = s % KNOB_COUNT;
+        knobShowSlot = s;
+        knobShowUntil = Date.now() + KNOB_SHOW_MS;
+    }
+    needsRedraw = true;
+    return true;
+}
+
+/* Once per tick in Perform. */
+function pollPerfKnobs(now) {
+    if (currentView !== VIEW_PERFORMANCE || chainViewActive()) return;
+    if (knobPollHotSlot >= 0 && now < knobPollHotUntil && now >= knobPollHotDue) {
+        knobPollHotDue = now + KNOB_POLL_HOT_MS;
+        if (pollPerfKnob(knobPollHotSlot)) knobPollHotUntil = now + KNOB_POLL_HOT_HOLD_MS;
+        return;   /* one read a tick */
+    }
+    if (now < knobPollDue) return;
+    knobPollDue = now + KNOB_POLL_MS;
+    /* The next mapped knob, this bank's first. */
+    for (let n = 0; n < KNOB_SLOTS; n++) {
+        const s = (perfKnobBank * KNOB_COUNT + knobPollNext) % KNOB_SLOTS;
+        knobPollNext = (knobPollNext + 1) % KNOB_SLOTS;
+        const k = perfKnobs[s];
+        if (!k || k.status !== "ok") continue;
+        if (pollPerfKnob(s)) {
+            knobPollHotSlot = s;
+            knobPollHotUntil = now + KNOB_POLL_HOT_HOLD_MS;
+            knobPollHotDue = now + KNOB_POLL_HOT_MS;
+        }
+        return;
+    }
 }
 
 /* A knob turned in Performance. */
@@ -1319,15 +1406,19 @@ function perfKnobFeedbackVisible() {
 function drawPerfKnobFeedback() {
     const i = knobShowIndex;
     if (!perfKnobFeedbackVisible()) return;
-    const k = perfKnobs[perfKnobBank * KNOB_COUNT + i];
+    const slot = knobShowSlot >= 0 ? knobShowSlot : perfKnobBank * KNOB_COUNT + i;
+    const bank = Math.floor(slot / KNOB_COUNT);
+    const k = perfKnobs[slot];
     let where;
     let what;
     if (!k) {
-        where = "Bank " + (perfKnobBank + 1) + " Knob " + (i + 1);
+        where = "Bank " + (bank + 1) + " Knob " + (i + 1);
         what = "Unassigned";
     } else {
         const m = k.res.m;
-        where = knobTargetShort(m.slot) + " " + compLabel(m.comp) + (m.moduleName ? " " + m.moduleName : "");
+        /* A knob in another bank (changed elsewhere) names its bank. */
+        where = (bank !== perfKnobBank ? "B" + (bank + 1) + " " : "") +
+            knobTargetShort(m.slot) + " " + compLabel(m.comp) + (m.moduleName ? " " + m.moduleName : "");
         if (k.status === "missing") what = m.label + ": not loaded";
         else if (k.status === "unknown") what = m.label + ": no answer";
         else what = m.label + " " + formatKnobValue(k.meta, k.value);
@@ -14923,9 +15014,11 @@ globalThis.tick = function() {
     /* Knob values: send queued writes, save the setlist once turning stops,
      * and take the feedback down when it expires. */
     flushKnobWrites();
+    pollPerfKnobs(Date.now());
     flushKnobSave(Date.now());
     if (knobShowIndex >= 0 && Date.now() >= knobShowUntil && !knobTouched[knobShowIndex]) {
         knobShowIndex = -1;
+        knobShowSlot = -1;
         needsRedraw = true;
     }
 

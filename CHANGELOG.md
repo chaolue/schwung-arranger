@@ -32,6 +32,11 @@
 - Copy duplicates a setlist.
 - Setlist Edit: Left/Right no longer move songs (Shift + jog does).
 
+### Perform
+- Knobs follow their parameters changed elsewhere — Schwung's Remote UI or
+  its editor: the new value is saved for the current song, the knob light
+  follows, and the knob feedback shows it.
+
 ### Jam
 - Record records the Schwung mix to a WAV, as in Perform.
 
