@@ -1461,6 +1461,29 @@ function perfKnobFeedbackVisible() {
     return i >= 0 && (Date.now() < knobShowUntil || !!knobTouched[i]);
 }
 
+/* A chain slot's name -- its preset's -- from Schwung's slot list (shared
+ * memory, no round trip); "" when it has none or the host cannot say. */
+function chainSlotName(slot) {
+    try {
+        const slots = typeof shadow_get_slots === "function" ? shadow_get_slots() : null;
+        const s = Array.isArray(slots) ? slots[slot] : null;
+        const name = s && typeof s.name === "string" ? s.name.trim() : "";
+        return name === "Untitled" ? "" : name;
+    } catch (e) { return ""; }
+}
+
+/* `pre` + `name` + `post` in `maxPx`, shortening the name (with "..") rather
+ * than losing the end of the line. */
+function fitWithName(pre, name, post, maxPx) {
+    const measure = (t) => (typeof text_width === "function" ? text_width(t) : t.length * 6);
+    if (measure(pre + name + post) <= maxPx) return pre + name + post;
+    for (let n = name.length - 1; n > 0; n--) {
+        const t = pre + name.substring(0, n).trimEnd() + ".." + post;
+        if (measure(t) <= maxPx) return t;
+    }
+    return pre + post.replace(/^ - /, "");
+}
+
 function drawPerfKnobFeedback() {
     const i = knobShowIndex;
     if (!perfKnobFeedbackVisible()) return;
@@ -1469,21 +1492,30 @@ function drawPerfKnobFeedback() {
     const k = perfKnobs[slot];
     let where;
     let what;
+    let fitted = false;
     if (!k) {
         where = "Bank " + (bank + 1) + " Knob " + (i + 1);
         what = "Unassigned";
     } else {
         const m = k.res.m;
         /* A knob in another bank (changed elsewhere) names its bank. */
-        where = (bank !== perfKnobBank ? "B" + (bank + 1) + " " : "") +
-            knobTargetShort(m.slot) + " " + compLabel(m.comp) + (m.moduleName ? " " + m.moduleName : "");
+        const pre = (bank !== perfKnobBank ? "B" + (bank + 1) + " " : "") + knobTargetShort(m.slot) + " ";
+        /* A chain's Settings name the chain by its slot's (preset) name:
+         * "C1 Lead Pad - Settings". */
+        const slotName = m.comp === SETTINGS_COMP && !isBusSlot(m.slot) ? chainSlotName(m.slot) : "";
+        fitted = !!slotName;
+        /* Drawn from x=1, so the line has 127 px: Move's spaces are 5 px wide. */
+        where = slotName ? fitWithName(pre, slotName, " - " + compLabel(m.comp), 127)
+            : pre + compLabel(m.comp) + (m.moduleName ? " " + m.moduleName : "");
         if (k.status === "missing") what = m.label + ": not loaded";
         else if (k.status === "unknown") what = m.label + ": no answer";
         else what = m.label + " " + formatKnobValue(k.meta, k.value);
     }
     fill_rect(0, 40, 128, 24, 0);
     fill_rect(0, 40, 128, 1, 1);
-    print(2, 43, where.length > 21 ? where.substring(0, 21) : where, 1);
+    /* A line fitted around a slot name is already measured to fit. */
+    if (fitted) print(1, 43, where, 1);
+    else print(2, 43, where.length > 21 ? where.substring(0, 21) : where, 1);
     print(2, 54, what.length > 21 ? what.substring(0, 21) : what, 1);
 }
 

@@ -23,7 +23,9 @@ export const files = new Map();
  * per slot): 8 with the aux slots, 4 on releases up to 1.7.3. */
 let slotCount = 8;
 export function setSlotCount(n) { slotCount = n; }
-g.shadow_get_slots = () => Array.from({ length: slotCount }, (_, i) => ({ channel: i + 1, name: "" }));
+/* Each slot's name (its preset's), "" for none. */
+export const slotNames = [];
+g.shadow_get_slots = () => Array.from({ length: slotCount }, (_, i) => ({ channel: i + 1, name: slotNames[i] || "" }));
 g.host_read_file = (path) => files.has(path) ? files.get(path) : null;
 g.host_write_file = (path, text) => { files.set(path, String(text)); return true; };
 g.host_file_exists = (path) => files.has(path);

@@ -12,6 +12,7 @@ H.files.set(SONGS + "/a.json", JSON.stringify({ name: "Song A", tempo_bpm: 120, 
 const GIG = SETLISTS + "/gig.json";
 const knobs = [];
 knobs[0] = { slot: 0, comp: "synth", key: "cutoff", module: "dexed", moduleName: "Dexed", label: "Cutoff", value: "0.50" };
+knobs[1] = { slot: 0, comp: "settings", key: "slot:volume", module: "settings", moduleName: "", label: "Volume", value: "1.0000" };
 knobs[9] = { slot: -1, comp: "fx2", key: "feedback", module: "tapedelay", moduleName: "tapedelay", label: "Feedback", value: "0.40" };
 H.files.set(GIG, JSON.stringify({ id: "s1", name: "Gig", move_set: { uuid: "set-a", name: "Gig Set" }, knobs,
     songs: [{ id: "e1", name: "Song A", path: SONGS + "/a.json", click_bars: 0 }] }));
@@ -76,6 +77,26 @@ H.printed.length = 0;
 tick(1);
 check(H.printed.some(t => /^B2 MFX FX 2/.test(t)) && H.printed.some(t => /Feedback 0\.70/.test(t)),
       "a Master FX knob in bank 2, with its bank: " + JSON.stringify(H.printed.slice(-3)));
+
+/* A chain's Settings name the chain by its slot's name. */
+H.slotNames[0] = "Bass";
+H.feedPush(0, "slot:volume", "0.80");
+H.printed.length = 0;
+tick(1);
+check(H.printed.includes("C1 Bass - Settings") && H.printed.some(t => /Volume 0\.80/.test(t)),
+      "C1 <slot name> - Settings / Volume: " + JSON.stringify(H.printed.slice(-3)));
+H.slotNames[0] = "A Very Long Preset Name For Chain One";
+H.feedPush(0, "slot:volume", "0.70");
+H.printed.length = 0;
+tick(1);
+const line = H.printed.find(t => /^C1 /.test(t)) || "";
+check(/\.\. - Settings$/.test(line) && line.length * 6 <= 130, "a long name is shortened, keeping \"- Settings\": " + line);
+H.slotNames[0] = "";
+H.feedPush(0, "slot:volume", "0.60");
+H.printed.length = 0;
+tick(1);
+check(H.printed.includes("C1 Settings"), "no name: C1 Settings, as before: " + JSON.stringify(H.printed.slice(-3)));
+tick(100);
 
 /* Lost changes: every mapped knob is read back once. */
 tick(100);
