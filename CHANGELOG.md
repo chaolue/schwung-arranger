@@ -35,7 +35,9 @@
 ### Perform
 - Knobs follow their parameters changed elsewhere — Schwung's Remote UI or
   its editor: the new value is saved for the current song, the knob light
-  follows, and the knob feedback shows it.
+  follows, and the knob feedback shows it. With Schwung's parameter change
+  feed (`shadow_param_changes`) it is immediate and costs no reads; without
+  it, Perform reads the mapped parameters back.
 
 ### Jam
 - Record records the Schwung mix to a WAV, as in Perform.

@@ -509,9 +509,11 @@ loads each one.
   (or its editor) while you perform becomes that knob's value for the
   current song, as a turn would: it is saved, the knob light follows, and the
   feedback at the foot of the display shows it — prefixed with its bank
-  (e.g. `B2`) when the knob is in another bank. Perform reads the mapped
-  parameters back every few tenths of a second, and a knob that just changed
-  far more often, so a drag in the browser is followed closely.
+  (e.g. `B2`) when the knob is in another bank. On a Schwung with the
+  parameter change feed this happens on the next frame; on an older one
+  Perform reads the mapped parameters back every few tenths of a second (a
+  knob that just changed far more often), so a browser drag is still
+  followed closely.
 - **On a Knobs screen**, turning a knob sets the value restored at that
   level, and you hear it as you turn.
 - **Another module in the chain?** A mapping remembers the module it was made

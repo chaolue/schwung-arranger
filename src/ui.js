@@ -1295,8 +1295,13 @@ function showKnob(i) {
  * A mapped parameter changed anywhere but on Move's knobs -- most often the
  * Remote UI -- is taken up as that knob's value for the current song, as a
  * turn would be: saved, on the knob light, and in the feedback at the foot
- * of the display. Schwung tells a module about no parameter change it did
- * not make, so Perform reads the mapped parameters back: one knob every
+ * of the display.
+ *
+ * A Schwung with the param change feed (shadow_param_changes: every completed
+ * set, from any client, read from shared memory with no round trip) is
+ * followed from that, every tick, at no read cost; a change the feed lost
+ * sends Perform back over every mapped knob once. Without the feed, Perform
+ * reads the mapped parameters back: one knob every
  * KNOB_POLL_MS in turn (each read is a ~3 ms round trip), and the knob that
  * last changed every KNOB_POLL_HOT_MS for KNOB_POLL_HOT_HOLD_MS after, so a
  * drag in the browser is followed closely. A knob with a write of ours still
@@ -1322,10 +1327,16 @@ function knobValuesMatch(meta, a, b) {
 function pollPerfKnob(s) {
     const k = perfKnobs[s];
     if (!k || k.status !== "ok" || !k.meta || knobWriteQueue.has(s)) return false;
-    const m = k.res.m;
-    if (m.key === USER_PRESET_KEY) return false;   /* a preset has no readable value */
-    const live = readKnobLive(m);
-    if (live === null || live === "") return false;
+    if (k.res.m.key === USER_PRESET_KEY) return false;   /* a preset has no readable value */
+    return adoptPerfKnobValue(s, readKnobLive(k.res.m));
+}
+
+/* Knob slot `s`'s parameter is now `live`: if that moved it, take it. */
+function adoptPerfKnobValue(s, live) {
+    const k = perfKnobs[s];
+    if (!k || k.status !== "ok" || !k.meta || knobWriteQueue.has(s)) return false;
+    if (live === null || live === undefined || live === "") return false;
+    live = String(live);
     /* A knob with nothing saved yet notes where it is first, and follows from
      * there; it is not a change. */
     if (k.value === null) {
@@ -1348,9 +1359,56 @@ function pollPerfKnob(s) {
     return true;
 }
 
+/* The param change feed's position; null = not following (start from the
+ * newest change when Perform is next shown). */
+let knobFeedSeq = null;
+/* Mapped knobs still to re-read after the feed lost changes. */
+let knobFeedResync = 0;
+
+/* The knob slots a set of (slot, key) addresses: a chain parameter at its
+ * chain's slot, a bus (Master FX, a send) parameter at any. */
+function perfKnobSlotsFor(slot, key) {
+    const out = [];
+    for (let s = 0; s < KNOB_SLOTS; s++) {
+        const k = perfKnobs[s];
+        if (!k || k.status !== "ok") continue;
+        const m = k.res.m;
+        if (m.key === USER_PRESET_KEY || compKey(m.slot, m.comp, m.key) !== key) continue;
+        if (isBusSlot(m.slot) || knobIpcSlot(m.slot) === slot) out.push(s);
+    }
+    return out;
+}
+
+/* Follow the feed: true when it is there to follow (else poll). */
+function followPerfKnobFeed() {
+    if (typeof shadow_param_changes !== "function") return false;
+    let r;
+    try { r = shadow_param_changes(knobFeedSeq === null ? -1 : knobFeedSeq); } catch (e) { r = null; }
+    if (!r) return false;
+    if (knobFeedSeq === null) { knobFeedSeq = r.seq; return true; }   /* from now on */
+    knobFeedSeq = r.seq;
+    if (chainViewActive()) return true;   /* the editor's; refreshPerfKnobs takes it after */
+    if (r.lost) knobFeedResync = KNOB_SLOTS;
+    for (const c of r.changes || []) {
+        for (const s of perfKnobSlotsFor(c.slot, c.key)) {
+            /* Too long for the feed: read the parameter itself. */
+            if (c.truncated) pollPerfKnob(s);
+            else adoptPerfKnobValue(s, c.value);
+        }
+    }
+    /* After a loss, every mapped knob once -- one a tick. */
+    while (knobFeedResync > 0) {
+        const s = KNOB_SLOTS - knobFeedResync--;
+        if (perfKnobs[s] && perfKnobs[s].status === "ok") { pollPerfKnob(s); break; }
+    }
+    return true;
+}
+
 /* Once per tick in Perform. */
 function pollPerfKnobs(now) {
-    if (currentView !== VIEW_PERFORMANCE || chainViewActive()) return;
+    if (currentView !== VIEW_PERFORMANCE) { knobFeedSeq = null; return; }
+    if (followPerfKnobFeed()) return;
+    if (chainViewActive()) return;
     if (knobPollHotSlot >= 0 && now < knobPollHotUntil && now >= knobPollHotDue) {
         knobPollHotDue = now + KNOB_POLL_HOT_MS;
         if (pollPerfKnob(knobPollHotSlot)) knobPollHotUntil = now + KNOB_POLL_HOT_HOLD_MS;

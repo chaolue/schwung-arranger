@@ -212,11 +212,30 @@ g.shadow_get_param = (slot, key) => {
     }
     return "";
 };
+/* Schwung's param change feed (shadow_param_changes), off unless a suite
+ * enables it -- a Schwung without it has no such function. Every completed
+ * set lands in it, the module's own included; feedPush is another client's
+ * (the Remote UI's). feedLose() makes the next read report lost changes. */
+export const feed = { list: [], seq: 0, lose: false };
+export function feedPush(slot, key, value, origin = "web") {
+    feed.list.push({ seq: ++feed.seq, slot, key, value: String(value), origin, truncated: false });
+}
+export function feedLose() { feed.lose = true; }
+export function enableFeed() {
+    g.shadow_param_changes = (since) => {
+        if (since === undefined || since < 0) return { seq: feed.seq, lost: false, changes: [] };
+        const changes = feed.list.filter(c => c.seq > since).slice(0, 64);
+        const lost = feed.lose;
+        feed.lose = false;
+        return { seq: changes.length ? changes[changes.length - 1].seq : since, lost, changes };
+    };
+}
 export const writes = [];
 g.shadow_set_param_timeout = (slot, key, val, t) => {
     paramLog.push(["set", slot, key, val, t]);
     if (paramFails) return false;
     writes.push([slot, key, String(val)]);
+    if (g.shadow_param_changes) feedPush(slot, key, val, "channel");
     const s = slots[slot];
     const sm = /^send(\d+):(?:(fx\d+):)?(.+)$/.exec(key);
     if (sm) {
