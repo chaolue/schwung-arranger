@@ -25,12 +25,23 @@ H.files.set(SETLISTS + "/gig.json", JSON.stringify({ id: "s1", name: "Gig", song
     { id: "e1", name: "Plain", path: SONGS + "/plain.json", click_bars: 2 }], knobs: [] }));
 /* The DSP's song list. */
 const songList = [{ name: "Locked", path: SONGS + "/locked.json" }, { name: "Plain", path: SONGS + "/plain.json" },
-                  { name: "Multi", path: SONGS + "/multi.json" }, { name: "Chorded", path: SONGS + "/chorded.json" }];
-globalThis.host_module_get_param = (k) =>
-    k === "songs_json" ? JSON.stringify({ count: songList.length, start: 0, items: songList }) : null;
+                  { name: "Multi", path: SONGS + "/multi.json" }, { name: "Chorded", path: SONGS + "/chorded.json" },
+                  { name: "Kit", path: SONGS + "/kit.json" }];
+H.files.set(SONGS + "/kit.json", JSON.stringify({ name: "Kit", tempo_bpm: 120, time_sig_num: 4, time_sig_den: 4,
+    source_folder: "VD/08 Indie/11 Disco",
+    sections: [{ name: "Bridge", clips: [{ source: "10 Fill 3.mid", name: "10 Fill 3", start_bar: 0, end_bar: 1 }] }] }));
+/* Two kits with a clip of the same name; the song's kit is the SECOND. */
+const kits = [{ name: "03 Rumba", category: "VD/05 Latin" }, { name: "11 Disco", category: "VD/08 Indie" }];
+globalThis.host_module_get_param = (k) => {
+    if (k === "songs_json") return JSON.stringify({ count: songList.length, start: 0, items: songList });
+    if (k === "folders_json") return JSON.stringify({ count: kits.length, start: 0, items: kits });
+    if (/^folder_clips_json_[01]$/.test(k)) return JSON.stringify(["10 Fill 3.mid"]);
+    return null;
+};
 
 const M = await import('./ui_test.mjs');
-const g = globalThis;
+const g0 = globalThis;
+const g = g0;
 const C = await import('./shared/constants.mjs');
 let failures = 0, passes = 0;
 function check(cond, msg) { if (cond) passes++; else { failures++; console.log("FAIL: " + msg); } }
@@ -179,6 +190,22 @@ check(JSON.stringify(bytes.slice(22)) === JSON.stringify([0x96, 0x40, 0x80, 0, 0
 OS.captureWrites(false);
 check(M.toUiSong({ name: "P", sections: [{ name: "A", clips: [ph] }] }).sections[0].clips[0].placeholder === true,
       "a placeholder survives loading");
+
+/* ---- a clip added from a pad comes from the folder the pads show ---- */
+jog(-8); jog(5); click();     /* Kit (folder 11 Disco, the library's 2nd) */
+if (has(["T1", "DRUM"])) press(C.MoveRow1);
+const pads = (await import('./shared/constants.mjs')).MovePads;
+for (let p = 0; p < 32; p++) {   /* the first pad with a clip: tap it */
+    g.onMidiMessageInternal([0x90, pads[p], 100]); tick(1);
+    g.onMidiMessageInternal([0x80, pads[p], 0]); tick(1);
+}
+back();
+const kit = JSON.parse(H.files.get(SONGS + "/kit.json"));
+const added = kit.sections[0].clips.slice(1);
+check(added.length > 0, "a pad added a clip: " + JSON.stringify(kit.sections[0].clips.map(c => c.source)));
+check(added.every(c => !c.source_folder || c.source_folder === "VD/08 Indie/11 Disco"),
+      "it comes from the song's own kit, not Rumba's same-named clip: " + JSON.stringify(added.map(c => c.source_folder || "(song's)")));
+check(!kit.sections[0].clips[0].source_folder, "the original clip still has the song's folder");
 
 /* ---- Follow Note: with Bass voicing, up from Off jumps to the kick ---- */
 check(M.stepFollowNote(0, 1, true) === 36 && M.stepFollowNote(0, 1, false) === 1, "Off +1: 36 for Bass, 1 for Chord");

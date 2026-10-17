@@ -12757,7 +12757,15 @@ function insertClipAtCursor(clip) {
      * source_folder is later changed back to a different folder. toEngineSongJson
      * only emits it when it differs from the song's primary folder, keeping the
      * saved file clean. */
-    const paletteFolder = libraryFolders[currentBuilderFolderIndex()] || "";
+    /* The folder the pads were loaded from -- NOT the folder picker's
+     * cursor, which is left wherever it was last browsed (opening a song from
+     * the Song Bank loads its folder onto the pads without moving it, and
+     * Back from Record's folder list leaves it where it was browsed to): a
+     * clip added from the song's own folder was recorded as another kit's
+     * clip of the same name (found live: My Lighthouse's Bridge played
+     * Rumba's "10 Fill 3"). Full path, as the song's own source_folder. */
+    const paletteIdx = folderClipsIndex >= 0 ? folderClipsIndex : currentBuilderFolderIndex();
+    const paletteFolder = folderFullPath(paletteIdx) || "";
     const newClip = {
         source: clip.path,
         name: clip.name,
@@ -14514,7 +14522,12 @@ function upgradeSongSourceFolders(song) {
     return changed;
 }
 
+/* The library folder the pad palette's clips (folderClips) were loaded from:
+ * where a clip added from a pad comes from. -1 = none loaded. */
+let folderClipsIndex = -1;
+
 function loadFolderClips(folderIndex) {
+    folderClipsIndex = folderIndex;
     folderClips = [];
     grooveClips = [];
     fillClips = [];
