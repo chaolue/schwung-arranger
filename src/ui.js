@@ -3453,9 +3453,7 @@ export function toUiSong(engineLike) {
                  * and the saved file is updated. */
                 let clipFolder = c.source_folder || "";
                 if (!clipFolder && folderClipMap && src) {
-                    const leaf = clipDisplayName(src);
-                    const found = leaf ? folderClipMap[leaf] : "";
-                    if (found && found !== songFolder) clipFolder = found;
+                    clipFolder = clipFolderBackfill(folderClipMap, clipDisplayName(src), songFolder);
                 }
                 return {
                     source: src,
@@ -3620,9 +3618,8 @@ function normalizeSongForSave(song) {
              * already carries its own folder is kept; otherwise, if the clip's
              * leaf name is found in another folder, record that folder. */
             if (!c.source_folder && folderClipMap && c.source) {
-                const leaf = clipDisplayName(c.source);
-                const found = leaf ? folderClipMap[leaf] : "";
-                if (found && found !== songFolder) c.source_folder = found;
+                const found = clipFolderBackfill(folderClipMap, clipDisplayName(c.source), songFolder);
+                if (found) c.source_folder = found;
             }
             /* A clip whose source_folder equals the song's primary folder
              * needs no override — the song folder already resolves it. Strip
@@ -14547,9 +14544,26 @@ function loadFolderClips(folderIndex) {
     } catch (e) { folderClips = []; grooveClips = []; fillClips = []; }
 }
 
-/* Build a map of clip leaf name -> folder name from the DSP's folder scan.
- * Used to backfill a clip's source_folder when loading an existing song whose
- * clips were added from a different folder than the song's primary one. */
+/* Build a map of clip leaf name -> EVERY folder holding a clip of that name,
+ * from the DSP's folder scan. Used to backfill a clip's source_folder when
+ * loading an existing song whose clips were added from a different folder
+ * than the song's primary one -- see clipFolderBackfill. */
+/* The folder to record for a clip with none, from the leaf -> folders map: the
+ * one other folder holding it. Nothing when the song's own folder holds it --
+ * a clip from the song's folder is SAVED with no folder (it needs none), so
+ * this sees every one of them; taking the last folder scanned with that name
+ * re-pointed them at another folder's clip of the same name (found live: a
+ * Chorus playing "06 4th Cym" from another kit). Nothing either when several
+ * other folders hold it: that is a guess, and the engine's own library-wide
+ * search is no worse. */
+export function clipFolderBackfill(map, leaf, songFolder) {
+    const folders = map && leaf ? map[leaf] : null;
+    if (!Array.isArray(folders) || folders.length === 0) return "";
+    /* An older song names its folder by its last part(s) only. */
+    if (songFolder && folders.some(f => f === songFolder || f.endsWith("/" + songFolder))) return "";
+    return folders.length === 1 ? folders[0] : "";
+}
+
 function buildFolderClipMap() {
     folderClipMap = {};
     if (typeof host_module_get_param !== "function") return;
@@ -14572,7 +14586,9 @@ function buildFolderClipMap() {
             for (const c of raw) {
                 const path = (typeof c === "string") ? c : (c.source || c);
                 const leaf = clipDisplayName(path);
-                if (leaf) folderClipMap[leaf] = folder;
+                if (!leaf) continue;
+                if (!folderClipMap[leaf]) folderClipMap[leaf] = [];
+                if (folderClipMap[leaf].indexOf(folder) < 0) folderClipMap[leaf].push(folder);
             }
         } catch (e) {}
     }

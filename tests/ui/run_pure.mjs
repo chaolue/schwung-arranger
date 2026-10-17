@@ -151,5 +151,19 @@ function deepEqual(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
           "jamChordForDegree: in every key the 8 pads climb in pitch, ending an octave above the root (failing: " + badKeys.join(" ") + ")");
 }
 
+/* A clip with no folder is backfilled only when that is unambiguous: never
+ * when the song's own folder holds a clip of that name (My Lighthouse's
+ * Chorus played another kit's "06 4th Cym"), nor when several others do. */
+{
+    const { clipFolderBackfill } = ui;
+    const map = { "06 4th Cym": ["VD/01 Ragtime/03 St Louis", "VD/08 Indie/11 Disco"], "07 4th Perc": ["VD/08 Indie/11 Disco"],
+                  "Only Here": ["VD/02 Jazz/04 Swing"], "Twice": ["VD/a", "VD/b"] };
+    CHECK(clipFolderBackfill(map, "06 4th Cym", "VD/08 Indie/11 Disco") === "", "a name the song's folder holds keeps no folder");
+    CHECK(clipFolderBackfill(map, "06 4th Cym", "11 Disco") === "", "...also when the song names its folder the old short way");
+    CHECK(clipFolderBackfill(map, "Only Here", "VD/08 Indie/11 Disco") === "VD/02 Jazz/04 Swing", "a clip only another folder holds gets that folder");
+    CHECK(clipFolderBackfill(map, "Twice", "VD/08 Indie/11 Disco") === "", "ambiguous between other folders: no guess");
+    CHECK(clipFolderBackfill(map, "Unknown", "VD/x") === "", "unknown: nothing");
+}
+
 console.log(`${passes} passed, ${failures} failed`);
 process.exit(failures ? 1 : 0);
