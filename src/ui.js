@@ -10661,7 +10661,12 @@ function deleteSelectedSong() {
     const entry = songFiles[selectedSongIndex - 1];
     if (!entry) return;
     const obj = readJson(entry.path);
-    if (obj && obj.locked) return; /* a locked song cannot be deleted */
+    if (obj && obj.locked) {
+        /* A locked song cannot be deleted: say so, and where to unlock it. */
+        showPopup("Song locked", "Unlock it in its Song Settings to delete", 2500);
+        needsRedraw = true;
+        return;
+    }
     openConfirm({
         title: "Delete Song?",
         name: entry.name,
@@ -13219,12 +13224,14 @@ function builderPageCount() {
 }
 
 function handleBuilderPad(note, velocity) {
-    /* Cannot add/insert clips in a locked song. */
-    if (songIsLocked()) { if (velocity > 0) lockedNotice(); return; }
+    /* Only a pad with a clip on it adds anything -- knob and jog TOUCHES
+     * (notes 0-9) arrive here too, and must not say the song is locked. */
     const padIndex = getPadIndex(note);
     if (padIndex < 0) return;
     const clip = clipForBuilderPad(padIndex);
     if (!clip) return;
+    /* Cannot add/insert clips in a locked song. */
+    if (songIsLocked()) { if (velocity > 0) lockedNotice(); return; }
     if (velocity > 0) {
         padPreviewClip = clip;
         padPreviewBars = clipPlayBars(clip);

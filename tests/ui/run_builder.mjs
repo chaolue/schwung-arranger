@@ -98,6 +98,11 @@ check(clk() === null && has(["MENU", "SET"]), "locked, Chord track: Menu instead
 click();
 check(!H.printed.some(t => /^Root/.test(t)), "locked: the click opens no chord page");
 check(H.printed.some(t => /Song locked/.test(t)), "...and says the song is locked: " + JSON.stringify(H.printed));
+/* Touching a knob or the jog (notes 0-9) is not an edit. */
+tick(100);
+H.printed.length = 0;
+for (const n of [0, 3, 9]) { g.onMidiMessageInternal([0x90, n, 127]); tick(1); g.onMidiMessageInternal([0x80, n, 0]); tick(1); }
+check(!H.printed.some(t => /Song locked/.test(t)), "locked: knob and jog touches say nothing: " + JSON.stringify(H.printed));
 for (const [btn, name] of [[C.MoveDelete, "Delete"], [C.MoveCopy, "Copy"]]) {
     tick(100);                /* the last notice has gone */
     press(btn);
@@ -107,6 +112,12 @@ cc(C.MoveShift, 127); tick();
 check(!has(["JOG", "MOVE"]), "locked: Shift offers no Jog Move: " + hints());
 cc(C.MoveShift, 0); tick();
 back();
+/* Song Bank: Delete on the locked song says why it does nothing. */
+tick(100);
+jog(-8); jog(1);              /* Locked */
+press(C.MoveDelete);
+check(H.printed.some(t => /Song locked/.test(t)) && H.files.has(SONGS + "/locked.json"),
+      "Song Bank: Delete on a locked song says it is locked, and deletes nothing: " + JSON.stringify(H.printed));
 back();
 
 /* ---- Copy duplicates a setlist ---- */
