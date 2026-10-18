@@ -148,6 +148,10 @@ const VIEW_CHORD_PICK = "chord_pick";
 const VIEW_INSTRUMENT = "instrument";
 const VIEW_INSTRUMENT_BAR = "instrument_bar";
 const VIEW_JAM_INSTRUMENT = "jam_instrument";
+/* A setlist song's play order (Setlist Edit > a song > Sections), and the
+ * picker that adds one of the song's sections to it. */
+const VIEW_SETLIST_SECTIONS = "setlist_sections";
+const VIEW_SETLIST_SECTION_PICK = "setlist_section_pick";
 
 /* Section names offered when adding a new section via Shift + Loop. */
 const SECTION_NAMES = [
@@ -2418,7 +2422,8 @@ const SCROLLABLE_MENU_VIEWS = new Set([
     VIEW_ROOT, VIEW_FOLDER_LIST, VIEW_BUILDER, VIEW_TRIM, VIEW_SONG_SETTINGS, VIEW_SONG_BACKUPS,
     VIEW_SONG_BANK, VIEW_OPTIONS, VIEW_OPTIONS_DRUMS, VIEW_OPTIONS_INST, VIEW_OPTIONS_CLICK, VIEW_OPTIONS_CHAINS,
     VIEW_SETLIST_BANK, VIEW_SETLIST_EDIT,
-    VIEW_SETLIST_PICK, VIEW_SETLIST_CLICK, VIEW_PERF_SETLIST, VIEW_PERFORMANCE,
+    VIEW_SETLIST_PICK, VIEW_SETLIST_CLICK, VIEW_SETLIST_SECTIONS, VIEW_SETLIST_SECTION_PICK,
+    VIEW_PERF_SETLIST, VIEW_PERFORMANCE,
     VIEW_JAM_FOLDER, VIEW_JAM, VIEW_SECTION_PICK, VIEW_CHORD_PICK, VIEW_INSTRUMENT
 ]);
 const MENU_SCROLL_TICK_MS = 30; /* ~25fps redraw for marquee animation (halves the ~2s scroll-start delay) */
@@ -3144,6 +3149,55 @@ export function transposeChord(chord, semitones) {
         if (bassPc >= 0) out.bass = NOTE_NAMES[((bassPc + semitones) % 12 + 12) % 12];
         else out.bass = chord.bass;
     }
+    return out;
+}
+
+/* ── A setlist's edits to a song ─────────────────────────────────────
+ *
+ * A setlist entry may play its song in another key (entry.key), at another
+ * tempo (entry.tempo_bpm) or with its sections in another order -- repeated,
+ * left out, rearranged (entry.sections: [{i, name}], i the section's index in
+ * the song file, name what it was called then). Absent = the song's own. The
+ * song file is never changed: Perform plays a copy. A reference whose index
+ * no longer names that section (the song was edited since) is found again by
+ * name, and one that cannot be is left out. */
+export function setlistSectionIndices(song, entry) {
+    const secs = song && Array.isArray(song.sections) ? song.sections : [];
+    if (!entry || !Array.isArray(entry.sections)) return secs.map((_, i) => i);
+    const out = [];
+    for (const ref of entry.sections) {
+        if (!ref) continue;
+        let i = typeof ref.i === "number" ? ref.i : -1;
+        if (!(secs[i] && (ref.name === undefined || (secs[i].name || "") === ref.name))) {
+            i = secs.findIndex(sec => (sec.name || "") === ref.name);
+        }
+        if (i >= 0) out.push(i);
+    }
+    return out.length ? out : secs.map((_, i) => i);
+}
+
+export function applySetlistEdits(song, entry) {
+    if (!song || !entry) return song;
+    const key = typeof entry.key === "string" && KEYS.indexOf(entry.key) >= 0 ? entry.key : null;
+    const tempo = typeof entry.tempo_bpm === "number" && entry.tempo_bpm >= 20 && entry.tempo_bpm <= 300 ? entry.tempo_bpm : null;
+    if (!key && !tempo && !Array.isArray(entry.sections)) return song;
+    const out = JSON.parse(JSON.stringify(song));
+    if (Array.isArray(entry.sections)) {
+        const seen = {};
+        out.sections = setlistSectionIndices(song, entry).map(i => {
+            const sec = JSON.parse(JSON.stringify(song.sections[i]));
+            /* A repeat is its own section (its own id). */
+            seen[i] = (seen[i] || 0) + 1;
+            if (seen[i] > 1 && sec.id) sec.id = sec.id + "-r" + seen[i];
+            return sec;
+        });
+    }
+    if (key) {
+        const from = song.key || DEFAULT_KEY;
+        if (key !== from) transposeSongChords(out, from, key);
+        out.key = key;
+    }
+    if (tempo) out.tempo_bpm = tempo;
     return out;
 }
 
@@ -4499,7 +4553,11 @@ function persistResolvedClipFolders(built) {
         }
         return changed;
     };
-    const target = built === activeSongObj ? built : tempSongOrigin.get(built);
+    let target = built === activeSongObj ? built : tempSongOrigin.get(built);
+    /* Only the song as loaded from the file is saved: in Perform a setlist's
+     * edited copy (applySetlistEdits) stands in for it, and saving that would
+     * write the setlist's key, tempo and section order over the song. */
+    if (target && target !== activeSongObj) target = null;
     const changedBuilt = built && built !== target ? applyTo(built) : false;
     if (!target) {
         logDebug("persistResolvedClipFolders: " + list.length + " folder fix(es) for a song that is not the open file; not saved");
@@ -5503,9 +5561,22 @@ function updateButtonLEDs() {
                 active.set(MoveMainButton, WhiteLedFull);
                 break;
             case VIEW_SETLIST_CLICK:
+            case VIEW_SETLIST_SECTION_PICK:
                 active.set(MoveBack, WhiteLedFull);
                 active.set(MoveMainButton, WhiteLedFull);
                 break;
+            case VIEW_SETLIST_SECTIONS: {
+                active.set(MoveBack, WhiteLedFull);
+                const rows = setlistSectionRows();
+                const row = rows[setlistSecCursor];
+                if (row && row.type !== "section") active.set(MoveMainButton, WhiteLedFull);
+                if (row && row.type === "section") {
+                    active.set(MoveCopy, WhiteLedFull);
+                    if (setlistSecRefs().length > 1) active.set(MoveDelete, WhiteLedFull);
+                    active.set(MoveShift, shiftHeld ? WhiteLedFull : WhiteLedDim);
+                }
+                break;
+            }
             case VIEW_SECTION_PICK:
                 active.set(MoveBack, WhiteLedFull);
                 active.set(MoveMainButton, WhiteLedFull);
@@ -9626,29 +9697,80 @@ function drawSectionPick() {
     });
 }
 
+/* Setlist Edit > a song: how this setlist plays it. Key, Tempo and Sections
+ * change the song for this setlist only (see applySetlistEdits); Sections
+ * and Knobs open their own screens. */
+const SETLIST_SONG_ROWS = [
+    { key: "bars", label: "Click Bars" },
+    { key: "sound", label: "Click Sound" },
+    { key: "stop", label: "Stop At End" },
+    { key: "skey", label: "Key" },
+    { key: "tempo", label: "Tempo" },
+    { key: "sections", label: "Sections", opens: true },
+    { key: "knobs", label: "Knobs", opens: true }
+];
+
+/* The setlist song's file, read once per visit to its screens: its own key,
+ * tempo and sections, which the setlist's edits are shown against. */
+let setlistSongFileCache = null;   /* { path, song } */
+function setlistSongFile(entry) {
+    if (!entry) return null;
+    if (!setlistSongFileCache || setlistSongFileCache.path !== entry.path) {
+        setlistSongFileCache = { path: entry.path, song: readJson(entry.path) };
+    }
+    return setlistSongFileCache.song;
+}
+
+function setlistEntry() {
+    return currentSetlist ? currentSetlist.songs[setlistSongIndex] : null;
+}
+
+function setlistSongRowValue(entry, key) {
+    const song = setlistSongFile(entry);
+    if (key === "bars") { const bars = entry ? (entry.click_bars || 0) : 0; return bars === 0 ? "Off" : String(bars); }
+    if (key === "sound") return clickSoundOn(entry) ? "On" : "Off";
+    if (key === "stop") return entry && entry.stop_after_finish ? "Yes" : "No";
+    if (key === "skey") return entry && entry.key ? entry.key : "Song (" + ((song && song.key) || DEFAULT_KEY) + ")";
+    if (key === "tempo") return entry && entry.tempo_bpm ? String(entry.tempo_bpm) : "Song (" + ((song && song.tempo_bpm) || 120) + ")";
+    if (key === "sections") return entry && Array.isArray(entry.sections) ? setlistSectionIndices(song, entry).length + " set" : "Song";
+    if (key === "knobs") return knobOverrideCount(entry) ? knobOverrideCount(entry) + " own" : "Setlist";
+    return "";
+}
+
 function drawSetlistClick() {
-    const entry = currentSetlist ? currentSetlist.songs[setlistSongIndex] : null;
+    const entry = setlistEntry();
     drawMenuHeader(scrollHeader("Edit: " + (entry ? shortSongName(entry.name) : ""), 28), "");
-    const bars = entry ? (entry.click_bars || 0) : 0;
-    const stop = entry ? (entry.stop_after_finish || false) : false;
-    const items = [
-        { key: "bars", label: "Click Bars", value: bars === 0 ? "Off" : String(bars) },
-        { key: "sound", label: "Click Sound", value: clickSoundOn(entry) ? "On" : "Off" },
-        { key: "stop", label: "Stop At End", value: stop ? "Yes" : "No" },
-        { key: "knobs", label: "Knobs", value: knobOverrideCount(entry) ? knobOverrideCount(entry) + " own" : "Setlist" }
-    ];
     drawMenuList({
         ...LIST_ROW_FIT,
         labelX: 3,
-        items,
+        items: SETLIST_SONG_ROWS,
         selectedIndex: clickSettingsFocus,
         getLabel: (item) => item.label,
-        getValue: (item) => item.value,
+        getValue: (item) => setlistSongRowValue(entry, item.key),
         valueAlignRight: true,
         editMode: clickSettingsEditing,
         labelGap: 2,
         listArea: { topY: LIST_TOP_Y, bottomY: LIST_INDICATOR_BOTTOM_Y }
     });
+}
+
+/* Key: the song's own, then each key; landing on the song's key is the
+ * song's own again (no edit). */
+function stepSetlistKey(entry, delta) {
+    const song = setlistSongFile(entry);
+    const own = (song && song.key) || DEFAULT_KEY;
+    const cur = entry.key || own;
+    const idx = KEYS.indexOf(cur);
+    const next = KEYS[(((idx < 0 ? 0 : idx) + delta) % KEYS.length + KEYS.length) % KEYS.length];
+    if (next === own) delete entry.key; else entry.key = next;
+}
+
+/* Tempo: from the song's own, 20-300; back at the song's is no edit. */
+function stepSetlistTempo(entry, delta) {
+    const song = setlistSongFile(entry);
+    const own = (song && song.tempo_bpm) || 120;
+    const next = Math.max(20, Math.min(300, (entry.tempo_bpm || own) + delta));
+    if (next === own) delete entry.tempo_bpm; else entry.tempo_bpm = next;
 }
 
 /* The Menu Header's proportional 4x5 face, drawn through the device's
@@ -11258,28 +11380,38 @@ function handleSectionPickInput(cc, value) {
 
 function handleSetlistClickInput(cc, value) {
     if (!currentSetlist) return;
+    const entry = setlistEntry();
+    const row = SETLIST_SONG_ROWS[clickSettingsFocus];
     if (cc === MoveMainKnob) {
         const delta = decodeDelta(value);
-        if (clickSettingsEditing) {
-            if (clickSettingsFocus === 0) {
-                const cur = currentSetlist.songs[setlistSongIndex].click_bars || 0;
-                setSetlistClickBars(currentSetlist, setlistSongIndex, cur + delta);
-            } else if (clickSettingsFocus === 1) {
-                const entry = currentSetlist.songs[setlistSongIndex];
+        if (clickSettingsEditing && entry && row) {
+            if (row.key === "bars") {
+                setSetlistClickBars(currentSetlist, setlistSongIndex, (entry.click_bars || 0) + delta);
+            } else if (row.key === "sound") {
                 setSetlistClickSound(currentSetlist, setlistSongIndex, !clickSoundOn(entry));
-            } else if (clickSettingsFocus === 2) {
-                const cur = currentSetlist.songs[setlistSongIndex].stop_after_finish || false;
-                setSetlistStopAfterFinish(currentSetlist, setlistSongIndex, !cur);
+            } else if (row.key === "stop") {
+                setSetlistStopAfterFinish(currentSetlist, setlistSongIndex, !(entry.stop_after_finish || false));
+            } else if (row.key === "skey") {
+                stepSetlistKey(entry, delta);
+                saveSetlist(currentSetlist);
+            } else if (row.key === "tempo") {
+                stepSetlistTempo(entry, delta);
+                saveSetlist(currentSetlist);
             }
         } else {
-            clickSettingsFocus = Math.max(0, Math.min(3, clickSettingsFocus + delta));
+            clickSettingsFocus = Math.max(0, Math.min(SETLIST_SONG_ROWS.length - 1, clickSettingsFocus + delta));
         }
         needsRedraw = true;
     } else if (cc === MoveMainButton && value > 0) {
-        if (clickSettingsFocus === 3) {
+        if (row && row.key === "knobs") {
             /* This song's knobs: overrides of the setlist's. */
             clickSettingsEditing = false;
             openKnobMap("song", VIEW_SETLIST_CLICK);
+            return;
+        }
+        if (row && row.key === "sections") {
+            clickSettingsEditing = false;
+            openSetlistSections();
             return;
         }
         clickSettingsEditing = !clickSettingsEditing;
@@ -11289,10 +11421,173 @@ function handleSetlistClickInput(cc, value) {
             clickSettingsEditing = false;
             needsRedraw = true;
         } else {
+            setlistSongFileCache = null;
             menuStack.pop();
             currentView = VIEW_SETLIST_EDIT;
             needsRedraw = true;
         }
+    }
+}
+
+/* ── Setlist song > Sections: the order this setlist plays them in ────
+ *
+ * The rows are the sections in play order, then "+ Add" (any of the song's
+ * sections, after the selected one) and, once the order is the setlist's
+ * own, "Reset" (back to the song's). Shift + jog moves the selected
+ * section, Copy repeats it, Delete leaves it out. The first change makes the
+ * order the setlist's own (entry.sections). */
+let setlistSecCursor = 0;
+let setlistSecPickIndex = 0;
+
+/* The current order as references: the setlist's, else the song's own. */
+function setlistSecRefs() {
+    const entry = setlistEntry();
+    const song = setlistSongFile(entry);
+    const secs = song && Array.isArray(song.sections) ? song.sections : [];
+    return setlistSectionIndices(song, entry).map(i => ({ i, name: secs[i] ? (secs[i].name || "") : "" }));
+}
+
+function setlistSectionRows() {
+    const entry = setlistEntry();
+    const rows = setlistSecRefs().map((ref, k) => ({ type: "section", ref, k }));
+    rows.push({ type: "add" });
+    if (entry && Array.isArray(entry.sections)) rows.push({ type: "reset" });
+    return rows;
+}
+
+/* Make the order the setlist's own and save it. */
+function setSetlistSecRefs(refs) {
+    const entry = setlistEntry();
+    if (!entry) return;
+    entry.sections = refs.map(r => ({ i: r.i, name: r.name }));
+    saveSetlist(currentSetlist);
+    needsRedraw = true;
+}
+
+function openSetlistSections() {
+    setlistSongFileCache = null;
+    setlistSecCursor = 0;
+    currentView = VIEW_SETLIST_SECTIONS;
+    menuStack.push({ title: "Sections", selectedIndex: 0 });
+    needsRedraw = true;
+}
+
+function drawSetlistSections() {
+    const entry = setlistEntry();
+    drawMenuHeader(scrollHeader("Sections: " + (entry ? shortSongName(entry.name) : ""), 28),
+        entry && Array.isArray(entry.sections) ? "SET" : "");
+    const rows = setlistSectionRows();
+    if (setlistSecCursor >= rows.length) setlistSecCursor = rows.length - 1;
+    drawMenuList({
+        ...LIST_ROW_FIT,
+        labelX: 3,
+        items: rows,
+        selectedIndex: setlistSecCursor,
+        getLabel: (row) => row.type === "section" ? (row.ref.name || "Section") : (row.type === "add" ? "+ Add" : "Reset to Song"),
+        /* Where it is in the song, so repeats and moves read plainly. */
+        getValue: (row) => row.type === "section" ? "#" + (row.ref.i + 1) : "",
+        valueAlignRight: true,
+        labelGap: LIST_LABEL_GAP,
+        listArea: { topY: LIST_TOP_Y, bottomY: LIST_INDICATOR_BOTTOM_Y }
+    });
+}
+
+function handleSetlistSectionsInput(cc, value) {
+    const rows = setlistSectionRows();
+    const row = rows[setlistSecCursor];
+    const refs = setlistSecRefs();
+    if (cc === MoveMainKnob) {
+        const delta = decodeDelta(value);
+        if (shiftHeld && row && row.type === "section") {
+            /* Move the selected section earlier / later. */
+            const to = Math.max(0, Math.min(refs.length - 1, row.k + delta));
+            if (to !== row.k) {
+                const [moved] = refs.splice(row.k, 1);
+                refs.splice(to, 0, moved);
+                setSetlistSecRefs(refs);
+                setlistSecCursor = to;
+            }
+        } else {
+            setlistSecCursor = Math.max(0, Math.min(rows.length - 1, setlistSecCursor + delta));
+        }
+        needsRedraw = true;
+    } else if (cc === MoveCopy && value > 0 && row && row.type === "section") {
+        /* Repeat: the same section again, right after it. */
+        refs.splice(row.k + 1, 0, Object.assign({}, refs[row.k]));
+        setSetlistSecRefs(refs);
+        setlistSecCursor = row.k + 1;
+        showPopup("Sections", "Repeated " + (row.ref.name || "Section"), 1500);
+    } else if (cc === MoveDelete && value > 0 && row && row.type === "section") {
+        if (refs.length <= 1) {
+            showPopup("Sections", "A song plays at least one section", 2000);
+            needsRedraw = true;
+            return;
+        }
+        refs.splice(row.k, 1);
+        setSetlistSecRefs(refs);
+        setlistSecCursor = Math.min(row.k, refs.length - 1);
+    } else if (cc === MoveMainButton && value > 0 && row) {
+        if (row.type === "add") {
+            setlistSecPickIndex = 0;
+            currentView = VIEW_SETLIST_SECTION_PICK;
+            menuStack.push({ title: "Add Section", selectedIndex: 0 });
+            needsRedraw = true;
+        } else if (row.type === "reset") {
+            const entry = setlistEntry();
+            if (entry) delete entry.sections;
+            saveSetlist(currentSetlist);
+            setlistSecCursor = 0;
+            showPopup("Sections", "Back to the song's order", 1500);
+            needsRedraw = true;
+        }
+    } else if (cc === MoveBack && value > 0) {
+        menuStack.pop();
+        currentView = VIEW_SETLIST_CLICK;
+        needsRedraw = true;
+    }
+}
+
+/* + Add: one of the song's sections, inserted after the selected one (at
+ * the end from "+ Add"). */
+function songSectionsOfEntry() {
+    const song = setlistSongFile(setlistEntry());
+    return song && Array.isArray(song.sections) ? song.sections : [];
+}
+
+function drawSetlistSectionPick() {
+    drawMenuHeader("Add Section", "");
+    const secs = songSectionsOfEntry();
+    drawMenuList({
+        ...LIST_ROW_FIT,
+        labelX: 3,
+        items: secs.map((sec, i) => ({ name: sec.name || ("Section " + (i + 1)), i })),
+        selectedIndex: setlistSecPickIndex,
+        getLabel: (it) => it.name,
+        getValue: (it) => "#" + (it.i + 1),
+        valueAlignRight: true,
+        labelGap: LIST_LABEL_GAP,
+        listArea: { topY: LIST_TOP_Y, bottomY: LIST_INDICATOR_BOTTOM_Y }
+    });
+}
+
+function handleSetlistSectionPickInput(cc, value) {
+    const secs = songSectionsOfEntry();
+    if (cc === MoveMainKnob) {
+        setlistSecPickIndex = Math.max(0, Math.min(secs.length - 1, setlistSecPickIndex + decodeDelta(value)));
+        needsRedraw = true;
+    } else if (cc === MoveMainButton && value > 0 && secs[setlistSecPickIndex]) {
+        const refs = setlistSecRefs();
+        const at = Math.min(setlistSecCursor + 1, refs.length);
+        refs.splice(at, 0, { i: setlistSecPickIndex, name: secs[setlistSecPickIndex].name || "" });
+        setSetlistSecRefs(refs);
+        setlistSecCursor = at;
+        menuStack.pop();
+        currentView = VIEW_SETLIST_SECTIONS;
+        needsRedraw = true;
+    } else if (cc === MoveBack && value > 0) {
+        menuStack.pop();
+        currentView = VIEW_SETLIST_SECTIONS;
+        needsRedraw = true;
     }
 }
 
@@ -13379,7 +13674,7 @@ function computeSetTotalSec() {
     if (!currentSetlist) return 0;
     let total = 0;
     for (const e of currentSetlist.songs) {
-        const song = readJson(e.path);
+        const song = applySetlistEdits(readJson(e.path), e);
         if (song) total += songDurationSec(song);
     }
     return total;
@@ -13575,7 +13870,7 @@ function buildPerfLayout() {
     if (!currentSetlist) return layout;
     for (let s = 0; s < currentSetlist.songs.length; s++) {
         const entry = currentSetlist.songs[s];
-        const song = readJson(entry.path);
+        const song = applySetlistEdits(readJson(entry.path), entry);
         const sections = (song && song.sections) ? song.sections : [];
         if (entry.click_bars > 0) {
             layout.push({ kind: "click", songIndex: s, sectionIndex: -1 });
@@ -13603,6 +13898,10 @@ function perfLoadSong(index, resetToggles) {
     if (index < 0 || index >= currentSetlist.songs.length) return false;
     const entry = currentSetlist.songs[index];
     if (!entry || !loadSongFile(entry.path)) return false;
+    /* This setlist's key, tempo and section order for the song, on a copy:
+     * activeSongObj stays the file's own song, so nothing saves the edits
+     * over it (see saveCurrentSong, persistResolvedClipFolders). */
+    currentSong = applySetlistEdits(currentSong, entry);
     currentMode = MODE_PERFORMANCE;
     perfSongIndex = index;
     perfSongLoaded = true;
@@ -14808,7 +15107,18 @@ export function footerHints() {
         case VIEW_TRIM: return editMenuHints(trimEditing);
         case VIEW_INSTRUMENT: return editMenuHints(instrumentEditing);
         case VIEW_INSTRUMENT_BAR: return editMenuHints(itemEditing);
-        case VIEW_SETLIST_CLICK: return editMenuHints(clickSettingsEditing);
+        case VIEW_SETLIST_CLICK:
+            /* Sections and Knobs open a screen rather than edit in place. */
+            if (!clickSettingsEditing && SETLIST_SONG_ROWS[clickSettingsFocus] &&
+                SETLIST_SONG_ROWS[clickSettingsFocus].opens) return HINTS_LIST;
+            return editMenuHints(clickSettingsEditing);
+        case VIEW_SETLIST_SECTIONS: {
+            const row = setlistSectionRows()[setlistSecCursor];
+            if (!row || row.type !== "section") return HINTS_LIST;
+            if (shiftHeld) return [["JOG", "MOVE"], ["BACK", "OUT"]];
+            return [["COPY", "REPEAT"], ["DEL", "REMOVE"]];
+        }
+        case VIEW_SETLIST_SECTION_PICK: return [["JOG", "SEL"], ["CLK", "ADD"], ["BACK", "OUT"]];
         case VIEW_JAM_INSTRUMENT: return editMenuHints(jamInstrumentEditing);
         /* Where a screen has pad and track actions, those lead: Play, Record
          * and Back are self-explanatory (and lit), so they give way. In Song
@@ -15225,6 +15535,8 @@ globalThis.tick = function() {
                 case VIEW_SETLIST_EDIT: drawSetlistEdit(); break;
                 case VIEW_SETLIST_PICK: drawSetlistPick(); break;
                 case VIEW_SETLIST_CLICK: drawSetlistClick(); break;
+                case VIEW_SETLIST_SECTIONS: drawSetlistSections(); break;
+                case VIEW_SETLIST_SECTION_PICK: drawSetlistSectionPick(); break;
                 case VIEW_SECTION_PICK: drawSectionPick(); break;
                 case VIEW_PERF_SETLIST: drawPerfSetlist(); break;
                 case VIEW_PERFORMANCE: drawPerformance(); break;
@@ -15319,6 +15631,8 @@ function routeCcInput(rawData, cc, value) {
         case VIEW_SETLIST_EDIT: handleSetlistEditInput(cc, value); break;
         case VIEW_SETLIST_PICK: handleSetlistPickInput(cc, value); break;
         case VIEW_SETLIST_CLICK: handleSetlistClickInput(cc, value); break;
+        case VIEW_SETLIST_SECTIONS: handleSetlistSectionsInput(cc, value); break;
+        case VIEW_SETLIST_SECTION_PICK: handleSetlistSectionPickInput(cc, value); break;
         case VIEW_SECTION_PICK: handleSectionPickInput(cc, value); break;
         case VIEW_PERF_SETLIST: handlePerfSetlistInput(cc, value); break;
         case VIEW_PERFORMANCE: handlePerformanceInput(cc, value); break;

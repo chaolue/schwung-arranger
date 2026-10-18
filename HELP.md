@@ -412,13 +412,16 @@ Choose a song from the Song Bank to insert into the setlist.
 
 ### Setlist Song Settings
 
-Per-song count-in click and stop-after-finish options.
+Jog click on a song in **Setlist Edit** opens how this setlist plays it: the
+count-in click, stop-after-finish, and — for this setlist only — the song's
+key, tempo and the order of its sections. The song itself is never changed;
+Perform plays the setlist's version.
 
 | Control | Action |
 |---------|--------|
-| Jog wheel (browse mode) | Move between Bars, Sound, Stop On End, Knobs |
+| Jog wheel (browse mode) | Move between Bars, Sound, Stop On End, Key, Tempo, Sections, Knobs |
 | Jog wheel (edit mode) | Adjust the selected value |
-| Jog click | Toggle edit / browse mode; on Sound and Stop On End it toggles them; on Knobs it opens this song's knobs |
+| Jog click | Toggle edit / browse mode; on Sound and Stop On End it toggles them; on Sections it opens the section order; on Knobs it opens this song's knobs |
 | Back (edit mode) | Exit edit mode |
 | Back (browse mode) | Save and return to Setlist Edit |
 
@@ -427,7 +430,30 @@ Per-song count-in click and stop-after-finish options.
 | Bars | Count-in click bars before this song starts (0 = no click) |
 | Sound | **On**: the click track plays the count-in, on its output, channel and notes (see **Options: Click**). **Off**: a silent count-in (pad flashes only) |
 | Stop On End | If Yes, playback stops when this song finishes and the next song is selected |
+| Key | **Song (x)** plays the song's own key; any other key transposes its chords (and instrument parts) for this setlist. Turning back to the song's key clears it |
+| Tempo | **Song (x)** plays the song's own tempo; or a tempo of its own, 20–300. Turning back to the song's tempo clears it |
+| Sections | **Song** plays the sections in the song's order; **N set** is this setlist's own order (see below) |
 | Knobs | This song's own knob mappings: **Setlist** while it uses the setlist's, or how many it overrides |
+
+#### Sections (the setlist's order)
+
+The rows are the sections in the order this setlist plays them, each with its
+place in the song (`#3`), then **+ Add** and, once the order is the
+setlist's own, **Reset to Song**. Perform's section pads follow this order.
+
+| Control | Action |
+|---------|--------|
+| Jog wheel | Select a section |
+| Shift + Jog wheel | Move the selected section earlier / later |
+| Copy | Repeat the selected section (the copy goes right after it) |
+| Delete | Leave the selected section out (at least one stays) |
+| Jog click (on + Add) | Pick any of the song's sections to add after the selected one |
+| Jog click (on Reset to Song) | Go back to the song's own order |
+| Back | Return to the song's settings |
+
+Sections are remembered by their place and name, so if the song is edited
+later a moved section is still found by its name; one that no longer exists
+is skipped.
 
 ---
 

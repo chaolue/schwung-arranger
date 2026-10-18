@@ -34,6 +34,11 @@
   nothing is left sounding in Schwung's chains.
 
 ### Setlists
+- A setlist can play a song in another key, at another tempo, and with its
+  sections in another order -- repeated, left out or rearranged (Setlist
+  Edit > a song > Key / Tempo / Sections). The song itself is unchanged;
+  Perform, its pads and the setlist's total time follow the setlist's
+  version.
 - Copy duplicates a setlist.
 - Setlist Edit: Left/Right no longer move songs (Shift + jog does).
 

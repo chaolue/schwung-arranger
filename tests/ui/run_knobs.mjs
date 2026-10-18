@@ -92,9 +92,11 @@ check(saved().knobs[0].value === "0.55", "...and saves it as the setlist's value
 
 /* Song B gets its own knob 1 (Chain 3 Wave) and turns knob 2 off. */
 back();                       /* to Setlist Edit */
-jog(-2); click();             /* Song B -> Transitions */
-check(H.printed.includes("Knobs") && H.printed.some(t => /^Se/.test(t)), "Transitions has a Knobs row, inheriting: " + JSON.stringify(H.printed));
-jog(3); click();              /* Knobs row */
+jog(-2); click();             /* Song B -> its settings */
+H.printed.length = 0;
+jog(6);                       /* Knobs: the last row, below Key, Tempo and Sections */
+check(H.printed.includes("Knobs") && H.printed.some(t => /^Se/.test(t)), "the song's settings have a Knobs row, inheriting: " + JSON.stringify(H.printed));
+click();                      /* Knobs row */
 check(H.printed.some(t => /^1 \(C1 Cutoff\)/.test(t)), "an inherited knob shows in parentheses: " + JSON.stringify(H.printed));
 click(); jog(4); click();      /* Use Setlist, Off, Chain 1, 2, 3 */
 click(); jog(1); click();      /* Synth -> Wave */
