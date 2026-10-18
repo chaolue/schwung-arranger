@@ -22,7 +22,8 @@
 - Renaming a section offers the section names (as for a new section), or
   Custom... for the keyboard.
 - Loop on the Chord, Inst or Click track copies the section's chords/items
-  to every other section with the same name (Chorus, Chorus 2, ...).
+  to other sections, picked from a list: the same-named ones (Chorus,
+  Chorus 2, ...) start ticked, and any other can be ticked too.
 - Deleting a drum clip in a section with chords or items leaves an (empty)
   placeholder of the same length, so the chords and items after it stay on
   their drums. A pad fills it; Delete again removes it.

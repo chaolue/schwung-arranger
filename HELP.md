@@ -151,7 +151,7 @@ The display lists the section, then its chords in order with where each starts
 | Shift + Jog wheel | Move the selected chord a beat (half a beat in Advanced) — past other chords, across bars, stopping at the section's ends |
 | Delete | Delete the selected chord |
 | Copy | Duplicate the selected chord after the section's last chord |
-| Loop | Copy this section's chords to every other section with the same name (Chorus, Chorus 2, ...), after a confirm — replacing theirs; a shorter section keeps what fits. Works the same on the Inst and Click tracks for their items |
+| Loop | Copy this section's chords to other sections: a list of the song's other sections opens with the same-named ones (Chorus, Chorus 2, ...) already ticked. Jog click ticks or unticks a section — any section, whatever its name — and the top row (**Copy to N sections**) copies, replacing theirs; a shorter section keeps what fits. Back copies nothing. Works the same on the Inst and Click tracks for their items |
 | Step buttons | Select that bar's first chord (the selected chord's bar is white) |
 | Left / Right | Move to the previous / next section |
 | Mute / Shift + Mute | Merge / split sections (see Edit Song) |
@@ -159,7 +159,7 @@ The display lists the section, then its chords in order with where each starts
 | Play / Back | Same as the Drum track |
 
 **Button LED hints:** Track 1 is lit azure blue. Copy and Delete are lit when a
-chord is selected; Loop when another section has the same name.
+chord is selected; Loop when the song has another section.
 
 ---
 

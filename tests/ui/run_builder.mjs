@@ -163,13 +163,45 @@ H.files.set(SONGS + "/multi.json", song("Multi", { sections: [
 jog(-8); jog(3); click();
 press(C.MoveRow1);            /* Chord track, section 1 (Chorus) */
 press(C.MoveLoop);
-check(H.printed.some(t => /To 1 more Chorus/.test(t)), "Loop asks to copy the chords to the 1 other Chorus: " + JSON.stringify(H.printed));
-jog(1); click();              /* Copy */
+/* Rows: the action, then Verse (-), Chorus 2 (Yes: same-named, ticked). */
+const rowsSeen = H.printed.slice();
+check(rowsSeen.includes("Copy to 1 section") && rowsSeen.includes("Chorus 2") && rowsSeen.includes("Verse"),
+      "Loop lists the other sections, the same-named one ticked: " + JSON.stringify(rowsSeen));
+check(rowsSeen[rowsSeen.indexOf("Chorus 2") + 1] === "Yes" && rowsSeen[rowsSeen.indexOf("Verse") + 1] === "-",
+      "Chorus 2 ticked, Verse not: " + JSON.stringify(rowsSeen));
+click();                      /* Copy to 1 section */
 back();
 multi = JSON.parse(H.files.get(SONGS + "/multi.json"));
 const ch = (i) => JSON.stringify((multi.sections[i].chords || []).filter(Boolean).map(c => c.root));
 check(ch(2) === '["C"]', "Chorus 2 (1 bar) gets the Chorus's first bar: " + ch(2));
 check(ch(1) === '["A"]', "Verse is untouched: " + ch(1));
+
+/* A differently named section can be ticked too. */
+H.files.set(SONGS + "/multi.json", song("Multi", { sections: [
+    sec("Chorus", 2, [{ root: "C", quality: "maj" }, { root: "G", quality: "maj" }]),
+    sec("Verse", 2, [{ root: "A", quality: "min" }]),
+    sec("Chorus 2", 1, [{ root: "F", quality: "maj" }])] }));
+jog(-8); jog(3); click();
+if (!has(["T1", "DRUM"])) press(C.MoveRow1);    /* the Chord track */
+press(C.MoveLoop);
+jog(1); click();              /* tick Verse */
+jog(1); click();              /* untick Chorus 2 */
+H.printed.length = 0; jog(-8);
+check(H.printed.includes("Copy to 1 section"), "ticking Verse and unticking Chorus 2: still 1: " + JSON.stringify(H.printed));
+click();
+back();
+multi = JSON.parse(H.files.get(SONGS + "/multi.json"));
+check(ch(1) === '["C","G"]' && ch(2) === '["F"]', "Verse gets the chords, Chorus 2 keeps its own: " + ch(1) + " " + ch(2));
+/* Back leaves without copying. */
+H.files.set(SONGS + "/multi.json", song("Multi", { sections: [
+    sec("Chorus", 2, [{ root: "C", quality: "maj" }, { root: "G", quality: "maj" }]),
+    sec("Verse", 2, [{ root: "A", quality: "min" }]),
+    sec("Chorus 2", 1, [{ root: "F", quality: "maj" }])] }));
+jog(-8); jog(3); click();
+if (!has(["T1", "DRUM"])) press(C.MoveRow1);
+press(C.MoveLoop); jog(1); click(); back(); back();
+multi = JSON.parse(H.files.get(SONGS + "/multi.json"));
+check(ch(1) === '["A"]' && ch(2) === '["F"]', "Back copies nothing: " + ch(1) + " " + ch(2));
 const S = { sections: [sec("Chorus", 2, []), sec("chorus 3", 1, []), sec("Bridge", 1, [])] };
 check(JSON.stringify(M.sameNamedSections(S, 0)) === "[1]", "same-named ignores case and the number");
 

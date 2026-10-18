@@ -152,6 +152,9 @@ const VIEW_JAM_INSTRUMENT = "jam_instrument";
  * picker that adds one of the song's sections to it. */
 const VIEW_SETLIST_SECTIONS = "setlist_sections";
 const VIEW_SETLIST_SECTION_PICK = "setlist_section_pick";
+/* Song Builder, Loop on the Chord/Inst/Click track: which sections to copy
+ * the track's section to. */
+const VIEW_COPY_TRACK_PICK = "copy_track_pick";
 
 /* Section names offered when adding a new section via Shift + Loop. */
 const SECTION_NAMES = [
@@ -2422,7 +2425,7 @@ const SCROLLABLE_MENU_VIEWS = new Set([
     VIEW_ROOT, VIEW_FOLDER_LIST, VIEW_BUILDER, VIEW_TRIM, VIEW_SONG_SETTINGS, VIEW_SONG_BACKUPS,
     VIEW_SONG_BANK, VIEW_OPTIONS, VIEW_OPTIONS_DRUMS, VIEW_OPTIONS_INST, VIEW_OPTIONS_CLICK, VIEW_OPTIONS_CHAINS,
     VIEW_SETLIST_BANK, VIEW_SETLIST_EDIT,
-    VIEW_SETLIST_PICK, VIEW_SETLIST_CLICK, VIEW_SETLIST_SECTIONS, VIEW_SETLIST_SECTION_PICK,
+    VIEW_SETLIST_PICK, VIEW_SETLIST_CLICK, VIEW_SETLIST_SECTIONS, VIEW_SETLIST_SECTION_PICK, VIEW_COPY_TRACK_PICK,
     VIEW_PERF_SETLIST, VIEW_PERFORMANCE,
     VIEW_JAM_FOLDER, VIEW_JAM, VIEW_SECTION_PICK, VIEW_CHORD_PICK, VIEW_INSTRUMENT
 ]);
@@ -5478,8 +5481,8 @@ function updateButtonLEDs() {
                         active.set(MoveCopy, WhiteLedFull);
                         active.set(MoveDelete, WhiteLedFull);
                     }
-                    /* Loop copies the track to the same-named sections. */
-                    if (!ledLocked && sameNamedSections(currentSong, chordDisplaySectionIndex()).length > 0) {
+                    /* Loop copies the track to other sections (same-named ones ticked). */
+                    if (!ledLocked && currentSong && currentSong.sections.length > 1) {
                         active.set(MoveLoop, WhiteLedFull);
                     }
                     if (!ledLocked) active.set(MoveShift, shiftHeld ? WhiteLedFull : WhiteLedDim);
@@ -5562,6 +5565,7 @@ function updateButtonLEDs() {
                 break;
             case VIEW_SETLIST_CLICK:
             case VIEW_SETLIST_SECTION_PICK:
+            case VIEW_COPY_TRACK_PICK:
                 active.set(MoveBack, WhiteLedFull);
                 active.set(MoveMainButton, WhiteLedFull);
                 break;
@@ -13431,33 +13435,92 @@ export function copyTrackToSections(song, track, from, to) {
 }
 
 /* Loop on the Chord, Inst or Click track: copy this section's chords/items
- * to every other section named like it, after a confirm. */
+ * to other sections, picked from a list. The sections named like this one
+ * (Chorus, Chorus 2, ...) start ticked -- the usual target -- and any other
+ * can be ticked too; the top row copies to the ticked ones. */
+let copyPickFrom = -1;
+let copyPickTrack = -1;
+let copyPickTicked = new Set();   /* section indices */
+let copyPickCursor = 0;
+
+function copyPickTrackName(track) {
+    return track === TRACK_CHORD ? "Chords" : itemTrackName(track);
+}
+
+/* Rows: the action, then every other section. */
+function copyPickRows() {
+    const rows = [{ type: "copy" }];
+    (currentSong ? currentSong.sections : []).forEach((sec, i) => {
+        if (i !== copyPickFrom) rows.push({ type: "section", i, name: sec.name || ("Section " + (i + 1)) });
+    });
+    return rows;
+}
+
 function copyTrackToSameNamedSections() {
     if (!currentSong) return;
     const from = chordDisplaySectionIndex();
-    const to = sameNamedSections(currentSong, from);
     const sec = currentSong.sections[from];
-    const what = builderTrack === TRACK_CHORD ? "Chords" : itemTrackName(builderTrack);
     if (!sec) return;
-    if (to.length === 0) {
-        showPopup(what, "No other " + (sec.name || "Section") + " section", 2000);
+    if (currentSong.sections.length < 2) {
+        showPopup(copyPickTrackName(builderTrack), "No other section to copy to", 2000);
         needsRedraw = true;
         return;
     }
-    const track = builderTrack;
-    openConfirm({
-        title: "Copy " + what + "?",
-        name: "To " + to.length + " more " + String(sec.name || "Section").replace(/\s*\d+$/, ""),
-        labels: ["No", "Copy"],
-        onConfirm: () => {
-            copyTrackToSections(currentSong, track, from, to);
-            unsavedChanges = true;
-            stepLedsDirty = true;
-            showPopup(what, "Copied to " + to.length + " section" + (to.length === 1 ? "" : "s"), 2000);
-            needsRedraw = true;
-        },
-        onCancel: () => { needsRedraw = true; }
+    copyPickFrom = from;
+    copyPickTrack = builderTrack;
+    copyPickTicked = new Set(sameNamedSections(currentSong, from));
+    copyPickCursor = 0;
+    currentView = VIEW_COPY_TRACK_PICK;
+    menuStack.push({ title: "Copy To", selectedIndex: 0 });
+    needsRedraw = true;
+}
+
+function drawCopyTrackPick() {
+    const from = currentSong ? currentSong.sections[copyPickFrom] : null;
+    drawMenuHeader(scrollHeader("Copy " + copyPickTrackName(copyPickTrack) + ": " + (from ? from.name || "Section" : ""), 28), "");
+    const n = copyPickTicked.size;
+    drawMenuList({
+        ...LIST_ROW_FIT,
+        labelX: 3,
+        items: copyPickRows(),
+        selectedIndex: copyPickCursor,
+        getLabel: (row) => row.type === "copy" ? (n ? "Copy to " + n + " section" + (n === 1 ? "" : "s") : "Tick sections below") : row.name,
+        getValue: (row) => row.type === "section" ? (copyPickTicked.has(row.i) ? "Yes" : "-") : "",
+        valueAlignRight: true,
+        labelGap: LIST_LABEL_GAP,
+        listArea: { topY: LIST_TOP_Y, bottomY: LIST_INDICATOR_BOTTOM_Y }
     });
+}
+
+function closeCopyTrackPick() {
+    menuStack.pop();
+    currentView = VIEW_BUILDER;
+    stepLedsDirty = true;
+    needsRedraw = true;
+}
+
+function handleCopyTrackPickInput(cc, value) {
+    const rows = copyPickRows();
+    if (cc === MoveMainKnob) {
+        copyPickCursor = Math.max(0, Math.min(rows.length - 1, copyPickCursor + decodeDelta(value)));
+        needsRedraw = true;
+    } else if (cc === MoveMainButton && value > 0) {
+        const row = rows[copyPickCursor];
+        if (!row) return;
+        if (row.type === "section") {
+            if (copyPickTicked.has(row.i)) copyPickTicked.delete(row.i); else copyPickTicked.add(row.i);
+            needsRedraw = true;
+            return;
+        }
+        if (copyPickTicked.size === 0) return;
+        const to = [...copyPickTicked].sort((a, b) => a - b);
+        copyTrackToSections(currentSong, copyPickTrack, copyPickFrom, to);
+        unsavedChanges = true;
+        closeCopyTrackPick();
+        showPopup(copyPickTrackName(copyPickTrack), "Copied to " + to.length + " section" + (to.length === 1 ? "" : "s"), 2000);
+    } else if (cc === MoveBack && value > 0) {
+        closeCopyTrackPick();
+    }
 }
 
 /* Increment a trailing number in a section name for duplication. "Verse 1" ->
@@ -15119,6 +15182,9 @@ export function footerHints() {
             return [["COPY", "REPEAT"], ["DEL", "REMOVE"]];
         }
         case VIEW_SETLIST_SECTION_PICK: return [["JOG", "SEL"], ["CLK", "ADD"], ["BACK", "OUT"]];
+        case VIEW_COPY_TRACK_PICK:
+            return copyPickCursor === 0 ? [["JOG", "SEL"], ["CLK", "COPY"], ["BACK", "OUT"]]
+                : [["JOG", "SEL"], ["CLK", "TICK"], ["BACK", "OUT"]];
         case VIEW_JAM_INSTRUMENT: return editMenuHints(jamInstrumentEditing);
         /* Where a screen has pad and track actions, those lead: Play, Record
          * and Back are self-explanatory (and lit), so they give way. In Song
@@ -15537,6 +15603,7 @@ globalThis.tick = function() {
                 case VIEW_SETLIST_CLICK: drawSetlistClick(); break;
                 case VIEW_SETLIST_SECTIONS: drawSetlistSections(); break;
                 case VIEW_SETLIST_SECTION_PICK: drawSetlistSectionPick(); break;
+                case VIEW_COPY_TRACK_PICK: drawCopyTrackPick(); break;
                 case VIEW_SECTION_PICK: drawSectionPick(); break;
                 case VIEW_PERF_SETLIST: drawPerfSetlist(); break;
                 case VIEW_PERFORMANCE: drawPerformance(); break;
@@ -15633,6 +15700,7 @@ function routeCcInput(rawData, cc, value) {
         case VIEW_SETLIST_CLICK: handleSetlistClickInput(cc, value); break;
         case VIEW_SETLIST_SECTIONS: handleSetlistSectionsInput(cc, value); break;
         case VIEW_SETLIST_SECTION_PICK: handleSetlistSectionPickInput(cc, value); break;
+        case VIEW_COPY_TRACK_PICK: handleCopyTrackPickInput(cc, value); break;
         case VIEW_SECTION_PICK: handleSectionPickInput(cc, value); break;
         case VIEW_PERF_SETLIST: handlePerfSetlistInput(cc, value); break;
         case VIEW_PERFORMANCE: handlePerformanceInput(cc, value); break;
