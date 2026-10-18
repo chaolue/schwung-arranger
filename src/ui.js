@@ -3072,7 +3072,14 @@ export function sortItems(list) {
     return list;
 }
 
-const INST_ITEM_FIELDS = ["mute", "octave", "follow_note", "voicing", "inversion", "note_gap"];
+/* An instrument's note-on velocity, 1-127: 100 for a song saved before it
+ * was a setting (every instrument note used to be 100). */
+export function instrumentVelocity(inst) {
+    const v = inst ? inst.velocity : undefined;
+    return (typeof v === "number" && v >= 1 && v <= 127) ? Math.round(v) : 100;
+}
+
+const INST_ITEM_FIELDS = ["mute", "octave", "follow_note", "voicing", "inversion", "note_gap", "velocity"];
 
 /* Turn an instrument's old per-bar mutes (inst.bars) and per-bar overrides
  * (inst.overrides), both indexed by section number, into section items that
@@ -3173,6 +3180,7 @@ function instrumentForTrack(track) {
             voicing: "bass",
             inversion: INVERSION_AUTO,
             note_gap: 0.25,
+            velocity: 100,
             bars: [],
             overrides: []
         };
@@ -3359,6 +3367,8 @@ export function toEngineSongJson(song) {
              * remembers it. */
             inversion: (typeof inst.inversion === "number") ? inst.inversion : 0,
             note_gap: (typeof inst.note_gap === "number") ? inst.note_gap : 0.25,
+            /* Note-on velocity, 1-127 (items can change it from a bar/beat). */
+            velocity: instrumentVelocity(inst),
             /* Per-section per-bar on/off map: 1 = send chord, 0 = muted.
              * Bars are "on by default": only an explicit `false` mutes a bar;
              * an unset (undefined) bar sends. Serialize accordingly so the DSP
@@ -3484,6 +3494,7 @@ export function toUiSong(engineLike) {
             voicing: inst.voicing || "bass",
             inversion: (typeof inst.inversion === "number") ? inst.inversion : 0,
             note_gap: (typeof inst.note_gap === "number") ? inst.note_gap : 0.25,
+            velocity: instrumentVelocity(inst),
             bars: (inst.bars || []).map(sec => (sec || []).map(b => !!b)),
             overrides: (inst.overrides || []).map(ov => {
                 const out = { section: ov.section, bar: ov.bar };
@@ -7462,7 +7473,7 @@ function chordListClick() {
     if (!sec) return;
     const evs = sectionChordEvents(sec);
     /* A locked song's chords are read-only, as its clips are. */
-    if (songIsLocked()) return;
+    if (songIsLocked()) { lockedNotice(); return; }
     if (chordListCursor < 0) {
         renameSectionPrompt(sec);
         return;
@@ -7874,7 +7885,8 @@ function drawInstrument() {
         { key: "follow", label: "Follow Note", value: inst && inst.follow_note > 0 ? String(inst.follow_note) : "Off" },
         { key: "voicing", label: "Voicing", value: inst && inst.voicing === "chord" ? "Chord" : "Bass" },
         { key: "inversion", label: "Inversion", value: inversionLabel(inst ? inst.inversion : 0) },
-        { key: "gap", label: "Note Gap", value: noteGapLabel(inst ? inst.note_gap : 0.25) }
+        { key: "gap", label: "Note Gap", value: noteGapLabel(inst ? inst.note_gap : 0.25) },
+        { key: "velocity", label: "Velocity", value: String(instrumentVelocity(inst)) }
     ];
     drawMenuList({
         ...LIST_ROW_FIT,
@@ -7918,10 +7930,13 @@ function handleInstrumentInput(cc, value) {
                 const idx = steps.indexOf(cur);
                 const newIdx = Math.max(0, Math.min(steps.length - 1, (idx < 0 ? 3 : idx) + delta));
                 inst.note_gap = steps[newIdx];
+            } else if (instrumentFocus === 6) {
+                /* Note-on velocity, 1-127. */
+                inst.velocity = Math.max(1, Math.min(127, instrumentVelocity(inst) + delta));
             }
             unsavedChanges = true;
         } else {
-            instrumentFocus = Math.max(0, Math.min(5, instrumentFocus + delta));
+            instrumentFocus = Math.max(0, Math.min(6, instrumentFocus + delta));
         }
         needsRedraw = true;
     } else if (cc === MoveMainButton && value > 0) {
@@ -8000,6 +8015,7 @@ function itemLabel(track, it) {
     if (it.voicing) parts.push(it.voicing === "chord" ? "Chord" : "Bass");
     if (typeof it.inversion === "number") parts.push(inversionLabel(it.inversion));
     if (typeof it.note_gap === "number") parts.push("Gap " + noteGapLabel(it.note_gap));
+    if (typeof it.velocity === "number") parts.push("Vel " + it.velocity);
     return parts.length ? parts.join(" ") : "Defaults";
 }
 
@@ -8150,7 +8166,7 @@ function itemListClick() {
     if (!sec) return;
     const list = sortItems(sectionItems(sec, builderTrack));
     /* A locked song's items are read-only, as its clips are. */
-    if (songIsLocked()) return;
+    if (songIsLocked()) { lockedNotice(); return; }
     if (itemListCursor < 0) { renameSectionPrompt(sec); return; }
     const it = list[itemListCursor];
     if (it) { openItemEdit(builderTrack, secIndex, it); return; }
@@ -8272,6 +8288,8 @@ function itemEditRows() {
             value: itemDefault(w.inversion, inversionLabel(inst ? inst.inversion : 0)) || inversionLabel(w.inversion) });
         rows.push({ key: "gap", label: "Note Gap",
             value: itemDefault(w.note_gap, noteGapLabel(inst ? inst.note_gap : 0.25)) || noteGapLabel(w.note_gap) });
+        rows.push({ key: "velocity", label: "Velocity",
+            value: itemDefault(w.velocity, instrumentVelocity(inst)) || String(w.velocity) });
     }
     rows.push({ key: "adv", label: "Advanced", value: w.adv ? "On" : "Off" });
     rows.push({ key: "delete", label: "Delete", value: "" });
@@ -8360,6 +8378,9 @@ function handleInstrumentBarMenuInput(cc, value) {
                 w.mute = !w.mute;
             } else if (row.key === "octave") {
                 w.octave = cycleOptionalInt(w.octave, delta, -1, 8);
+            } else if (row.key === "velocity") {
+                /* Below 1 is Default (the track's velocity). */
+                w.velocity = cycleOptionalInt(w.velocity, delta, 1, 127);
             } else if (row.key === "follow") {
                 const inst = instrumentForTrack(itemEditTrack);
                 const voicing = w.voicing || (inst ? inst.voicing : "bass");
@@ -8919,6 +8940,13 @@ function openSongSettings() {
     songSettingsBackupCount = listSongBackups(currentSong.name).length;
     currentView = VIEW_SONG_SETTINGS;
     menuStack.push({ title: "Settings", selectedIndex: 0 });
+    needsRedraw = true;
+}
+
+/* A jog click or pad a locked song refuses says why, rather than doing
+ * nothing (the footer offers Menu, where Lock Song is). */
+function lockedNotice() {
+    showPopup("Song locked", "Unlock: Menu > Lock Song", 2000);
     needsRedraw = true;
 }
 
@@ -10272,8 +10300,11 @@ function handleBuilderInput(cc, value) {
          * the live section rather than the stale currentSectionIndex. */
         const sec = currentSong ? currentSong.sections[builderDisplaySectionIndex()] : null;
         if (!sec) return;
-        if (builderCursor === -1) {
-            /* Section header -> rename (blocked when locked). */
+        if (locked && builderCursor < sec.clips.length) {
+            /* Rename and trim are blocked on a locked song: say so. */
+            lockedNotice();
+        } else if (builderCursor === -1) {
+            /* Section header -> rename. */
             renameSectionPrompt(sec);
         } else if (builderCursor < sec.clips.length) {
             /* Clip -> open trim (blocked when locked; a placeholder has
@@ -13187,7 +13218,8 @@ function builderPageCount() {
 }
 
 function handleBuilderPad(note, velocity) {
-    if (songIsLocked()) return; /* cannot add/insert clips in a locked song */
+    /* Cannot add/insert clips in a locked song. */
+    if (songIsLocked()) { if (velocity > 0) lockedNotice(); return; }
     const padIndex = getPadIndex(note);
     if (padIndex < 0) return;
     const clip = clipForBuilderPad(padIndex);

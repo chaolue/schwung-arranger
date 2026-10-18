@@ -165,5 +165,21 @@ function deepEqual(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
     CHECK(clipFolderBackfill(map, "Unknown", "VD/x") === "", "unknown: nothing");
 }
 
+/* Instrument velocity: the track's (100 for a song saved before it was a
+ * setting) and an item's, both reaching the engine. */
+{
+    const { toEngineSongJson, instrumentVelocity } = ui;
+    const vsong = { name: "V", key: "C", time_sig_num: 4, time_sig_den: 4, source_folder: "F",
+        sections: [{ name: "A", clips: [{ source: "x.mid", start_bar: 0, end_bar: 2 }], chords: [{ root: "C", quality: "maj" }],
+                     inst: [[{ bar: 1, beat: 3, velocity: 120 }], []] }],
+        instruments: [{ enabled: true, octave: 3, velocity: 80 }, { enabled: true, octave: 3 }] };
+    const out = toEngineSongJson(vsong);
+    const ej = typeof out === "string" ? JSON.parse(out) : out;
+    CHECK(ej.instruments[0].velocity === 80, "the track's velocity reaches the engine: " + ej.instruments[0].velocity);
+    CHECK(ej.instruments[1].velocity === 100, "a track without one: 100, as every note was before");
+    CHECK(ej.instruments[0].items.some(it => it.velocity === 120 && it.beat === 3), "an item's velocity, with its beat: " + JSON.stringify(ej.instruments[0].items));
+    CHECK(instrumentVelocity({ velocity: 300 }) === 100 && instrumentVelocity(null) === 100, "out of range or none: 100");
+}
+
 console.log(`${passes} passed, ${failures} failed`);
 process.exit(failures ? 1 : 0);

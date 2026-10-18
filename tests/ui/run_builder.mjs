@@ -97,6 +97,7 @@ press(C.MoveRow1);
 check(clk() === null && has(["MENU", "SET"]), "locked, Chord track: Menu instead of the click: " + hints());
 click();
 check(!H.printed.some(t => /^Root/.test(t)), "locked: the click opens no chord page");
+check(H.printed.some(t => /Song locked/.test(t)), "...and says the song is locked: " + JSON.stringify(H.printed));
 cc(C.MoveShift, 127); tick();
 check(!has(["JOG", "MOVE"]), "locked: Shift offers no Jog Move: " + hints());
 cc(C.MoveShift, 0); tick();

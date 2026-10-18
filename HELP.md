@@ -204,7 +204,7 @@ There are two independent instrument tracks — press **Track 2** for Instrument
 and **Track 3** for Instrument 2, and press it again to turn that instrument on
 or off (its Enabled setting). Each plays with its track settings (Menu) by
 default; an **item** changes them from a bar and beat until the section's next
-item — mute it, change its octave, follow note, voicing, inversion or note gap.
+item — mute it, change its octave, follow note, voicing, inversion, note gap or velocity.
 Each section starts on the track settings.
 
 The display lists the section, then its items in order with where each starts,
@@ -225,7 +225,7 @@ Click tracks show **(add chords first)** in place of **+ Add**.
 |------------|---------|
 | Bar / Beat / Advanced | Where the item starts, as for chords |
 | Sound | **Play**, or **Mute** from here (a mute mid-bar cuts the note there) |
-| Octave, Follow Note, Voicing, Inversion, Note Gap | **Default (x)** uses the track setting (shown); or a value of its own — see Instrument Settings |
+| Octave, Follow Note, Voicing, Inversion, Note Gap, Velocity | **Default (x)** uses the track setting (shown); or a value of its own — see Instrument Settings. An item that only changes Velocity re-strikes a chord already held there, so an item per beat gives per-beat accents |
 | Delete | Remove the item |
 
 Songs made before items existed are converted when opened: their per-bar mutes
@@ -258,7 +258,7 @@ Instrument track.
 
 | Control | Action |
 |---------|--------|
-| Jog wheel (browse mode) | Move between Enabled, Octave, Follow Note, Voicing, Inversion, Note Gap |
+| Jog wheel (browse mode) | Move between Enabled, Octave, Follow Note, Voicing, Inversion, Note Gap, Velocity |
 | Jog wheel (edit mode) | Adjust the selected value |
 | Jog click | Toggle edit / browse mode; on Enabled it toggles On/Off directly |
 | Back (edit mode) | Exit edit mode |
@@ -272,6 +272,7 @@ Instrument track.
 | Voicing | **Chord** plays the full chord; **Bass** plays only the chord's root/bass note |
 | Inversion | Which chord note is at the bottom (Chord voicing only): **Root**, **1st**, **2nd**, **3rd**, or **Auto** (see below) |
 | Note Gap | How far before the next note-on this instrument's current note is cut short (0 to 1 beat), so notes don't run into each other |
+| Velocity | Note-on velocity, 1–127 (default 100). Items can change it from any bar and beat |
 
 **Auto** inversion (the default for new instruments) voice-leads by the chord's place in the song key, so chords move smoothly instead of jumping up and down the keyboard: I, ii and vii° in root position; iii and IV in 2nd inversion; V and vi in 1st inversion. Each chord is also placed so its lowest note is the one nearest the key's root. In C that gives I `C E G`, ii `D F A`, iii `B E G`, IV `C F A`, V `B D G`, vi `C E A`, vii° `B D F`. Chords whose root isn't in the key play in root position. It follows the song key, including after a key change. Songs made before Auto existed keep their saved inversion; pick Auto to switch.
 
@@ -334,7 +335,7 @@ key and the song lock, or restore an earlier version of the song.
 | Tempo | Song tempo in BPM |
 | Time Signature | Beats per bar / beat unit |
 | Key | The song's key — changing it transposes every existing chord to the same relative harmony in the new key |
-| Lock Song | When On, the song cannot be renamed, deleted, or edited — clips, chords and items included. The footer then offers Menu (to reach this setting) in place of the click |
+| Lock Song | When On, the song cannot be renamed, deleted, or edited — clips, chords and items included. The footer then offers Menu (to reach this setting) in place of the click, and a click or pad that would edit shows **Song locked** |
 | Restore Backup | Opens the list of saved versions of this song (the value is how many there are) |
 
 #### Restore Backup

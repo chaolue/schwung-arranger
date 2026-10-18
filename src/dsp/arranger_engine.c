@@ -278,7 +278,7 @@ typedef struct {
 /* A change to an instrument's settings starting at a section/bar/beat (a
  * Song Builder "item"): it holds until the section's next item, and each
  * section starts on the track defaults. A field left at its sentinel uses
- * the track default: octave -128, follow_note/voicing/inversion -1,
+ * the track default: octave -128, follow_note/voicing/inversion/velocity -1,
  * note_gap < 0. */
 #define MAX_INST_ITEMS 128
 typedef struct {
@@ -291,6 +291,7 @@ typedef struct {
     int8_t voicing;
     int8_t inversion;
     float note_gap;
+    int16_t velocity;        /* note-on velocity 1-127; -1 = the track's */
 } inst_item_t;
 
 /* An instrument track: emits chord-derived notes on its own output/channel. */
@@ -308,6 +309,7 @@ typedef struct {
      * see chord_voiced_notes. */
     uint8_t inversion;
     double note_gap;         /* gap (fraction of a beat) between note-off and the next note-on; 0 = none */
+    uint8_t velocity;        /* note-on velocity 1-127; 0 = the default (100) */
     /* Per-section per-bar on/off map: 1 = send, 0 = muted. */
     uint8_t bars[MAX_SONG_SECTIONS][MAX_SECTION_BARS];
     /* Sparse per-bar overrides of octave/follow_note/voicing/inversion. */
@@ -336,11 +338,20 @@ typedef struct {
     uint8_t voicing;
     uint8_t inversion;
     double note_gap;
+    uint8_t velocity;        /* 0 = the default -- see voice_velocity */
 } inst_voice_t;
+
+/* The velocity a voice's note-ons use: its own, else 100 (the fixed
+ * velocity every instrument note used before velocity was a setting, and
+ * still what Jam's instruments, which never set one, play at). */
+static uint8_t voice_velocity(const inst_voice_t *v) {
+    return v->velocity >= 1 && v->velocity <= 127 ? v->velocity : 100;
+}
 
 static int voice_equal(const inst_voice_t *a, const inst_voice_t *b) {
     return a->output_target == b->output_target && a->channel == b->channel &&
-           a->octave == b->octave && a->voicing == b->voicing && a->inversion == b->inversion;
+           a->octave == b->octave && a->voicing == b->voicing && a->inversion == b->inversion &&
+           a->velocity == b->velocity;   /* an item changing only velocity re-strikes a held chord */
 }
 
 static void inst_voice_from(const instrument_t *inst, inst_voice_t *out) {
@@ -351,6 +362,7 @@ static void inst_voice_from(const instrument_t *inst, inst_voice_t *out) {
     out->voicing = inst->voicing;
     out->inversion = inst->inversion;
     out->note_gap = inst->note_gap;
+    out->velocity = inst->velocity;
 }
 
 typedef struct {
@@ -2597,6 +2609,7 @@ static void resolve_instrument_at(const instrument_t *inst, int section, uint32_
     if (last->voicing >= 0) out->voicing = (uint8_t)last->voicing;
     if (last->inversion >= 0) out->inversion = (uint8_t)last->inversion;
     if (last->note_gap >= 0.0f) out->note_gap = last->note_gap;
+    if (last->velocity >= 1 && last->velocity <= 127) out->velocity = (uint8_t)last->velocity;
 }
 
 /* Song ticks a section spans: its assembled length, or whole bars for a song
@@ -2810,7 +2823,7 @@ static void emit_instruments_at_tick(engine_t *e, uint32_t tick) {
                     e->last_inst_chord_set[i] = 0;
                     e->pending_off_set[i] = 0;
                 }
-                emit_instrument_chord(e, &resolved, ch, 100);
+                emit_instrument_chord(e, &resolved, ch, voice_velocity(&resolved));
                 e->last_inst_chord[i] = *ch;
                 e->last_inst_chord_set[i] = 1;
                 e->last_inst_resolved[i] = resolved;
@@ -2968,7 +2981,7 @@ static void emit_instruments_follow(engine_t *e, uint8_t note, uint32_t tick) {
                     emit_instrument_chord_off(e, &e->last_inst_resolved[i], &e->last_inst_chord[i]);
                 }
                 /* Fire the new note-on immediately (on the drum hit). */
-                emit_instrument_chord(e, &resolved, ch, 100);
+                emit_instrument_chord(e, &resolved, ch, voice_velocity(&resolved));
                 e->last_inst_chord[i] = *ch;
                 e->last_inst_chord_set[i] = 1;
                 e->last_inst_resolved[i] = resolved;
@@ -3064,7 +3077,7 @@ static void emit_jam_instruments_follow(engine_t *e, uint8_t note, uint32_t tick
             if (e->jam_last_chord_set[i]) {
                 emit_instrument_chord_off(e, &e->jam_last_resolved[i], &e->jam_last_chord[i]);
             }
-            emit_instrument_chord(e, &resolved, ch, 100);
+            emit_instrument_chord(e, &resolved, ch, voice_velocity(&resolved));
             e->jam_last_chord[i] = *ch;
             e->jam_last_chord_set[i] = 1;
             e->jam_last_resolved[i] = resolved;
@@ -3140,7 +3153,7 @@ static void emit_jam_instruments_at_tick(engine_t *e, uint32_t tick) {
         }
         inst_voice_t resolved;
         inst_voice_from(inst, &resolved);
-        emit_instrument_chord(e, &resolved, ch, 100);
+        emit_instrument_chord(e, &resolved, ch, voice_velocity(&resolved));
         e->jam_last_chord[i] = *ch;
         e->jam_last_chord_set[i] = 1;
         e->jam_last_resolved[i] = resolved;
@@ -3529,6 +3542,8 @@ static void parse_chords_and_instruments(const char *json, song_t *song) {
                     int v; if (json_get_int_at(p, "inversion", &v)) inst->inversion = (uint8_t)(v < 0 ? 0 : v);
                 } else if (strncmp(p + 1, "note_gap", 8) == 0) {
                     double v; if (json_get_double_at(p, "note_gap", &v)) inst->note_gap = v;
+                } else if (strncmp(p + 1, "velocity\"", 9) == 0) {
+                    int v; if (json_get_int_at(p, "velocity", &v)) inst->velocity = (uint8_t)(v < 1 ? 1 : (v > 127 ? 127 : v));
                 } else if (strncmp(p + 1, "bars", 4) == 0) {
                     /* "bars": [[1,0,...], [1,1,...], ...] — per-section arrays. */
                     const char *bars_arr = strchr(p + 4, '[');
@@ -3560,6 +3575,7 @@ static void parse_chords_and_instruments(const char *json, song_t *song) {
                 inst->octave = 3;
                 inst->voicing = 0;
                 inst->note_gap = 0.25; /* default: 1/4 beat gap between note-off and note-on */
+                inst->velocity = 100;
                 /* Bars are "on by default" (send the chord). A bar is only
                  * muted when the JSON explicitly sets it to 0. Initialise the
                  * whole map to 1 so an instrument with no per-bar toggles (or
@@ -3937,6 +3953,8 @@ static void parse_instrument_items(const char *arr, instrument_t *inst) {
                     int v; if (json_get_int_at(p, "inversion", &v)) cur.inversion = (int8_t)(v < 0 ? 0 : v);
                 } else if (strncmp(p + 1, "note_gap\"", 9) == 0) {
                     double v; if (json_get_double_at(p, "note_gap", &v)) cur.note_gap = (float)v;
+                } else if (strncmp(p + 1, "velocity\"", 9) == 0) {
+                    int v; if (json_get_int_at(p, "velocity", &v)) cur.velocity = (int16_t)(v < 1 ? 1 : (v > 127 ? 127 : v));
                 }
             }
             p++;
@@ -3949,6 +3967,7 @@ static void parse_instrument_items(const char *arr, instrument_t *inst) {
                 memset(&cur, 0, sizeof cur);
                 cur.octave = -128; cur.follow_note = -1; cur.voicing = -1; cur.inversion = -1;
                 cur.note_gap = -1.0f;
+                cur.velocity = -1;
                 sec = -1; bar = -1; beat = 1.0;
             }
             p++;
@@ -4626,6 +4645,7 @@ static void copy_song_used(song_t *dst, const song_t *src) {
         di->voicing = si->voicing;
         di->inversion = si->inversion;
         di->note_gap = si->note_gap;
+        di->velocity = si->velocity;
         memcpy(di->bars, si->bars, (size_t)ns * sizeof di->bars[0]);
         di->override_count = si->override_count;
         memcpy(di->overrides, si->overrides,

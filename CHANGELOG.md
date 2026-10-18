@@ -14,6 +14,11 @@
 - A chord set on a bar that repeats the previous bar's chord is heard again:
   the held chord is released note-gap before it, as for a chord change.
 - Follow Note: with Bass voicing, turning up from Off jumps to 36 (kick).
+- Inst 1/2 Velocity (Instrument Settings, default 100), and items can change
+  it from any bar and beat -- an item changing only Velocity re-strikes a held
+  chord, so per-beat accents are heard.
+- On a locked song, "+ Add" and any other click or pad that would edit show
+  "Song locked" instead of doing nothing.
 - Renaming a section offers the section names (as for a new section), or
   Custom... for the keyboard.
 - Loop on the Chord, Inst or Click track copies the section's chords/items
