@@ -98,6 +98,11 @@ check(clk() === null && has(["MENU", "SET"]), "locked, Chord track: Menu instead
 click();
 check(!H.printed.some(t => /^Root/.test(t)), "locked: the click opens no chord page");
 check(H.printed.some(t => /Song locked/.test(t)), "...and says the song is locked: " + JSON.stringify(H.printed));
+for (const [btn, name] of [[C.MoveDelete, "Delete"], [C.MoveCopy, "Copy"]]) {
+    tick(100);                /* the last notice has gone */
+    press(btn);
+    check(H.printed.some(t => /Song locked/.test(t)), "locked: " + name + " says so at once: " + JSON.stringify(H.printed));
+}
 cc(C.MoveShift, 127); tick();
 check(!has(["JOG", "MOVE"]), "locked: Shift offers no Jog Move: " + hints());
 cc(C.MoveShift, 0); tick();

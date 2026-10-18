@@ -10238,7 +10238,7 @@ function handleBuilderInput(cc, value) {
         if (!allowed) return;
     }
     if (builderTrack !== TRACK_DRUM && cc === MoveLoop && value > 0) {
-        if (!locked) copyTrackToSameNamedSections();
+        if (locked) lockedNotice(); else copyTrackToSameNamedSections();
         return;
     }
     if (cc === MoveMute && value > 0) {
@@ -10251,30 +10251,30 @@ function handleBuilderInput(cc, value) {
         /* The Inst and Click tracks' lists edit like the Chord track's. */
         if (cc === MoveMainKnob) {
             const delta = decodeDelta(value);
-            if (shiftHeld) { if (!locked) itemListNudge(delta); }
+            if (shiftHeld) { if (locked) lockedNotice(); else itemListNudge(delta); }
             else itemListJog(delta);
             return;
         }
         if (cc === MoveMainButton && value > 0) { itemListClick(); return; }
-        if (cc === MoveDelete && value > 0) { if (!locked) itemListDelete(); return; }
-        if (cc === MoveCopy && value > 0) { if (!locked) itemListDuplicate(); return; }
+        if (cc === MoveDelete && value > 0) { if (locked) lockedNotice(); else itemListDelete(); return; }
+        if (cc === MoveCopy && value > 0) { if (locked) lockedNotice(); else itemListDuplicate(); return; }
     }
     if (builderTrack === TRACK_CHORD) {
         if (cc === MoveMainKnob) {
             const delta = decodeDelta(value);
-            if (shiftHeld) { if (!locked) chordListNudge(delta); }
+            if (shiftHeld) { if (locked) lockedNotice(); else chordListNudge(delta); }
             else chordListJog(delta);
             return;
         }
         if (cc === MoveMainButton && value > 0) { chordListClick(); return; }
-        if (cc === MoveDelete && value > 0) { if (!locked) chordListDelete(); return; }
-        if (cc === MoveCopy && value > 0) { if (!locked) chordListDuplicate(); return; }
+        if (cc === MoveDelete && value > 0) { if (locked) lockedNotice(); else chordListDelete(); return; }
+        if (cc === MoveCopy && value > 0) { if (locked) lockedNotice(); else chordListDuplicate(); return; }
     }
     if (cc === MoveMainKnob) {
         const delta = decodeDelta(value);
         if (shiftHeld) {
             if (builderCursor >= 0) {
-                if (locked) return; /* no reordering clips in a locked song */
+                if (locked) { lockedNotice(); return; } /* no reordering clips in a locked song */
                 moveClipAtCursor(delta);
             } else {
                 changeBuilderPage(delta);
@@ -10314,7 +10314,7 @@ function handleBuilderInput(cc, value) {
         /* Otherwise the cursor is on the "(add clip)" row of an empty section,
          * which is not clickable. */
     } else if (cc === MoveDelete && value > 0) {
-        if (locked) return; /* cannot delete sections/clips in a locked song */
+        if (locked) { lockedNotice(); return; } /* cannot delete sections/clips in a locked song */
         if (shiftHeld) {
             /* Shift+Delete removes the current section. */
             if (currentSong && currentSong.sections.length > 1) {
@@ -10342,14 +10342,14 @@ function handleBuilderInput(cc, value) {
     } else if (cc === MovePlay && value > 0) {
         builderPlayPress();
     } else if (cc === MoveCopy && value > 0) {
-        if (locked) return; /* cannot duplicate in a locked song */
+        if (locked) { lockedNotice(); return; } /* cannot duplicate in a locked song */
         if (shiftHeld) {
             duplicateCurrentSection();
         } else {
             duplicateClipAtCursor();
         }
     } else if (cc === MoveLoop && value > 0) {
-        if (locked) return; /* cannot add sections in a locked song */
+        if (locked) { if (shiftHeld) lockedNotice(); return; } /* cannot add sections in a locked song */
         if (shiftHeld) {
             /* Shift + Loop opens a picker of common section names, then adds
              * a new empty section with the chosen name after the current one. */
@@ -10367,7 +10367,7 @@ function handleBuilderInput(cc, value) {
         changeBuilderPage(-1);
     } else if (cc === MoveLeft && value > 0) {
         if (shiftHeld) {
-            if (locked) return; /* cannot reorder sections in a locked song */
+            if (locked) { lockedNotice(); return; } /* cannot reorder sections in a locked song */
             moveSectionInSong(-1);
         } else {
             /* During playback, navigate relative to the section actually being
@@ -10390,7 +10390,7 @@ function handleBuilderInput(cc, value) {
         }
     } else if (cc === MoveRight && value > 0) {
         if (shiftHeld) {
-            if (locked) return; /* cannot reorder sections in a locked song */
+            if (locked) { lockedNotice(); return; } /* cannot reorder sections in a locked song */
             moveSectionInSong(1);
         } else if (currentSong) {
             const navBase = playbackState === "playing"
@@ -10410,7 +10410,7 @@ function handleBuilderInput(cc, value) {
     } else if (cc === MoveRecord && value > 0) {
         /* Reopen the Source Folder list to change the current song's folder.
          * Blocked on a locked song. */
-        if (locked) return;
+        if (locked) { lockedNotice(); return; }
         builderChangeFolder = true;
         currentView = VIEW_FOLDER_LIST;
         menuStack.push({ title: "Source Folder", selectedIndex: 0 });
@@ -13053,7 +13053,8 @@ export function splitSectionAt(song, i, clipIdx) {
 /* Merge/split from Song Builder: the current section, while stopped (the
  * playing timeline still has the old sections). */
 function builderMergeOrSplit(split) {
-    if (!currentSong || songIsLocked()) return;
+    if (!currentSong) return;
+    if (songIsLocked()) { lockedNotice(); return; }
     if (playbackState === "playing") {
         showPopup(split ? "Split" : "Merge", "Stop playback first", 2000);
         return;
