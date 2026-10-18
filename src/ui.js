@@ -7208,20 +7208,30 @@ function scrollHeader(title, maxChars) {
  * fit, so the budget is the longest length whose widest window fits. */
 function fitHeader(title, right) {
     if (!title) return "";
-    const avail = 124 - (right ? fontWidth4x5(String(right).toUpperCase()) + 4 : 0);
+    return scrollHeader(title, headerFitChars(title, headerTitleRoom(right)));
+}
+
+/* Pixels a header title has beside `right`. */
+function headerTitleRoom(right) {
+    return 124 - (right ? fontWidth4x5(String(right).toUpperCase()) + 4 : 0);
+}
+
+/* The longest window length of `title` whose every window fits `avail`
+ * pixels in the header face (its whole length when it fits outright). */
+function headerFitChars(title, avail) {
     const T = String(title).toUpperCase();
-    if (fontWidth4x5(T) <= avail) return scrollHeader(title, title.length);
-    let n = 1;
+    if (fontWidth4x5(T) <= avail) return T.length;
     for (let len = T.length - 1; len >= 1; len--) {
         let fits = true;
         for (let i = 0; i + len <= T.length && fits; i++) fits = fontWidth4x5(T.slice(i, i + len)) <= avail;
-        if (fits) { n = len; break; }
+        if (fits) return len;
     }
-    return scrollHeader(title, n);
+    return 1;
 }
 
 function drawRoot() {
-    drawMenuHeader("Arranger", "v0.6");
+    drawMenuHeader("Arranger", headerRightWithBattery("v0.6"));
+    drawHeaderBattery();
     drawMenuList({
         labelX: 3,
         items: [
@@ -9914,7 +9924,9 @@ function drawPerformance() {
          * and when the name is wider than that, a scrolled window trimmed to
          * fit -- the face is proportional, so a fixed character count let
          * wide names run off the right edge, scrolled or not. */
-        const avail = SCREEN_WIDTH - 2 - perfTextWidth(perfPrefixes[i]) - 1;
+        /* The top line shares its row with the battery. */
+        const batteryRoom = i === 0 && batteryLevel !== null ? batteryBadgeWidth() + 4 : 0;
+        const avail = SCREEN_WIDTH - 2 - perfTextWidth(perfPrefixes[i]) - 1 - batteryRoom;
         let text = perfLines[i];
         if (perfTextWidth(text) > avail) {
             const n = Math.max(1, perfCharsThatFit(text, avail));
@@ -9922,6 +9934,7 @@ function drawPerformance() {
         }
         perfPrint(2, perfYs[i], perfPrefixes[i] + text, 1);
     }
+    drawBatteryBadge(SCREEN_WIDTH - 3, perfYs[0]);
     /* Song time as it progresses, plus the total song and set durations. The
      * current position comes from the DSP transport's 0-based fractional bar
      * (bar_frac) mapped against the full song; during the count-in click the
@@ -10065,13 +10078,15 @@ function drawJam() {
     const shortFolder = shortSongName(folderName);
     jamHeaderScroller.setSelected(shortFolder);
     jamHeaderScroller.tick();
-    /* The screen fits ~32 chars. The "Jam: " prefix takes 5, and the play
-     * indicator (*) on the right takes ~2, so the folder name gets 14 chars
-     * while playing and 16 otherwise. Scroll longer names within that width. */
-    const maxName = jamPlaying ? 26 : 28;
+    /* The folder name gets what the "Jam: " prefix and the right side (the
+     * play indicator and the battery) leave, measured in the header's face;
+     * a longer name scrolls within that. */
+    const jamRight = headerRightWithBattery(jamPlaying ? "*" : (pendingJamFolderClipLoadIndex >= 0 ? "..." : ""));
+    const maxName = headerFitChars(shortFolder, headerTitleRoom(jamRight) - fontWidth4x5("JAM: "));
     let header = shortFolder;
     if (header.length > maxName) header = jamHeaderScroller.getScrolledText(header, maxName);
-    drawMenuHeader("Jam: " + header, jamPlaying ? "*" : (pendingJamFolderClipLoadIndex >= 0 ? "..." : ""));
+    drawMenuHeader("Jam: " + header, jamRight);
+    drawHeaderBattery();
 
     const grooveCols = 4;
     const fillCols = 4;
@@ -15038,6 +15053,90 @@ globalThis.init = function() {
     needsRedraw = true;
 };
 
+/* The battery, from Schwung's host_battery() -- the Move's controller reports
+ * it about once per 1% of charge, and until it first does Schwung reads Move's
+ * own log line. An overtake module owns the whole screen, so Move's own
+ * battery display is never seen while the Arranger is up: the level is drawn
+ * at the right of the header on the root, Perform and Jam screens, and a
+ * popup warns once when it falls to BATTERY_LOW_PCT. Re-armed once it is back
+ * above it by a margin, so a reading wavering on the line warns only once.
+ * Older Schwung has no host_battery(): nothing is drawn. */
+const BATTERY_POLL_MS = 2000;
+const BATTERY_LOW_PCT = 10;
+const BATTERY_REARM_PCT = 12;
+const BATTERY_ICON_W = 10;   /* a 9x5 body and a 1x3 terminal */
+let batteryLevel = null;     /* 0..100, null = unknown */
+let batteryPolledAt = -Infinity;
+let batteryLowWarned = false;
+
+function pollBattery() {
+    const now = Date.now();
+    if (now - batteryPolledAt < BATTERY_POLL_MS) return;
+    batteryPolledAt = now;
+    if (typeof host_battery !== "function") return;
+    let b = null;
+    try { b = host_battery(); } catch (e) { b = null; }
+    const level = (b && typeof b.level === "number" && b.level >= 0 && b.level <= 100) ? Math.round(b.level) : null;
+    if (level !== batteryLevel) {
+        batteryLevel = level;
+        needsRedraw = true;
+    }
+    if (level === null) return;
+    if (level > BATTERY_LOW_PCT) {
+        if (level >= BATTERY_REARM_PCT) batteryLowWarned = false;
+        return;
+    }
+    /* Only Move's log line says whether it is charging; when it says so, an
+     * already-plugged-in Move needs no warning. */
+    if (!batteryLowWarned && b.charging !== true) {
+        batteryLowWarned = true;
+        showPopup("Low battery", level + "% left. Plug in the Move.", 5000);
+    }
+}
+
+function batteryText() {
+    return batteryLevel === null ? "" : batteryLevel + "%";
+}
+
+/* Pixels the level takes: the percentage, a 2px gap, the icon. */
+function batteryBadgeWidth() {
+    return batteryLevel === null ? 0 : fontWidth4x5(batteryText()) + 2 + BATTERY_ICON_W;
+}
+
+/* The level drawn with its last pixel at column `right`, glyph row `y`, in
+ * the header's 4x5 face. */
+function drawBatteryBadge(right, y) {
+    if (batteryLevel === null) return;
+    const x0 = right - BATTERY_ICON_W + 1;
+    fill_rect(x0, y, 9, 1, 1);
+    fill_rect(x0, y + 4, 9, 1, 1);
+    fill_rect(x0, y, 1, 5, 1);
+    fill_rect(x0 + 8, y, 1, 5, 1);
+    fill_rect(x0 + 9, y + 1, 1, 3, 1);
+    const fill = batteryLevel <= 0 ? 0 : Math.max(1, Math.round(batteryLevel * 7 / 100));
+    if (fill) fill_rect(x0 + 1, y + 1, fill, 3, 1);
+    const t = batteryText();
+    fontPrint4x5(perfCtx, x0 - 2 - fontWidth4x5(t), y, t, 1);
+}
+
+/* A Menu Header's right text with room kept for the battery at the right
+ * edge: blank space the header measures and draws nothing into, which
+ * drawHeaderBattery then fills. The battery holds its place whatever the
+ * text beside it says. */
+function headerRightWithBattery(right) {
+    if (batteryLevel === null) return right;
+    const need = batteryBadgeWidth();
+    let pad = "";
+    while (fontWidth4x5(pad) < need) pad += " ";
+    return right ? right + "  " + pad : pad;
+}
+
+/* After drawMenuHeader(title, headerRightWithBattery(...)): the header's
+ * right text ends at column SCREEN_WIDTH - 3, glyphs from row 1. */
+function drawHeaderBattery() {
+    drawBatteryBadge(SCREEN_WIDTH - 3, 1);
+}
+
 /* Arranger's own popups (record, click, mutes, exit confirm, backups,
  * missing clip): the shared multi-line card -- a title band plus the message
  * wrapped onto up to three lines -- drawn after every redraw and timed by the
@@ -15270,6 +15369,7 @@ function drawPopup() {
 }
 
 globalThis.tick = function() {
+    pollBattery();
     tickPopup();
     {
         const nowMs = Date.now();
