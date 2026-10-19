@@ -12,7 +12,6 @@ H.files.set(SETLISTS + "/gig.json", JSON.stringify({ id: "s1", name: "Gig",
     songs: [{ id: "e1", name: "A Song With Quite A Long Name", path: SONGS + "/a.json", click_bars: 0 }] }));
 
 await import('./ui_test.mjs');
-const { fontWidth4x5 } = await import('./shared/param_pages/font4x5.mjs');
 const g = globalThis;
 let failures = 0, passes = 0;
 function check(cond, msg) { if (cond) passes++; else { failures++; console.log("FAIL: " + msg); } }
@@ -62,12 +61,11 @@ g.host_battery = () => battery;
 battery = { level: 25, source: "xmos", flags: 0x21 };
 tick(100);   /* past the 2 s poll */
 check(iconMatches(25, 1), "root header draws the battery icon at 25%");
-/* Its percentage sits left of the icon, with clear columns between the
- * version text and the badge. */
-check(litIn(100, 113, 1, 5) > 0, "the percentage is drawn left of the icon");
-const versionLit = litIn(60, 96, 1, 5);
+/* The icon alone -- no percentage -- with clear columns between the
+ * version text and it. */
+const versionLit = litIn(80, 109, 1, 5);
 check(versionLit > 0, "the version text is still drawn: " + versionLit);
-check(litIn(97, 98, 1, 5) === 0, "a clear gap between the version and the battery");
+check(litIn(110, 115, 1, 5) === 0, "no percentage: clear columns between the version and the icon");
 check(!popupShown("Low battery"), "no warning at 25%");
 
 /* A different level redraws the fill. */
@@ -116,6 +114,28 @@ tick(100);
 check(!popupShown("Low battery"), "no warning while the log says it is charging");
 check(iconMatches(5, 1), "the log's level is drawn the same way");
 
+/* ---- Low: the icon blinks; charging, it does not ---- */
+function blinkFrames(n) {
+    let on = 0, off = 0, stray = 0;
+    for (let i = 0; i < n; i++) {
+        tick();
+        if (iconMatches(battery.level, 1)) on++;
+        else if (litIn(116, 125, 1, 5) === 0) off++;
+        else stray++;
+    }
+    return { on, off, stray };
+}
+let f = blinkFrames(80);
+check(f.on > 0 && f.off === 0 && f.stray === 0, "charging at 5%: steady, no blink " + JSON.stringify(f));
+battery = { level: 8, source: "xmos", flags: 0 };
+tick(100);
+f = blinkFrames(80);   /* ~1.8 s: three or four half-periods */
+check(f.on > 10 && f.off > 10 && f.stray === 0, "at 8% the icon blinks " + JSON.stringify(f));
+battery = { level: 11, source: "xmos", flags: 0 };
+tick(100);
+f = blinkFrames(80);
+check(f.on === 80, "at 11% it is steady again " + JSON.stringify(f));
+
 /* ---- Perform: the badge on the top line ---- */
 battery = { level: 60, source: "xmos", flags: 0x21 };
 tick(100);
@@ -123,10 +143,10 @@ jog(-8); jog(2); click();     /* Perform */
 click();                      /* Gig */
 tick(20);
 check(iconMatches(60, 1), "Perform draws the battery on its top line");
-/* The song name is cut short of the badge, not drawn through it. */
-const pctLeft = 116 - 2 - fontWidth4x5("60%");   /* left of the icon and its gap */
-check(litIn(pctLeft - 3, pctLeft - 1, 1, 5) === 0, "the song name stops short of the battery");
-check(litIn(30, pctLeft - 4, 1, 5) > 0, "the song name is still drawn");
+/* The song name is cut short of the icon, not drawn through it, and gets
+ * all the room the icon leaves. */
+check(litIn(113, 115, 1, 5) === 0, "the song name stops short of the battery");
+check(litIn(100, 112, 1, 5) > 0, "the song name runs up to the icon");
 
 console.log(`battery: ${passes} passed, ${failures} failed`);
 if (failures) process.exit(1);

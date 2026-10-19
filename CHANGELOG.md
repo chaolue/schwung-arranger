@@ -54,10 +54,10 @@
 - Record records the Schwung mix to a WAV, as in Perform.
 
 ### Battery
-- The battery level shows at the right of the header on the main menu,
-  Perform and Jam (Move's own battery display is hidden while the Arranger
-  is up), and a "Low battery" popup warns once when it falls to 10%. Needs a
-  Schwung with `host_battery()`; on an older one nothing is shown.
+- A battery icon, filled to the charge, shows at the right of the header on
+  the main menu, Perform and Jam (Move's own battery display is hidden while
+  the Arranger is up). At 10% it blinks and a "Low battery" popup warns once.
+  Needs a Schwung with `host_battery()`; on an older one nothing is shown.
 
 ### Options
 - The web UI shows one Drums MIDI Channel (the selected output's) instead

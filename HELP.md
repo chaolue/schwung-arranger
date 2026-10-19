@@ -33,12 +33,13 @@ Screen reached when first loading the module.
 | Jog click | Open the selected entry |
 | Back (tap twice) | Exit the module (return to Schwung menu). The first tap shows a popup asking for a second tap within 3 seconds |
 
-**Battery.** The battery level (percentage and icon) shows at the right of
-the header here, in Perform (on the top line) and in Jam, since Move's own
-battery display is hidden while the Arranger is up. When it falls to 10% a
-"Low battery" popup appears once; it warns again only after the battery has
-been back above 12%. It needs a Schwung that reports the battery
-(`host_battery()`); on an older Schwung nothing is shown.
+**Battery.** A battery icon, filled to the charge, shows at the right of the
+header here, in Perform (on the top line) and in Jam, since Move's own
+battery display is hidden while the Arranger is up. At 10% or below the icon
+blinks, and a "Low battery" popup appears once; it warns again only after the
+battery has been back above 12%. Neither happens while Move reports it is
+charging. It needs a Schwung that reports the battery (`host_battery()`); on
+an older Schwung nothing is shown.
 
 ---
 

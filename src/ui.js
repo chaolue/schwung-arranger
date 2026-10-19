@@ -15056,29 +15056,45 @@ globalThis.init = function() {
 /* The battery, from Schwung's host_battery() -- the Move's controller reports
  * it about once per 1% of charge, and until it first does Schwung reads Move's
  * own log line. An overtake module owns the whole screen, so Move's own
- * battery display is never seen while the Arranger is up: the level is drawn
- * at the right of the header on the root, Perform and Jam screens, and a
- * popup warns once when it falls to BATTERY_LOW_PCT. Re-armed once it is back
- * above it by a margin, so a reading wavering on the line warns only once.
+ * battery display is never seen while the Arranger is up: an icon filled to
+ * the level is drawn at the right of the header on the root, Perform and Jam
+ * screens. At BATTERY_LOW_PCT it blinks, and a popup warns once -- re-armed
+ * once it is back above it by a margin, so a reading wavering on the line
+ * warns only once. Neither while Move's log says it is charging.
  * Older Schwung has no host_battery(): nothing is drawn. */
 const BATTERY_POLL_MS = 2000;
 const BATTERY_LOW_PCT = 10;
 const BATTERY_REARM_PCT = 12;
+const BATTERY_BLINK_MS = 500;
 const BATTERY_ICON_W = 10;   /* a 9x5 body and a 1x3 terminal */
 let batteryLevel = null;     /* 0..100, null = unknown */
+let batteryCharging = false; /* only ever known from Move's log line */
 let batteryPolledAt = -Infinity;
 let batteryLowWarned = false;
+let batteryBlinkOff = false; /* the off half of the low-battery blink */
+
+function batteryLow() {
+    return batteryLevel !== null && batteryLevel <= BATTERY_LOW_PCT && !batteryCharging;
+}
 
 function pollBattery() {
     const now = Date.now();
+    /* The blink: redraw on each half-period change while low. */
+    const off = batteryLow() && Math.floor(now / BATTERY_BLINK_MS) % 2 === 1;
+    if (off !== batteryBlinkOff) {
+        batteryBlinkOff = off;
+        needsRedraw = true;
+    }
     if (now - batteryPolledAt < BATTERY_POLL_MS) return;
     batteryPolledAt = now;
     if (typeof host_battery !== "function") return;
     let b = null;
     try { b = host_battery(); } catch (e) { b = null; }
     const level = (b && typeof b.level === "number" && b.level >= 0 && b.level <= 100) ? Math.round(b.level) : null;
-    if (level !== batteryLevel) {
+    const charging = !!(b && b.charging === true);
+    if (level !== batteryLevel || charging !== batteryCharging) {
         batteryLevel = level;
+        batteryCharging = charging;
         needsRedraw = true;
     }
     if (level === null) return;
@@ -15088,25 +15104,21 @@ function pollBattery() {
     }
     /* Only Move's log line says whether it is charging; when it says so, an
      * already-plugged-in Move needs no warning. */
-    if (!batteryLowWarned && b.charging !== true) {
+    if (!batteryLowWarned && !charging) {
         batteryLowWarned = true;
         showPopup("Low battery", level + "% left. Plug in the Move.", 5000);
     }
 }
 
-function batteryText() {
-    return batteryLevel === null ? "" : batteryLevel + "%";
-}
-
-/* Pixels the level takes: the percentage, a 2px gap, the icon. */
+/* Pixels the battery takes: the icon alone. */
 function batteryBadgeWidth() {
-    return batteryLevel === null ? 0 : fontWidth4x5(batteryText()) + 2 + BATTERY_ICON_W;
+    return batteryLevel === null ? 0 : BATTERY_ICON_W;
 }
 
-/* The level drawn with its last pixel at column `right`, glyph row `y`, in
- * the header's 4x5 face. */
+/* The icon with its last pixel at column `right`, top row `y` (the header's
+ * glyph rows); blank on the off half of the low-battery blink. */
 function drawBatteryBadge(right, y) {
-    if (batteryLevel === null) return;
+    if (batteryLevel === null || batteryBlinkOff) return;
     const x0 = right - BATTERY_ICON_W + 1;
     fill_rect(x0, y, 9, 1, 1);
     fill_rect(x0, y + 4, 9, 1, 1);
@@ -15115,8 +15127,6 @@ function drawBatteryBadge(right, y) {
     fill_rect(x0 + 9, y + 1, 1, 3, 1);
     const fill = batteryLevel <= 0 ? 0 : Math.max(1, Math.round(batteryLevel * 7 / 100));
     if (fill) fill_rect(x0 + 1, y + 1, fill, 3, 1);
-    const t = batteryText();
-    fontPrint4x5(perfCtx, x0 - 2 - fontWidth4x5(t), y, t, 1);
 }
 
 /* A Menu Header's right text with room kept for the battery at the right
