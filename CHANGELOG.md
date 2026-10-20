@@ -65,6 +65,14 @@
 ### Jam
 - Record records the Schwung mix to a WAV, as in Perform.
 
+### Schwung chains
+- While a chain, Send or Master FX editor is open over the Arranger, only
+  playing controls still work: Play, the Track buttons, Menu, Shift, and in
+  Perform and Jam the pads, steps, arrows and Record. Delete, Copy, Loop,
+  Undo and the rest -- and Song Builder's pads -- do nothing and go dark,
+  so nothing changes on a screen you can't see (Delete on the Song Bank
+  started deleting a song).
+
 ### Battery
 - A battery icon, filled to the charge, shows at the right of the header on
   the main menu, Perform and Jam (Move's own battery display is hidden while

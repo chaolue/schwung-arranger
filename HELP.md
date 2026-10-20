@@ -830,10 +830,10 @@ shape a synth while it plays the part.
 
 | What stays with the Arranger | What the editor gets |
 |------------------------------|----------------------|
-| Pads, step buttons, Play, Record, Loop | The screen |
+| Play and playback | The screen |
 | Track buttons (hold: open / close a chain; tap: switch chain) | Jog wheel and jog click |
-| Shift, Menu, arrows, Copy/Delete/Undo | The 8 knobs and their touch |
-| Playback | Back |
+| Menu, Shift | The 8 knobs and their touch |
+| In Perform and Jam: pads, step buttons, arrows (pad pages), Record | Back |
 
 | Control (while a chain is open) | Action |
 |---------------------------------|--------|
@@ -845,8 +845,13 @@ shape a synth while it plays the part.
 | Menu (hold) | Switch to Master FX; hold again to return to the Arranger |
 | Track 1–4 (tap, in Master FX) | Go to that Track's chain |
 
-Shift + Track and Shift + Menu do nothing while a chain is open, so they cannot
-open an Arranger menu out of sight.
+Everything else does nothing while a chain is open, and its light goes out:
+Delete, Copy, Loop, Undo, Mute, Capture and the knob-bank button, the arrows
+outside Perform and Jam, and the pads and step buttons in Song Builder and the
+other menus (where they would add clips or change selections). So nothing can
+change on an Arranger screen you can't see -- Delete on the Song Bank, for
+example, used to start deleting the selected song. Shift + Track and Shift +
+Menu do nothing either, so they cannot open an Arranger menu out of sight.
 
 Needs a Schwung with co-run (1.6.2 or newer for the knob grid inside the
 editor). On an older Schwung the Arranger shows a notice instead.

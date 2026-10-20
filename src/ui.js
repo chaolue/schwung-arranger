@@ -540,6 +540,39 @@ function chainViewOwnsEvent(status, d1) {
     return false;
 }
 
+/* Under a chain view Arranger's screen is hidden, so a control that acts on
+ * it -- a menu's Delete, Copy, Loop, Undo, Mute..., or a pad or step that
+ * edits in Song Builder -- would change something nobody can see (Delete on
+ * the Song Bank deleted a song). What stays live is PLAYING: Play, the Track
+ * buttons and Menu (mutes, chain switching, the way out), Shift, and in
+ * Perform and Jam their pads, steps, arrows (the pad pages) and Rec. */
+function chainViewPlayingView() {
+    return currentView === VIEW_PERFORMANCE || currentView === VIEW_JAM;
+}
+
+function chainViewKeepsButton(cc) {
+    if (isTrackCc(cc) || cc === MoveMenu || cc === MoveShift || cc === MovePlay) return true;
+    return chainViewPlayingView() &&
+        (cc === MoveRec || cc === MoveUp || cc === MoveDown || cc === MoveLeft || cc === MoveRight);
+}
+
+/* Pads/steps whose press was dropped: their release is dropped too, even if
+ * the view has closed by then, so a screen never sees half a press. */
+const chainViewDroppedNotes = new Set();
+
+function chainViewBlocks(status, d1, value) {
+    if (status === 0xB0) return chainViewActive() && !chainViewKeepsButton(d1);
+    if (status === MidiNoteOn || status === MidiNoteOff) {
+        if (status === MidiNoteOn && value > 0) {
+            if (!chainViewActive() || chainViewPlayingView()) return false;
+            chainViewDroppedNotes.add(d1);
+            return true;
+        }
+        return chainViewDroppedNotes.delete(d1);
+    }
+    return false;
+}
+
 /* Why a chain view did not open, as a popup (drawn on every screen). */
 function chainViewNotice(line) {
     showPopup("Schwung chains", line, CHAIN_NOTICE_MS);
@@ -5737,7 +5770,10 @@ function updateButtonLEDs() {
     }
 
     for (const cc of ALL_BUTTON_CCS) {
-        if (active.has(cc)) {
+        /* Under a chain view, only what still works is lit. */
+        if (chainViewActive() && !chainViewKeepsButton(cc)) {
+            setButtonHint(cc, Black);
+        } else if (active.has(cc)) {
             setButtonHint(cc, active.get(cc));
         } else {
             setButtonHint(cc, Black);
@@ -15973,6 +16009,7 @@ globalThis.onMidiMessageInternal = function(data) {
     const value = data[2];
 
     if (chainViewActive() && chainViewOwnsEvent(status, cc)) return;
+    if (chainViewBlocks(status, cc, value)) return;
 
     if (status === 0xB0) {
         if (isTrackCc(cc) || cc === MoveMenu) {
