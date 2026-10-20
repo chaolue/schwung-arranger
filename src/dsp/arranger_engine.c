@@ -292,6 +292,13 @@ typedef struct {
     int8_t inversion;
     float note_gap;
     int16_t velocity;        /* note-on velocity 1-127; -1 = the track's */
+    /* The playing-variety fields (see instrument_t), -1 = the track's. */
+    int8_t pattern;
+    int8_t approach;
+    int8_t strum_ms;
+    int8_t strum_dir;
+    int8_t chance;
+    int8_t vel_follow;
 } inst_item_t;
 
 /* An instrument track: emits chord-derived notes on its own output/channel. */
@@ -310,6 +317,24 @@ typedef struct {
     uint8_t inversion;
     double note_gap;         /* gap (fraction of a beat) between note-off and the next note-on; 0 = none */
     uint8_t velocity;        /* note-on velocity 1-127; 0 = the default (100) */
+    /* Playing variety -- see instrument_attack. All 0 = plain, as before:
+     *   pattern     which note each attack plays, by voicing: Bass 0 root,
+     *               1 root/5th, 2 root/octave, 3 root-5th-octave-5th; Arp 0 up,
+     *               1 down, 2 up-down, 3 random. Chord: unused.
+     *   approach    Bass only: a passing note half a beat before each change
+     *               of bass note: 0 off, 1 a semitone below, 2 above, 3 the
+     *               scale step below (in the chord's key).
+     *   strum_ms    Chord only: the chord's notes this many ms apart, 0 = off.
+     *   strum_dir   0 lowest first, 1 highest first, 2 alternating.
+     *   chance      1-100: percent of attacks that play; 0 = always (100).
+     *   vel_follow  1: a drum-hit attack's velocity scales with the hit's
+     *               (velocity * hit / 100). */
+    uint8_t pattern;
+    uint8_t approach;
+    uint8_t strum_ms;
+    uint8_t strum_dir;
+    uint8_t chance;
+    uint8_t vel_follow;
     /* Per-section per-bar on/off map: 1 = send, 0 = muted. */
     uint8_t bars[MAX_SONG_SECTIONS][MAX_SECTION_BARS];
     /* Sparse per-bar overrides of octave/follow_note/voicing/inversion. */
@@ -339,7 +364,41 @@ typedef struct {
     uint8_t inversion;
     double note_gap;
     uint8_t velocity;        /* 0 = the default -- see voice_velocity */
+    uint8_t pattern, approach, strum_ms, strum_dir, chance, vel_follow; /* see instrument_t */
+    /* What the attack that this voice was stored for ACTUALLY played (set by
+     * instrument_attack), so its note-off releases exactly those notes:
+     * a pattern, an arpeggio or an approach note is not a function of the
+     * chord alone. played_sent < played_n while a strum is still under way:
+     * the rest go out at strum_next_tick, strum_interval apart
+     * (service_instrument_strums), and a note-off cancels them.
+     * played_valid 0 = an older path that set none: recompute from the chord. */
+    uint8_t played_valid;
+    uint8_t played_n;
+    uint8_t played_sent;
+    uint8_t played_vel;
+    uint8_t played[4];
+    uint32_t strum_next_tick;
+    uint32_t strum_interval;
 } inst_voice_t;
+
+/* Per-instrument playing state that outlives one attack. */
+typedef struct {
+    uint32_t step;           /* attacks since the chord last changed: the pattern's position */
+    chord_t last_chord;      /* the chord of the last attack, to see a change */
+    uint8_t has_last;
+    int8_t last_arp;         /* Random arp: the tone it played last, not repeated */
+    uint8_t strum_flip;      /* Alternating strum: which way the next one goes */
+    uint32_t approach_end;   /* the change an approach note is leading into; 0 = none */
+} inst_play_t;
+
+static int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+/* A voicing's name in song JSON: "bass" 0, "chord" 1, "arp" 2. */
+static uint8_t voicing_from_name(const char *v) {
+    if (strcmp(v, "chord") == 0) return 1;
+    if (strcmp(v, "arp") == 0) return 2;
+    return 0;
+}
 
 /* The velocity a voice's note-ons use: its own, else 100 (the fixed
  * velocity every instrument note used before velocity was a setting, and
@@ -351,7 +410,8 @@ static uint8_t voice_velocity(const inst_voice_t *v) {
 static int voice_equal(const inst_voice_t *a, const inst_voice_t *b) {
     return a->output_target == b->output_target && a->channel == b->channel &&
            a->octave == b->octave && a->voicing == b->voicing && a->inversion == b->inversion &&
-           a->velocity == b->velocity;   /* an item changing only velocity re-strikes a held chord */
+           a->velocity == b->velocity &&   /* an item changing only velocity re-strikes a held chord */
+           a->pattern == b->pattern && a->strum_ms == b->strum_ms && a->strum_dir == b->strum_dir;
 }
 
 static void inst_voice_from(const instrument_t *inst, inst_voice_t *out) {
@@ -363,6 +423,15 @@ static void inst_voice_from(const instrument_t *inst, inst_voice_t *out) {
     out->inversion = inst->inversion;
     out->note_gap = inst->note_gap;
     out->velocity = inst->velocity;
+    out->pattern = inst->pattern;
+    out->approach = inst->approach;
+    out->strum_ms = inst->strum_ms;
+    out->strum_dir = inst->strum_dir;
+    out->chance = inst->chance;
+    out->vel_follow = inst->vel_follow;
+    out->played_valid = 0;
+    out->played_n = 0;
+    out->played_sent = 0;
 }
 
 typedef struct {
@@ -934,6 +1003,12 @@ typedef struct engine {
      * rather than the new note being delayed. */
     uint32_t pending_off_tick[MAX_INSTRUMENTS];
     uint8_t pending_off_set[MAX_INSTRUMENTS];
+    /* Pattern position, strum direction and approach state, per instrument
+     * (inst_play) and per Jam instrument (jam_play) -- see instrument_attack. */
+    inst_play_t inst_play[MAX_INSTRUMENTS];
+    inst_play_t jam_play[2];
+    /* Chance and Random arp: xorshift32, seeded at create (rng_seed sets it). */
+    uint32_t rng;
 
     /* Jam mode's live-performed instruments (2 -- Inst 1/Inst 2). Deliberately
      * separate from live_slot.song.instruments[]: Jam's timeline is rebuilt/
@@ -2510,25 +2585,170 @@ static int chord_voiced_notes(const inst_voice_t *inst, const chord_t *ch, int *
     return n;
 }
 
-/* Emit the chord for a given section/bar on an instrument. Returns the number
- * of notes emitted (so the caller can send matching note-offs). */
-static int emit_instrument_chord(engine_t *e, const inst_voice_t *inst,
-                                 const chord_t *ch, uint8_t vel) {
-    if (!ch || !ch->set) return 0;
+static int chord_equal(const chord_t *a, const chord_t *b);
+
+/* xorshift32: Chance and the Random arpeggio. */
+static uint32_t rng_next(engine_t *e) {
+    uint32_t x = e->rng ? e->rng : 0x9E3779B9u;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    e->rng = x;
+    return x;
+}
+
+/* A chord's fifth, as an interval above its root: every quality lists root,
+ * third, fifth first (a diminished or augmented fifth included). */
+static int chord_fifth_interval(const char *quality) {
+    int raw[4];
+    int n = chord_quality_intervals(quality, raw, 4);
+    return n >= 3 ? raw[2] : 7;
+}
+
+/* The notes one attack plays for `ch`, into out[] (count returned): the
+ * voicing's notes -- and for Bass and Arp the single one the pattern picks
+ * at ps->step. Bass patterns move off the bass note to the chord's fifth
+ * (above it) and the octave; arpeggios walk the voiced chord tones. */
+static int attack_notes(engine_t *e, const inst_voice_t *v, inst_play_t *ps,
+                        const chord_t *ch, int *out) {
     int notes[4];
-    int n = chord_voiced_notes(inst, ch, notes);
-    for (int i = 0; i < n; i++) emit_instrument_event(e, inst, 0x90, (uint8_t)notes[i], vel);
+    int n = chord_voiced_notes(v, ch, notes);
+    if (n <= 0) return 0;
+    uint32_t k = ps->step;
+    if (v->voicing == 0) {
+        int b = notes[0], pick = b;
+        if (v->pattern) {
+            int root_pc = note_name_semitone(ch->root);
+            if (root_pc < 0) root_pc = 0;
+            int fifth_pc = (root_pc + chord_fifth_interval(ch->quality)) % 12;
+            int fifth = b + ((fifth_pc - b) % 12 + 12) % 12;
+            if (fifth == b) fifth += 12;   /* a slash bass on the fifth: its octave */
+            if (v->pattern == 1) pick = (k % 2) ? fifth : b;
+            else if (v->pattern == 2) pick = (k % 2) ? b + 12 : b;
+            else { const int seq[4] = { b, fifth, b + 12, fifth }; pick = seq[k % 4]; }
+        }
+        out[0] = clampi(pick, 0, 127);
+        return 1;
+    }
+    if (v->voicing == 2) {
+        int idx;
+        if (v->pattern == 1) {
+            idx = n - 1 - (int)(k % (uint32_t)n);
+        } else if (v->pattern == 2) {
+            int per = n > 1 ? 2 * n - 2 : 1;
+            int j = (int)(k % (uint32_t)per);
+            idx = j < n ? j : per - j;
+        } else if (v->pattern == 3) {
+            idx = (int)(rng_next(e) % (uint32_t)n);
+            /* Never the same tone twice running: another, at random. */
+            if (n > 1 && idx == ps->last_arp) idx = (idx + 1 + (int)(rng_next(e) % (uint32_t)(n - 1))) % n;
+        } else {
+            idx = (int)(k % (uint32_t)n);
+        }
+        ps->last_arp = (int8_t)idx;
+        out[0] = notes[idx];
+        return 1;
+    }
+    for (int i = 0; i < n; i++) out[i] = notes[i];
     return n;
 }
 
-/* Send note-offs for the chord previously emitted on an instrument (so a
- * chord change doesn't leave the old notes ringing). */
-static void emit_instrument_chord_off(engine_t *e, const inst_voice_t *inst,
+/* One attack of an instrument: the notes it plays for `ch` now (voicing,
+ * pattern, arpeggio), recorded in `v` so its note-off releases exactly them,
+ * then sent -- together, or strummed (the first now, the rest by
+ * service_instrument_strums). The pattern starts again on each new chord.
+ * Chance can make it a SILENT attack: it still counts -- the pattern moves
+ * on and the chord is held, so a bar-boundary chord is not re-tried a bar
+ * later -- it just plays nothing. `v` is then stored by the caller as the
+ * instrument's sounding voice. */
+static void instrument_attack(engine_t *e, inst_voice_t *v, inst_play_t *ps,
+                              const chord_t *ch, uint8_t vel, uint32_t tick) {
+    v->played_valid = 1;
+    v->played_n = 0;
+    v->played_sent = 0;
+    v->played_vel = vel;
+    ps->approach_end = 0;
+    if (!ch || !ch->set) return;
+    if (!ps->has_last || !chord_equal(&ps->last_chord, ch)) {
+        ps->step = 0;
+        ps->last_arp = -1;
+    }
+    ps->last_chord = *ch;
+    ps->has_last = 1;
+    int notes[4];
+    int n = attack_notes(e, v, ps, ch, notes);
+    ps->step++;
+    if (v->chance >= 1 && v->chance < 100 && (int)(rng_next(e) % 100u) >= v->chance) {
+        dsp_log_enqueue_worker("INSTATTACK skipped by chance %d%% tick=%u", v->chance, tick);
+        return;
+    }
+    int strum = v->voicing == 1 && v->strum_ms > 0 && n > 1;
+    int reverse = 0;
+    if (strum) {
+        reverse = v->strum_dir == 1 || (v->strum_dir == 2 && ps->strum_flip);
+        if (v->strum_dir == 2) ps->strum_flip ^= 1;
+    }
+    for (int i = 0; i < n; i++) v->played[i] = (uint8_t)notes[reverse ? n - 1 - i : i];
+    v->played_n = (uint8_t)n;
+    int now = n;
+    if (strum) {
+        double bpm = e->tempo_bpm > 0.0 ? e->tempo_bpm : 120.0;
+        uint32_t iv = (uint32_t)(v->strum_ms * bpm * e->ticks_per_beat / 60000.0 + 0.5);
+        v->strum_interval = iv < 1 ? 1 : iv;
+        v->strum_next_tick = tick + v->strum_interval;
+        now = 1;
+    }
+    for (int i = 0; i < now; i++) emit_instrument_event(e, v, 0x90, v->played[i], vel);
+    v->played_sent = (uint8_t)now;
+}
+
+/* Send note-offs for what an instrument's stored voice is sounding (so a
+ * chord change doesn't leave the old notes ringing): exactly the notes its
+ * attack sent, cancelling any of a strum not sent yet. A voice no attack
+ * filled in recomputes them from the chord. */
+static void emit_instrument_chord_off(engine_t *e, inst_voice_t *inst,
                                       const chord_t *ch) {
+    if (inst->played_valid) {
+        for (int i = 0; i < inst->played_sent && i < 4; i++)
+            emit_instrument_event(e, inst, 0x80, inst->played[i], 0);
+        inst->played_n = 0;
+        inst->played_sent = 0;
+        return;
+    }
     if (!ch || !ch->set) return;
     int notes[4];
     int n = chord_voiced_notes(inst, ch, notes);
     for (int i = 0; i < n; i++) emit_instrument_event(e, inst, 0x80, (uint8_t)notes[i], 0);
+}
+
+/* The rest of a strum, as its ticks come round. A strum left behind by a
+ * loop wrap (its next tick far ahead of the playhead) finishes at once. */
+static void service_strum(engine_t *e, inst_voice_t *v, uint32_t tick) {
+    while (v->played_valid && v->played_sent < v->played_n &&
+           (v->strum_next_tick <= tick || v->strum_next_tick > tick + 4 * v->strum_interval)) {
+        emit_instrument_event(e, v, 0x90, v->played[v->played_sent], v->played_vel);
+        v->played_sent++;
+        v->strum_next_tick += v->strum_interval;
+    }
+}
+
+static void service_instrument_strums(engine_t *e, uint32_t tick) {
+    for (int i = 0; i < e->live_slot.song.instrument_count && i < MAX_INSTRUMENTS; i++)
+        if (e->last_inst_chord_set[i]) service_strum(e, &e->last_inst_resolved[i], tick);
+    for (int i = 0; i < 2; i++)
+        if (e->jam_last_chord_set[i]) service_strum(e, &e->jam_last_resolved[i], tick);
+}
+
+/* The note a scale step below `target` in major key `key_pc`; without a key,
+ * a whole tone below. */
+static int scale_step_below(int target, int key_pc) {
+    static const int major[7] = { 0, 2, 4, 5, 7, 9, 11 };
+    if (key_pc < 0) return target - 2;
+    for (int d = 1; d <= 2; d++) {
+        int pc = ((target - d - key_pc) % 12 + 12) % 12;
+        for (int k = 0; k < 7; k++) if (major[k] == pc) return target - d;
+    }
+    return target - 1;
 }
 
 /* Send a note-off for every instrument note still sounding, on every route
@@ -2610,6 +2830,12 @@ static void resolve_instrument_at(const instrument_t *inst, int section, uint32_
     if (last->inversion >= 0) out->inversion = (uint8_t)last->inversion;
     if (last->note_gap >= 0.0f) out->note_gap = last->note_gap;
     if (last->velocity >= 1 && last->velocity <= 127) out->velocity = (uint8_t)last->velocity;
+    if (last->pattern >= 0) out->pattern = (uint8_t)last->pattern;
+    if (last->approach >= 0) out->approach = (uint8_t)last->approach;
+    if (last->strum_ms >= 0) out->strum_ms = (uint8_t)last->strum_ms;
+    if (last->strum_dir >= 0) out->strum_dir = (uint8_t)last->strum_dir;
+    if (last->chance >= 1) out->chance = (uint8_t)last->chance;
+    if (last->vel_follow >= 0) out->vel_follow = (uint8_t)last->vel_follow;
 }
 
 /* Song ticks a section spans: its assembled length, or whole bars for a song
@@ -2823,7 +3049,7 @@ static void emit_instruments_at_tick(engine_t *e, uint32_t tick) {
                     e->last_inst_chord_set[i] = 0;
                     e->pending_off_set[i] = 0;
                 }
-                emit_instrument_chord(e, &resolved, ch, voice_velocity(&resolved));
+                instrument_attack(e, &resolved, &e->inst_play[i], ch, voice_velocity(&resolved), tick);
                 e->last_inst_chord[i] = *ch;
                 e->last_inst_chord_set[i] = 1;
                 e->last_inst_resolved[i] = resolved;
@@ -2869,6 +3095,8 @@ static void emit_instruments_all_off(engine_t *e) {
         /* Drop any deferred note-off that hasn't fired yet. */
         e->pending_off_set[i] = 0;
     }
+    /* Patterns start again, and no approach is pending. */
+    memset(e->inst_play, 0, sizeof e->inst_play);
 }
 
 /* Schedule the note-off for instrument i's currently-sounding chord to fire at
@@ -2913,7 +3141,7 @@ static uint32_t find_next_note_on_tick(engine_t *e, uint8_t note, uint32_t from_
 /* Emit the chord for follow-note instruments when a matching drum note-on
  * fires. Called from the event drain path. The note is held until the next
  * matching drum hit, cut short by `note_gap` before it (or the song end). */
-static void emit_instruments_follow(engine_t *e, uint8_t note, uint32_t tick) {
+static void emit_instruments_follow(engine_t *e, uint8_t note, uint8_t hit_vel, uint32_t tick) {
     if (!e || e->live_slot.song.instrument_count == 0) return;
     uint32_t bar = 0;
     int sec_idx = tick_to_section_bar(&e->live_slot.song, tick, e->ticks_per_bar, &bar);
@@ -2958,6 +3186,12 @@ static void emit_instruments_follow(engine_t *e, uint8_t note, uint32_t tick) {
         resolve_instrument_at(inst, sec_idx, bar, eval_off, e->ticks_per_beat, &resolved, &muted);
         if (resolved.follow_note == 0 || resolved.follow_note != note) continue;
         if (muted) continue;
+        /* An approach note is leading into the next chord: a hit before the
+         * change does not cut it off (one pushed into the change, which
+         * plays the next chord, does). */
+        uint32_t ap_end = e->inst_play[i].approach_end;
+        uint32_t half = e->ticks_per_beat / 2;
+        if (ap_end && tick + half >= ap_end && tick < ap_end && eval_tick < ap_end) continue;
         if (ch && ch->set) {
             /* A second matching hit landing within the guard window of the
              * one that's already sounding (same chord too) is the same
@@ -2980,8 +3214,11 @@ static void emit_instruments_follow(engine_t *e, uint8_t note, uint32_t tick) {
                 if (e->last_inst_chord_set[i]) {
                     emit_instrument_chord_off(e, &e->last_inst_resolved[i], &e->last_inst_chord[i]);
                 }
-                /* Fire the new note-on immediately (on the drum hit). */
-                emit_instrument_chord(e, &resolved, ch, voice_velocity(&resolved));
+                /* Fire the new note-on immediately (on the drum hit) -- with
+                 * Vel Follow, as loud as the hit, relative to 100. */
+                int vel = voice_velocity(&resolved);
+                if (resolved.vel_follow) vel = clampi((vel * hit_vel + 50) / 100, 1, 127);
+                instrument_attack(e, &resolved, &e->inst_play[i], ch, (uint8_t)vel, tick);
                 e->last_inst_chord[i] = *ch;
                 e->last_inst_chord_set[i] = 1;
                 e->last_inst_resolved[i] = resolved;
@@ -3005,6 +3242,103 @@ static void emit_instruments_follow(engine_t *e, uint8_t note, uint32_t tick) {
     }
 }
 
+/* The first note-on of `note` at or after `from` and before `limit`, or 0. */
+static uint32_t find_note_on_before(engine_t *e, uint8_t note, uint32_t from, uint32_t limit) {
+    for (int c = e->event_cursor; c < e->live_slot.event_count; c++) {
+        const smf_event_t *ev = &e->live_slot.events[c];
+        if (ev->tick >= limit) break;
+        if (ev->tick >= from && (ev->status & 0xF0) == 0x90 && ev->data2 > 0 && ev->data1 == note)
+            return ev->tick;
+    }
+    return 0;
+}
+
+/* Approach notes (Bass voicing, Approach on): half a beat before the bass's
+ * first note on a new bass note, it moves to a passing note -- a semitone
+ * below or above the coming one, or the scale step below it -- held until
+ * that note, less the note gap. That first note is the chord change on the
+ * chord track; following a drum, it is the first hit on the new chord, so a
+ * part whose drum does not hit on the change still leads into its next
+ * note rather than into a rest. Not when the bass note stays the same, the
+ * song ends or the next chord is No Chord; not when the note gap is half a
+ * beat or more (nothing would be left of it). Settings are read where the
+ * coming note is. Called once a block. */
+static void emit_instrument_approaches(engine_t *e, uint32_t tick) {
+    song_t *song = &e->live_slot.song;
+    if (!e->running || song->instrument_count == 0 || e->ticks_per_beat == 0 || e->ticks_per_bar == 0) return;
+    uint32_t half = e->ticks_per_beat / 2;
+    uint32_t guard = (uint32_t)(e->swap_guard_fraction * e->ticks_per_beat);
+    chord_pos_t cp;
+    uint32_t bar_now = 0;
+    int sec_now = chord_at_song_tick(song, tick, e->ticks_per_bar, e->ticks_per_beat, &bar_now, &cp);
+    if (sec_now < 0) return;
+    uint32_t off_now = bar_offset_at(song, tick, e->ticks_per_bar);
+    for (int i = 0; i < song->instrument_count && i < MAX_INSTRUMENTS; i++) {
+        instrument_t *inst = &song->instruments[i];
+        inst_play_t *ps = &e->inst_play[i];
+        if (!inst->enabled || !e->inst_live_enabled[i]) continue;
+        inst_voice_t now;
+        int muted = 0;
+        resolve_instrument_at(inst, sec_now, bar_now, off_now, e->ticks_per_beat, &now, &muted);
+        if (now.voicing != 0 || now.approach == 0) continue;
+        /* The coming note's tick, and the chord it plays. */
+        uint32_t target;
+        const chord_t *from;
+        if (now.follow_note > 0) {
+            target = find_note_on_before(e, now.follow_note, tick, tick + half + 1);
+            from = ps->has_last ? &ps->last_chord : cp.chord;
+        } else {
+            target = cp.seg_end;
+            from = cp.chord;
+        }
+        if (!from || target <= tick || target - tick > half || ps->approach_end == target) continue;
+        chord_pos_t tp;
+        uint32_t t_bar = 0;
+        int t_sec = chord_at_song_tick(song, target, e->ticks_per_bar, e->ticks_per_beat, &t_bar, &tp);
+        if (t_sec < 0) continue;
+        const chord_t *to = tp.chord;
+        uint32_t t_eval = target;
+        /* A hit just ahead of a change plays the next chord (as
+         * emit_instruments_follow decides it). */
+        if (now.follow_note > 0 && tp.seg_end > target && tp.seg_end - target <= guard) {
+            chord_pos_t np;
+            uint32_t n_bar = 0;
+            int n_sec = chord_at_song_tick(song, tp.seg_end, e->ticks_per_bar, e->ticks_per_beat, &n_bar, &np);
+            if (n_sec >= 0) { to = np.chord; t_sec = n_sec; t_bar = n_bar; t_eval = tp.seg_end; }
+        }
+        if (!to) continue;
+        inst_voice_t v;
+        resolve_instrument_at(inst, t_sec, t_bar, bar_offset_at(song, t_eval, e->ticks_per_bar),
+                              e->ticks_per_beat, &v, &muted);
+        if (muted || v.voicing != 0 || v.approach == 0) continue;
+        uint32_t gap = (uint32_t)(v.note_gap * e->ticks_per_beat);
+        if (gap >= half) continue;
+        int to_n[4], from_n[4];
+        chord_voiced_notes(&v, to, to_n);
+        chord_voiced_notes(&v, from, from_n);
+        if (to_n[0] % 12 == from_n[0] % 12) continue;
+        int note = v.approach == 2 ? to_n[0] + 1
+                 : v.approach == 3 ? scale_step_below(to_n[0], to->key_pc)
+                 : to_n[0] - 1;
+        if (e->last_inst_chord_set[i])
+            emit_instrument_chord_off(e, &e->last_inst_resolved[i], &e->last_inst_chord[i]);
+        v.played_valid = 1;
+        v.played_n = v.played_sent = 1;
+        v.played[0] = (uint8_t)clampi(note, 0, 127);
+        v.played_vel = voice_velocity(&v);
+        emit_instrument_event(e, &v, 0x90, v.played[0], v.played_vel);
+        /* Still the outgoing chord's: the coming note's attack plays the next. */
+        e->last_inst_chord[i] = *from;
+        e->last_inst_chord_set[i] = 1;
+        e->last_inst_resolved[i] = v;
+        e->last_inst_via_follow[i] = v.follow_note > 0;
+        ps->approach_end = target;
+        uint32_t off = target - gap;
+        schedule_instrument_note_off(e, i, &v, off > tick ? off : tick + 1);
+        dsp_log_enqueue_worker("EMIT_INST[%d] approach note=%d tick=%u into=%u", i, note, tick, target);
+    }
+}
+
 /* Jam mode's live-performed instruments: same follow-note-triggered
  * hold/note_gap/duplicate-attack-suppression behavior as
  * emit_instruments_follow above, but reading the chord from the shared
@@ -3018,7 +3352,7 @@ static void emit_instruments_follow(engine_t *e, uint8_t note, uint32_t tick) {
  * even if its follow_note matches). */
 static void apply_pending_jam_chord(engine_t *e); /* defined below */
 
-static void emit_jam_instruments_follow(engine_t *e, uint8_t note, uint32_t tick) {
+static void emit_jam_instruments_follow(engine_t *e, uint8_t note, uint8_t hit_vel, uint32_t tick) {
     if (!e || !e->jam_chord_live.set) return;
     uint32_t guard_ticks = (uint32_t)(e->swap_guard_fraction * e->ticks_per_beat);
     /* A drum hit anticipating the downbeat (e.g. a pushed kick just before
@@ -3077,7 +3411,9 @@ static void emit_jam_instruments_follow(engine_t *e, uint8_t note, uint32_t tick
             if (e->jam_last_chord_set[i]) {
                 emit_instrument_chord_off(e, &e->jam_last_resolved[i], &e->jam_last_chord[i]);
             }
-            emit_instrument_chord(e, &resolved, ch, voice_velocity(&resolved));
+            int vel = voice_velocity(&resolved);
+            if (resolved.vel_follow) vel = clampi((vel * hit_vel + 50) / 100, 1, 127);
+            instrument_attack(e, &resolved, &e->jam_play[i], ch, (uint8_t)vel, tick);
             e->jam_last_chord[i] = *ch;
             e->jam_last_chord_set[i] = 1;
             e->jam_last_resolved[i] = resolved;
@@ -3119,6 +3455,7 @@ static void emit_jam_instruments_all_off(engine_t *e) {
         }
         e->jam_pending_off_set[i] = 0;
     }
+    memset(e->jam_play, 0, sizeof e->jam_play);
 }
 
 /* Promote a pending Jam chord (set by the most recent pad press) to live at
@@ -3153,7 +3490,7 @@ static void emit_jam_instruments_at_tick(engine_t *e, uint32_t tick) {
         }
         inst_voice_t resolved;
         inst_voice_from(inst, &resolved);
-        emit_instrument_chord(e, &resolved, ch, voice_velocity(&resolved));
+        instrument_attack(e, &resolved, &e->jam_play[i], ch, voice_velocity(&resolved), tick);
         e->jam_last_chord[i] = *ch;
         e->jam_last_chord_set[i] = 1;
         e->jam_last_resolved[i] = resolved;
@@ -3536,7 +3873,7 @@ static void parse_chords_and_instruments(const char *json, song_t *song) {
                 } else if (strncmp(p + 1, "voicing", 7) == 0) {
                     char v[16];
                     if (json_get_string_at(p, "voicing", v, sizeof(v))) {
-                        inst->voicing = (strcmp(v, "chord") == 0) ? 1 : 0;
+                        inst->voicing = voicing_from_name(v);
                     }
                 } else if (strncmp(p + 1, "inversion", 9) == 0) {
                     int v; if (json_get_int_at(p, "inversion", &v)) inst->inversion = (uint8_t)(v < 0 ? 0 : v);
@@ -3544,6 +3881,20 @@ static void parse_chords_and_instruments(const char *json, song_t *song) {
                     double v; if (json_get_double_at(p, "note_gap", &v)) inst->note_gap = v;
                 } else if (strncmp(p + 1, "velocity\"", 9) == 0) {
                     int v; if (json_get_int_at(p, "velocity", &v)) inst->velocity = (uint8_t)(v < 1 ? 1 : (v > 127 ? 127 : v));
+                } else if (strncmp(p + 1, "pattern\"", 8) == 0) {
+                    int v; if (json_get_int_at(p, "pattern", &v)) inst->pattern = (uint8_t)clampi(v, 0, 3);
+                } else if (strncmp(p + 1, "approach\"", 9) == 0) {
+                    int v; if (json_get_int_at(p, "approach", &v)) inst->approach = (uint8_t)clampi(v, 0, 3);
+                } else if (strncmp(p + 1, "strum\"", 6) == 0) {
+                    int v; if (json_get_int_at(p, "strum", &v)) inst->strum_ms = (uint8_t)clampi(v, 0, 100);
+                } else if (strncmp(p + 1, "strum_dir\"", 10) == 0) {
+                    int v; if (json_get_int_at(p, "strum_dir", &v)) inst->strum_dir = (uint8_t)clampi(v, 0, 2);
+                } else if (strncmp(p + 1, "chance\"", 7) == 0) {
+                    int v; if (json_get_int_at(p, "chance", &v)) inst->chance = (uint8_t)clampi(v, 1, 100);
+                } else if (strncmp(p + 1, "vel_follow\"", 11) == 0) {
+                    char v[16];
+                    if (json_get_string_at(p, "vel_follow", v, sizeof(v)))
+                        inst->vel_follow = (strcmp(v, "true") == 0 || strcmp(v, "1") == 0) ? 1 : 0;
                 } else if (strncmp(p + 1, "bars", 4) == 0) {
                     /* "bars": [[1,0,...], [1,1,...], ...] — per-section arrays. */
                     const char *bars_arr = strchr(p + 4, '[');
@@ -3871,7 +4222,7 @@ static void parse_instrument_overrides(const char *arr, instrument_t *inst) {
                 } else if (strncmp(p + 1, "voicing", 7) == 0) {
                     char v[16];
                     if (json_get_string_at(p, "voicing", v, sizeof(v))) {
-                        cur.voicing = (int8_t)((strcmp(v, "chord") == 0) ? 1 : 0);
+                        cur.voicing = (int8_t)voicing_from_name(v);
                     }
                 } else if (strncmp(p + 1, "inversion", 9) == 0) {
                     int v; if (json_get_int_at(p, "inversion", &v)) cur.inversion = (int8_t)(v < 0 ? 0 : v);
@@ -3948,13 +4299,27 @@ static void parse_instrument_items(const char *arr, instrument_t *inst) {
                 } else if (strncmp(p + 1, "voicing\"", 8) == 0) {
                     char v[16];
                     if (json_get_string_at(p, "voicing", v, sizeof(v)))
-                        cur.voicing = (int8_t)((strcmp(v, "chord") == 0) ? 1 : 0);
+                        cur.voicing = (int8_t)voicing_from_name(v);
                 } else if (strncmp(p + 1, "inversion\"", 10) == 0) {
                     int v; if (json_get_int_at(p, "inversion", &v)) cur.inversion = (int8_t)(v < 0 ? 0 : v);
                 } else if (strncmp(p + 1, "note_gap\"", 9) == 0) {
                     double v; if (json_get_double_at(p, "note_gap", &v)) cur.note_gap = (float)v;
                 } else if (strncmp(p + 1, "velocity\"", 9) == 0) {
                     int v; if (json_get_int_at(p, "velocity", &v)) cur.velocity = (int16_t)(v < 1 ? 1 : (v > 127 ? 127 : v));
+                } else if (strncmp(p + 1, "pattern\"", 8) == 0) {
+                    int v; if (json_get_int_at(p, "pattern", &v)) cur.pattern = (int8_t)clampi(v, 0, 3);
+                } else if (strncmp(p + 1, "approach\"", 9) == 0) {
+                    int v; if (json_get_int_at(p, "approach", &v)) cur.approach = (int8_t)clampi(v, 0, 3);
+                } else if (strncmp(p + 1, "strum\"", 6) == 0) {
+                    int v; if (json_get_int_at(p, "strum", &v)) cur.strum_ms = (int8_t)clampi(v, 0, 100);
+                } else if (strncmp(p + 1, "strum_dir\"", 10) == 0) {
+                    int v; if (json_get_int_at(p, "strum_dir", &v)) cur.strum_dir = (int8_t)clampi(v, 0, 2);
+                } else if (strncmp(p + 1, "chance\"", 7) == 0) {
+                    int v; if (json_get_int_at(p, "chance", &v)) cur.chance = (int8_t)clampi(v, 1, 100);
+                } else if (strncmp(p + 1, "vel_follow\"", 11) == 0) {
+                    char v[16];
+                    if (json_get_string_at(p, "vel_follow", v, sizeof(v)))
+                        cur.vel_follow = (strcmp(v, "true") == 0 || strcmp(v, "1") == 0) ? 1 : 0;
                 }
             }
             p++;
@@ -3968,6 +4333,8 @@ static void parse_instrument_items(const char *arr, instrument_t *inst) {
                 cur.octave = -128; cur.follow_note = -1; cur.voicing = -1; cur.inversion = -1;
                 cur.note_gap = -1.0f;
                 cur.velocity = -1;
+                cur.pattern = -1; cur.approach = -1; cur.strum_ms = -1; cur.strum_dir = -1;
+                cur.chance = -1; cur.vel_follow = -1;
                 sec = -1; bar = -1; beat = 1.0;
             }
             p++;
@@ -4646,6 +5013,12 @@ static void copy_song_used(song_t *dst, const song_t *src) {
         di->inversion = si->inversion;
         di->note_gap = si->note_gap;
         di->velocity = si->velocity;
+        di->pattern = si->pattern;
+        di->approach = si->approach;
+        di->strum_ms = si->strum_ms;
+        di->strum_dir = si->strum_dir;
+        di->chance = si->chance;
+        di->vel_follow = si->vel_follow;
         memcpy(di->bars, si->bars, (size_t)ns * sizeof di->bars[0]);
         di->override_count = si->override_count;
         memcpy(di->overrides, si->overrides,
@@ -4993,8 +5366,8 @@ static void drain_events_up_to(engine_t *e, uint32_t target) {
          * note-on fires (e.g. bass follows the kick). Always runs, even
          * while drum_enabled is off -- see should_suppress_note_on. */
         if ((ev->status & 0xF0) == 0x90 && ev->data2 > 0) {
-            emit_instruments_follow(e, ev->data1, ev->tick);
-            emit_jam_instruments_follow(e, ev->data1, ev->tick);
+            emit_instruments_follow(e, ev->data1, ev->data2, ev->tick);
+            emit_jam_instruments_follow(e, ev->data1, ev->data2, ev->tick);
         }
         if (!should_suppress_note_off(e, ev) && !should_suppress_note_on(e, ev)) {
             if (e->emit_directly) {
@@ -5536,6 +5909,8 @@ static void advance_playhead(engine_t *e, int frames, int sample_rate) {
     e->playhead_tick = target;
     /* Fire any scheduled instrument note-offs whose tick has been reached
      * (the note_gap before the next note-on, cutting the previous note short). */
+    service_instrument_strums(e, e->playhead_tick);
+    emit_instrument_approaches(e, e->playhead_tick);
     fire_pending_instrument_notes_off(e, e->playhead_tick);
     fire_pending_jam_instrument_notes_off(e, e->playhead_tick);
     update_bar_counter(e);
@@ -5579,6 +5954,13 @@ static void* arr_create_instance(const char *module_dir, const char *config_json
              "/data/UserData/UserLibrary/Arranger/MidiLibrary");
     e->guard_fraction = 0.125;
     e->swap_guard_fraction = 0.25; /* 25% of a beat at mid-clip swap boundaries */
+    {
+        /* Chance and the Random arpeggio differ from one run to the next. */
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        e->rng = (uint32_t)ts.tv_nsec ^ (uint32_t)ts.tv_sec ^ 0x9E3779B9u;
+        if (!e->rng) e->rng = 1;
+    }
     e->output_channel = 9; /* channel 10 for GM drums */
     e->output_target = OUTPUT_TARGET_EXTERNAL;
     e->move_channel = 9;     /* channel 10 for GM drums */
@@ -6154,6 +6536,12 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
         /* Perform/Jam live mute for the drum timeline -- see drum_enabled's
          * declaration and should_suppress_note_on. */
         e->drum_enabled = atoi(val) ? 1 : 0;
+        return;
+    }
+    if (strcmp(key, "rng_seed") == 0) {
+        /* Chance and the Random arpeggio from a known point (tests). */
+        e->rng = (uint32_t)strtoul(val, NULL, 10);
+        if (!e->rng) e->rng = 1;
         return;
     }
     if (strcmp(key, "inst1_enabled") == 0 || strcmp(key, "inst2_enabled") == 0) {

@@ -181,5 +181,34 @@ function deepEqual(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
     CHECK(instrumentVelocity({ velocity: 300 }) === 100 && instrumentVelocity(null) === 100, "out of range or none: 100");
 }
 
+/* Playing variety: the track's settings and an item's reach the engine,
+ * with defaults for a song saved before they existed. */
+{
+    const { toEngineSongJson, instVariety, stepVoicing, patternLabel } = ui;
+    const vsong = { name: "V", key: "C", time_sig_num: 4, time_sig_den: 4, source_folder: "F",
+        sections: [{ name: "A", clips: [{ source: "x.mid", start_bar: 0, end_bar: 2 }], chords: [{ root: "C", quality: "maj" }],
+                     inst: [[{ bar: 1, pattern: 2, chance: 40, vel_follow: false }], [{ bar: 0, voicing: "arp", strum: 0 }]] }],
+        instruments: [{ enabled: true, octave: 2, pattern: 1, approach: 3, vel_follow: true, chance: 75 },
+                      { enabled: true, octave: 3, voicing: "chord", strum: 30, strum_dir: 2 }] };
+    const ej = JSON.parse(toEngineSongJson(vsong));
+    const i0 = ej.instruments[0], i1 = ej.instruments[1];
+    CHECK(i0.pattern === 1 && i0.approach === 3 && i0.vel_follow === true && i0.chance === 75,
+        "inst 1's pattern, approach, vel follow and chance reach the engine: " + JSON.stringify(i0));
+    CHECK(i0.strum === 0 && i0.strum_dir === 0, "unset fields go as their defaults");
+    CHECK(i1.voicing === "chord" && i1.strum === 30 && i1.strum_dir === 2 && i1.chance === 100 && i1.vel_follow === false,
+        "inst 2's strum, and defaults for the rest: " + JSON.stringify(i1));
+    const it0 = i0.items[0], it1 = i1.items[0];
+    CHECK(it0.pattern === 2 && it0.chance === 40 && it0.vel_follow === false, "an item's variety fields, false included: " + JSON.stringify(it0));
+    CHECK(it1.voicing === "arp" && it1.strum === 0, "an item's Arp voicing and Strum Off: " + JSON.stringify(it1));
+    const d = instVariety({});
+    CHECK(d.pattern === 0 && d.approach === 0 && d.strum === 0 && d.strum_dir === 0 && d.chance === 100 && d.vel_follow === false,
+        "a song from before: plain playing");
+    CHECK(instVariety({ chance: 0, pattern: 9, strum: 500 }).chance === 100 && instVariety({ pattern: 9 }).pattern === 0 &&
+        instVariety({ strum: 500 }).strum === 0, "out-of-range values fall back to the defaults");
+    CHECK(stepVoicing("bass", 1) === "chord" && stepVoicing("chord", 1) === "arp" && stepVoicing("arp", 1) === "arp" &&
+        stepVoicing("bass", -1) === "bass", "voicing steps Bass, Chord, Arp");
+    CHECK(patternLabel("bass", 1) === "Root/5th" && patternLabel("arp", 3) === "Random", "pattern names follow the voicing");
+}
+
 console.log(`${passes} passed, ${failures} failed`);
 process.exit(failures ? 1 : 0);

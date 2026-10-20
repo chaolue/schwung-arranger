@@ -3087,7 +3087,82 @@ export function instrumentVelocity(inst) {
     return (typeof v === "number" && v >= 1 && v <= 127) ? Math.round(v) : 100;
 }
 
-const INST_ITEM_FIELDS = ["mute", "octave", "follow_note", "voicing", "inversion", "note_gap", "velocity"];
+/* ── Instrument playing variety ── */
+/* Fields an instrument (and its items) can set beyond octave/voicing/...,
+ * all read by the engine's instrument_attack (arranger_engine.c):
+ *   pattern     Bass: Root, Root/5th, Root/Oct, R-5-O-5 (root, fifth,
+ *               octave, fifth); Arp: Up, Down, Up-Down, Random.
+ *   approach    Bass: a passing note half a beat before each new bass
+ *               note -- Off, Below, Above (a semitone), Scale (step below).
+ *   strum       Chord: ms between the chord's notes, 0 = Off.
+ *   strum_dir   Up (lowest first), Down, Alt (alternating).
+ *   chance      percent of attacks that play, 100 = always.
+ *   vel_follow  a drum-following attack is as loud as its hit (x velocity/100). */
+export const VOICINGS = ["bass", "chord", "arp"];
+const BASS_PATTERN_LABELS = ["Root", "Root/5th", "Root/Oct", "R-5-O-5"];
+const ARP_PATTERN_LABELS = ["Up", "Down", "Up-Down", "Random"];
+const APPROACH_LABELS = ["Off", "Below", "Above", "Scale"];
+const STRUM_DIR_LABELS = ["Up", "Down", "Alt"];
+const STRUM_MAX_MS = 100;
+/* Which voicings each variety row applies to; the others hide it. */
+const VARIETY_ROWS = {
+    pattern: { label: "Pattern", voicings: ["bass", "arp"] },
+    approach: { label: "Approach", voicings: ["bass"] },
+    strum: { label: "Strum", voicings: ["chord"] },
+    strum_dir: { label: "Strum Dir", voicings: ["chord"] }
+};
+
+function voicingLabel(v) {
+    return v === "chord" ? "Chord" : (v === "arp" ? "Arp" : "Bass");
+}
+
+/* Voicing turned by `delta`, Bass / Chord / Arp, stopping at the ends. */
+export function stepVoicing(cur, delta) {
+    const i = Math.max(0, VOICINGS.indexOf(cur));
+    return VOICINGS[Math.max(0, Math.min(VOICINGS.length - 1, i + delta))];
+}
+
+export function patternLabel(voicing, p) {
+    const list = voicing === "arp" ? ARP_PATTERN_LABELS : BASS_PATTERN_LABELS;
+    return list[Math.max(0, Math.min(list.length - 1, p | 0))];
+}
+
+function strumLabel(ms) { return ms > 0 ? ms + "ms" : "Off"; }
+function chanceLabel(c) { return c + "%"; }
+
+/* An instrument's variety settings with their defaults filled in. */
+export function instVariety(inst) {
+    const o = inst || {};
+    const int = (v, lo, hi, d) => (typeof v === "number" && v >= lo && v <= hi) ? Math.round(v) : d;
+    return {
+        pattern: int(o.pattern, 0, 3, 0),
+        approach: int(o.approach, 0, 3, 0),
+        strum: int(o.strum, 0, STRUM_MAX_MS, 0),
+        strum_dir: int(o.strum_dir, 0, 2, 0),
+        chance: int(o.chance, 1, 100, 100),
+        vel_follow: !!o.vel_follow
+    };
+}
+
+/* The variety row `key` for a menu, when it applies to `voicing`. */
+function instVarietyRows(voicing, key, value) {
+    const r = VARIETY_ROWS[key];
+    return r.voicings.includes(voicing || "bass") ? [{ key, label: r.label, value: value() }] : [];
+}
+
+/* Turn an instrument's variety field. */
+function stepInstVariety(inst, key, delta) {
+    const v = instVariety(inst);
+    if (key === "pattern") inst.pattern = Math.max(0, Math.min(3, v.pattern + delta));
+    else if (key === "approach") inst.approach = Math.max(0, Math.min(3, v.approach + delta));
+    else if (key === "strum") inst.strum = Math.max(0, Math.min(STRUM_MAX_MS, v.strum + delta * 5));
+    else if (key === "strum_dir") inst.strum_dir = Math.max(0, Math.min(2, v.strum_dir + delta));
+    else if (key === "chance") inst.chance = Math.max(5, Math.min(100, v.chance + delta * 5));
+    else if (key === "vel_follow") inst.vel_follow = delta > 0;
+}
+
+const INST_ITEM_FIELDS = ["mute", "octave", "follow_note", "voicing", "inversion", "note_gap", "velocity",
+    "pattern", "approach", "strum", "strum_dir", "chance", "vel_follow"];
 
 /* Turn an instrument's old per-bar mutes (inst.bars) and per-bar overrides
  * (inst.overrides), both indexed by section number, into section items that
@@ -3426,6 +3501,8 @@ export function toEngineSongJson(song) {
             note_gap: (typeof inst.note_gap === "number") ? inst.note_gap : 0.25,
             /* Note-on velocity, 1-127 (items can change it from a bar/beat). */
             velocity: instrumentVelocity(inst),
+            /* Playing variety (see instVariety). */
+            ...instVariety(inst),
             /* Per-section per-bar on/off map: 1 = send chord, 0 = muted.
              * Bars are "on by default": only an explicit `false` mutes a bar;
              * an unset (undefined) bar sends. Serialize accordingly so the DSP
@@ -3552,6 +3629,7 @@ export function toUiSong(engineLike) {
             inversion: (typeof inst.inversion === "number") ? inst.inversion : 0,
             note_gap: (typeof inst.note_gap === "number") ? inst.note_gap : 0.25,
             velocity: instrumentVelocity(inst),
+            ...instVariety(inst),
             bars: (inst.bars || []).map(sec => (sec || []).map(b => !!b)),
             overrides: (inst.overrides || []).map(ov => {
                 const out = { section: ov.section, bar: ov.bar };
@@ -7961,18 +8039,31 @@ function openInstrumentMenu(track) {
     needsRedraw = true;
 }
 
-function drawInstrument() {
-    const inst = instrumentForTrack(instrumentEditTrack);
-    drawMenuHeader(instrumentEditTrack === TRACK_INSTRUMENT_1 ? "Inst 1" : "Inst 2", inst && inst.enabled ? "ON" : "OFF");
-    const items = [
+/* Instrument Settings: the rows that apply to the track's voicing. */
+function instrumentRows(inst) {
+    const voicing = inst ? inst.voicing : "bass";
+    return [
         { key: "enabled", label: "Enabled", value: inst && inst.enabled ? "On" : "Off" },
         { key: "octave", label: "Octave", value: String(inst ? inst.octave : 3) },
         { key: "follow", label: "Follow Note", value: inst && inst.follow_note > 0 ? String(inst.follow_note) : "Off" },
-        { key: "voicing", label: "Voicing", value: inst && inst.voicing === "chord" ? "Chord" : "Bass" },
-        { key: "inversion", label: "Inversion", value: inversionLabel(inst ? inst.inversion : 0) },
+        { key: "voicing", label: "Voicing", value: voicingLabel(voicing) },
+        ...instVarietyRows(voicing, "pattern", () => patternLabel(voicing, instVariety(inst).pattern)),
+        ...(voicing !== "bass" ? [{ key: "inversion", label: "Inversion", value: inversionLabel(inst ? inst.inversion : 0) }] : []),
+        ...instVarietyRows(voicing, "approach", () => APPROACH_LABELS[instVariety(inst).approach]),
+        ...instVarietyRows(voicing, "strum", () => strumLabel(instVariety(inst).strum)),
+        ...instVarietyRows(voicing, "strum_dir", () => STRUM_DIR_LABELS[instVariety(inst).strum_dir]),
         { key: "gap", label: "Note Gap", value: noteGapLabel(inst ? inst.note_gap : 0.25) },
-        { key: "velocity", label: "Velocity", value: String(instrumentVelocity(inst)) }
+        { key: "velocity", label: "Velocity", value: String(instrumentVelocity(inst)) },
+        { key: "vel_follow", label: "Vel Follow", value: instVariety(inst).vel_follow ? "On" : "Off" },
+        { key: "chance", label: "Chance", value: chanceLabel(instVariety(inst).chance) }
     ];
+}
+
+function drawInstrument() {
+    const inst = instrumentForTrack(instrumentEditTrack);
+    drawMenuHeader(instrumentEditTrack === TRACK_INSTRUMENT_1 ? "Inst 1" : "Inst 2", inst && inst.enabled ? "ON" : "OFF");
+    const items = instrumentRows(inst);
+    if (instrumentFocus >= items.length) instrumentFocus = items.length - 1;
     drawMenuList({
         ...LIST_ROW_FIT,
         labelX: 3,
@@ -7992,41 +8083,49 @@ function drawInstrument() {
 function handleInstrumentInput(cc, value) {
     const inst = instrumentForTrack(instrumentEditTrack);
     if (!inst) return;
+    const rows = instrumentRows(inst);
+    const row = rows[Math.max(0, Math.min(rows.length - 1, instrumentFocus))];
     if (cc === MoveMainKnob) {
         const delta = decodeDelta(value);
         if (instrumentEditing) {
-            if (instrumentFocus === 0) {
+            const key = row.key;
+            if (key === "enabled") {
                 inst.enabled = !inst.enabled;
-            } else if (instrumentFocus === 1) {
+            } else if (key === "octave") {
                 inst.octave = Math.max(-1, Math.min(8, inst.octave + delta));
-            } else if (instrumentFocus === 2) {
-                inst.follow_note = stepFollowNote(inst.follow_note, delta, inst.voicing !== "chord");
-            } else if (instrumentFocus === 3) {
-                inst.voicing = (inst.voicing === "chord") ? "bass" : "chord";
-            } else if (instrumentFocus === 4) {
+            } else if (key === "follow") {
+                inst.follow_note = stepFollowNote(inst.follow_note, delta, inst.voicing === "bass" || !inst.voicing);
+            } else if (key === "voicing") {
+                inst.voicing = stepVoicing(inst.voicing || "bass", delta);
+            } else if (key === "inversion") {
                 /* Inversion: root/1st/2nd/3rd/Auto. Clamped per-chord (a triad
                  * has no 3rd inversion) on the DSP side; the menu just offers
                  * all four so a 7th/maj7/m7/dim7 chord can use the 3rd. */
                 inst.inversion = Math.max(0, Math.min(INVERSION_AUTO, (inst.inversion || 0) + delta));
-            } else if (instrumentFocus === 5) {
+            } else if (key === "gap") {
                 /* Note gap: 0 = none, then 1/16, 1/8, 1/4, 1/2, 1 beat. */
                 const steps = [0, 0.0625, 0.125, 0.25, 0.5, 1.0];
                 const cur = (typeof inst.note_gap === "number") ? inst.note_gap : 0.25;
                 const idx = steps.indexOf(cur);
                 const newIdx = Math.max(0, Math.min(steps.length - 1, (idx < 0 ? 3 : idx) + delta));
                 inst.note_gap = steps[newIdx];
-            } else if (instrumentFocus === 6) {
+            } else if (key === "velocity") {
                 /* Note-on velocity, 1-127. */
                 inst.velocity = Math.max(1, Math.min(127, instrumentVelocity(inst) + delta));
+            } else {
+                stepInstVariety(inst, key, delta);
             }
             unsavedChanges = true;
         } else {
-            instrumentFocus = Math.max(0, Math.min(6, instrumentFocus + delta));
+            instrumentFocus = Math.max(0, Math.min(rows.length - 1, instrumentFocus + delta));
         }
         needsRedraw = true;
     } else if (cc === MoveMainButton && value > 0) {
-        if (instrumentFocus === 0) {
+        if (row.key === "enabled") {
             inst.enabled = !inst.enabled;
+            unsavedChanges = true;
+        } else if (row.key === "vel_follow") {
+            inst.vel_follow = !instVariety(inst).vel_follow;
             unsavedChanges = true;
         } else {
             instrumentEditing = !instrumentEditing;
@@ -8097,10 +8196,19 @@ function itemLabel(track, it) {
     const parts = [];
     if (typeof it.octave === "number") parts.push("Oct " + it.octave);
     if (typeof it.follow_note === "number") parts.push(it.follow_note > 0 ? "Fol " + it.follow_note : "Fol Off");
-    if (it.voicing) parts.push(it.voicing === "chord" ? "Chord" : "Bass");
+    if (it.voicing) parts.push(voicingLabel(it.voicing));
+    if (typeof it.pattern === "number") {
+        const inst = instrumentForTrack(track);
+        parts.push(patternLabel(it.voicing || (inst ? inst.voicing : "bass"), it.pattern));
+    }
     if (typeof it.inversion === "number") parts.push(inversionLabel(it.inversion));
+    if (typeof it.approach === "number") parts.push("Appr " + APPROACH_LABELS[it.approach]);
+    if (typeof it.strum === "number") parts.push("Strum " + strumLabel(it.strum));
+    if (typeof it.strum_dir === "number") parts.push("Strum " + STRUM_DIR_LABELS[it.strum_dir]);
     if (typeof it.note_gap === "number") parts.push("Gap " + noteGapLabel(it.note_gap));
     if (typeof it.velocity === "number") parts.push("Vel " + it.velocity);
+    if (typeof it.vel_follow === "boolean") parts.push(it.vel_follow ? "VelFol" : "VelFol Off");
+    if (typeof it.chance === "number") parts.push(it.chance + "%");
     return parts.length ? parts.join(" ") : "Defaults";
 }
 
@@ -8367,14 +8475,28 @@ function itemEditRows() {
             value: itemDefault(w.follow_note, inst && inst.follow_note > 0 ? inst.follow_note : "Off") ||
                 (w.follow_note > 0 ? String(w.follow_note) : "Off") });
         rows.push({ key: "voicing", label: "Voicing",
-            value: itemDefault(w.voicing, inst && inst.voicing === "chord" ? "Chord" : "Bass") ||
-                (w.voicing === "chord" ? "Chord" : "Bass") });
-        rows.push({ key: "inversion", label: "Inversion",
+            value: itemDefault(w.voicing, voicingLabel(inst ? inst.voicing : "bass")) || voicingLabel(w.voicing) });
+        /* The rows that apply to the voicing in effect here. */
+        const voicing = w.voicing || (inst ? inst.voicing : "bass") || "bass";
+        const iv = instVariety(inst);
+        rows.push(...instVarietyRows(voicing, "pattern", () =>
+            itemDefault(w.pattern, patternLabel(voicing, iv.pattern)) || patternLabel(voicing, w.pattern)));
+        if (voicing !== "bass") rows.push({ key: "inversion", label: "Inversion",
             value: itemDefault(w.inversion, inversionLabel(inst ? inst.inversion : 0)) || inversionLabel(w.inversion) });
+        rows.push(...instVarietyRows(voicing, "approach", () =>
+            itemDefault(w.approach, APPROACH_LABELS[iv.approach]) || APPROACH_LABELS[w.approach]));
+        rows.push(...instVarietyRows(voicing, "strum", () =>
+            itemDefault(w.strum, strumLabel(iv.strum)) || strumLabel(w.strum)));
+        rows.push(...instVarietyRows(voicing, "strum_dir", () =>
+            itemDefault(w.strum_dir, STRUM_DIR_LABELS[iv.strum_dir]) || STRUM_DIR_LABELS[w.strum_dir]));
         rows.push({ key: "gap", label: "Note Gap",
             value: itemDefault(w.note_gap, noteGapLabel(inst ? inst.note_gap : 0.25)) || noteGapLabel(w.note_gap) });
         rows.push({ key: "velocity", label: "Velocity",
             value: itemDefault(w.velocity, instrumentVelocity(inst)) || String(w.velocity) });
+        rows.push({ key: "vel_follow", label: "Vel Follow",
+            value: itemDefault(w.vel_follow, iv.vel_follow ? "On" : "Off") || (w.vel_follow ? "On" : "Off") });
+        rows.push({ key: "chance", label: "Chance",
+            value: itemDefault(w.chance, chanceLabel(iv.chance)) || chanceLabel(w.chance) });
     }
     rows.push({ key: "adv", label: "Advanced", value: w.adv ? "On" : "Off" });
     rows.push({ key: "delete", label: "Delete", value: "" });
@@ -8469,13 +8591,35 @@ function handleInstrumentBarMenuInput(cc, value) {
             } else if (row.key === "follow") {
                 const inst = instrumentForTrack(itemEditTrack);
                 const voicing = w.voicing || (inst ? inst.voicing : "bass");
-                w.follow_note = w.follow_note === 0 && delta > 0 && voicing !== "chord"
+                w.follow_note = w.follow_note === 0 && delta > 0 && voicing === "bass"
                     ? stepFollowNote(0, delta, true)
                     : cycleOptionalInt(w.follow_note, delta, 0, 127);
             } else if (row.key === "voicing") {
-                const states = [null, "bass", "chord"];
+                const states = [null, ...VOICINGS];
                 const cur = states.indexOf(w.voicing === undefined ? null : w.voicing);
-                w.voicing = states[((cur + delta) % 3 + 3) % 3];
+                w.voicing = states[((cur + delta) % states.length + states.length) % states.length];
+            } else if (row.key === "pattern") {
+                w.pattern = cycleOptionalInt(w.pattern, delta, 0, 3);
+            } else if (row.key === "approach") {
+                w.approach = cycleOptionalInt(w.approach, delta, 0, 3);
+            } else if (row.key === "strum") {
+                /* Default, Off, 5 ... 100 ms. */
+                const steps = [null, 0];
+                for (let ms = 5; ms <= STRUM_MAX_MS; ms += 5) steps.push(ms);
+                const cur = steps.indexOf(w.strum === undefined ? null : w.strum);
+                w.strum = steps[Math.max(0, Math.min(steps.length - 1, (cur < 0 ? 0 : cur) + delta))];
+            } else if (row.key === "strum_dir") {
+                w.strum_dir = cycleOptionalInt(w.strum_dir, delta, 0, 2);
+            } else if (row.key === "vel_follow") {
+                const states = [null, false, true];
+                const cur = states.indexOf(w.vel_follow === undefined ? null : w.vel_follow);
+                w.vel_follow = states[Math.max(0, Math.min(2, (cur < 0 ? 0 : cur) + delta))];
+            } else if (row.key === "chance") {
+                /* Default, then 5 ... 100%. */
+                const steps = [null];
+                for (let c = 5; c <= 100; c += 5) steps.push(c);
+                const cur = steps.indexOf(w.chance === undefined ? null : w.chance);
+                w.chance = steps[Math.max(0, Math.min(steps.length - 1, (cur < 0 ? 0 : cur) + delta))];
             } else if (row.key === "inversion") {
                 w.inversion = cycleOptionalInt(w.inversion, delta, 0, INVERSION_AUTO);
             } else if (row.key === "gap") {

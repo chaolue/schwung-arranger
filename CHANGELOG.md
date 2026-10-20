@@ -24,6 +24,18 @@
 - Loop on the Chord, Inst or Click track copies the section's chords/items
   to other sections, picked from a list: the same-named ones (Chorus,
   Chorus 2, ...) start ticked, and any other can be ticked too.
+- More variety for Inst 1/2 (Instrument Settings, and per item):
+  - **Arp** voicing: one chord note per attack, by **Pattern** Up, Down,
+    Up-Down or Random.
+  - Bass **Pattern**: Root/5th, Root/Oct, or root-fifth-octave-fifth on
+    successive attacks, starting again on each new chord.
+  - **Approach** (Bass): a passing note half a beat before each new bass
+    note -- a semitone below or above, or the scale step below.
+  - **Strum** (Chord): the chord's notes 5-100 ms apart, up, down or
+    alternating.
+  - **Vel Follow**: a drum-following note is as loud as its drum hit.
+  - **Chance**: the share of attacks that play.
+  Only the settings that apply to the voicing are shown.
 - Deleting a drum clip in a section with chords or items leaves an (empty)
   placeholder of the same length, so the chords and items after it stay on
   their drums. A pad fills it; Delete again removes it.
