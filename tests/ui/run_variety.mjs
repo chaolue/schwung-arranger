@@ -71,19 +71,29 @@ jog(30); jog(-1); click();    /* Vel Follow */
 jog(1); click(); jog(-10); click();
 t = menuText();
 check(/Random/.test(t) && /50%/.test(t), "Random arp, Chance 50%: " + t);
+check(!/Rate/.test(t), "Arp following the kick: no Rate (the hits are its rhythm)");
+/* Follow Note (row 2) down to Off: the Arp runs at its Rate, 1/8 by default. */
+jog(2); click(); jog(-40); click();
+t = menuText();
+check(/Rate/.test(t) && /1\/8/.test(t), "Follow Note Off: a Rate row, 1/8: " + t);
+/* Rate (row 5, after Pattern) up two: 1/8T, 1/16. */
+jog(5); click(); jog(2); click();
+t = menuText();
+check(/1\/16/.test(t), "Rate 1/16: " + t);
 
 back(); back();               /* out of the menu, out of the song: saved */
 const inst = saved().instruments[0];
-check(inst.voicing === "arp" && inst.pattern === 3 && inst.strum === 30 && inst.vel_follow === true && inst.chance === 50,
-      "saved: Arp, Random, Strum 30, Vel Follow, 50%: " + JSON.stringify(inst));
+check(inst.voicing === "arp" && inst.pattern === 3 && inst.strum === 30 && inst.vel_follow === true && inst.chance === 50 &&
+      inst.follow_note === 0 && inst.arp_rate === 4,
+      "saved: Arp, Random, Strum 30, Vel Follow, 50%, Follow Off, Rate 1/16: " + JSON.stringify(inst));
 
 /* ---- An item: Pattern Up-Down and Chance 50% from bar 2 ---- */
 jog(1); click();              /* Var again */
 press(C.MoveRow2);
 jog(5); click();              /* + Add: a new item */
-/* Bar Beat Sound Octave Follow Voicing Pattern(6) Inversion Gap Velocity VelFollow Chance(11) */
+/* Bar Beat Sound Octave Follow Voicing Pattern(6) Rate Inversion Gap Velocity VelFollow Chance(12) */
 jog(6); click(); jog(3); click();
-jog(5); click(); jog(10); click();
+jog(6); click(); jog(10); click();
 back(); back();
 const items = (saved().sections[0].inst || [])[0] || [];
 check(items.length === 1 && items[0].pattern === 2 && items[0].chance === 50,

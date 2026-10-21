@@ -25,8 +25,9 @@
   to other sections, picked from a list: the same-named ones (Chorus,
   Chorus 2, ...) start ticked, and any other can be ticked too.
 - More variety for Inst 1/2 (Instrument Settings, and per item):
-  - **Arp** voicing: one chord note per attack, by **Pattern** Up, Down,
-    Up-Down or Random.
+  - **Arp** voicing: the chord's notes one at a time, by **Pattern** Up,
+    Down, Up-Down or Random -- on each Follow Note hit, or with Follow Note
+    Off at its **Rate** (1/4, 1/8, 1/8T, 1/16, 1/16T).
   - Bass **Pattern**: Root/5th, Root/Oct, or root-fifth-octave-fifth on
     successive attacks, starting again on each new chord.
   - **Approach** (Bass): a passing note half a beat before each new bass

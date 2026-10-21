@@ -208,6 +208,9 @@ function deepEqual(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
     CHECK(stepVoicing("bass", 1) === "chord" && stepVoicing("chord", 1) === "arp" && stepVoicing("arp", 1) === "arp" &&
         stepVoicing("bass", -1) === "bass", "voicing steps Bass, Chord, Arp");
     CHECK(patternLabel("bass", 1) === "Root/5th" && patternLabel("arp", 3) === "Random", "pattern names follow the voicing");
+    CHECK(d.arp_rate === 2 && instVariety({ arp_rate: 5 }).arp_rate === 2 && instVariety({ arp_rate: 6 }).arp_rate === 6,
+        "Arp Rate: 1/8 by default, only the offered rates");
+    CHECK(i0.arp_rate === 2, "the Arp Rate reaches the engine: " + i0.arp_rate);
 }
 
 console.log(`${passes} passed, ${failures} failed`);

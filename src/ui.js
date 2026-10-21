@@ -3130,13 +3130,17 @@ export function instrumentVelocity(inst) {
  *   strum       Chord: ms between the chord's notes, 0 = Off.
  *   strum_dir   Up (lowest first), Down, Alt (alternating).
  *   chance      percent of attacks that play, 100 = always.
- *   vel_follow  a drum-following attack is as loud as its hit (x velocity/100). */
+ *   vel_follow  a drum-following attack is as loud as its hit (x velocity/100).
+ *   arp_rate    Arp with Follow Note Off: steps per beat, ARP_RATES. */
 export const VOICINGS = ["bass", "chord", "arp"];
 const BASS_PATTERN_LABELS = ["Root", "Root/5th", "Root/Oct", "R-5-O-5"];
 const ARP_PATTERN_LABELS = ["Up", "Down", "Up-Down", "Random"];
 const APPROACH_LABELS = ["Off", "Below", "Above", "Scale"];
 const STRUM_DIR_LABELS = ["Up", "Down", "Alt"];
 const STRUM_MAX_MS = 100;
+/* Arp Rate as steps per beat, and its names. */
+const ARP_RATES = [1, 2, 3, 4, 6];
+const ARP_RATE_LABELS = { 1: "1/4", 2: "1/8", 3: "1/8T", 4: "1/16", 6: "1/16T" };
 /* Which voicings each variety row applies to; the others hide it. */
 const VARIETY_ROWS = {
     pattern: { label: "Pattern", voicings: ["bass", "arp"] },
@@ -3173,7 +3177,8 @@ export function instVariety(inst) {
         strum: int(o.strum, 0, STRUM_MAX_MS, 0),
         strum_dir: int(o.strum_dir, 0, 2, 0),
         chance: int(o.chance, 1, 100, 100),
-        vel_follow: !!o.vel_follow
+        vel_follow: !!o.vel_follow,
+        arp_rate: ARP_RATES.includes(o.arp_rate) ? o.arp_rate : 2
     };
 }
 
@@ -3192,10 +3197,20 @@ function stepInstVariety(inst, key, delta) {
     else if (key === "strum_dir") inst.strum_dir = Math.max(0, Math.min(2, v.strum_dir + delta));
     else if (key === "chance") inst.chance = Math.max(5, Math.min(100, v.chance + delta * 5));
     else if (key === "vel_follow") inst.vel_follow = delta > 0;
+    else if (key === "arp_rate") {
+        const i = ARP_RATES.indexOf(v.arp_rate);
+        inst.arp_rate = ARP_RATES[Math.max(0, Math.min(ARP_RATES.length - 1, i + delta))];
+    }
+}
+
+/* The Arp's Rate row: only with Follow Note Off -- following a drum, the
+ * hits are its rhythm. */
+function arpRateRows(voicing, followNote, value) {
+    return voicing === "arp" && !(followNote > 0) ? [{ key: "arp_rate", label: "Rate", value: value() }] : [];
 }
 
 const INST_ITEM_FIELDS = ["mute", "octave", "follow_note", "voicing", "inversion", "note_gap", "velocity",
-    "pattern", "approach", "strum", "strum_dir", "chance", "vel_follow"];
+    "pattern", "approach", "strum", "strum_dir", "chance", "vel_follow", "arp_rate"];
 
 /* Turn an instrument's old per-bar mutes (inst.bars) and per-bar overrides
  * (inst.overrides), both indexed by section number, into section items that
@@ -8084,6 +8099,7 @@ function instrumentRows(inst) {
         { key: "follow", label: "Follow Note", value: inst && inst.follow_note > 0 ? String(inst.follow_note) : "Off" },
         { key: "voicing", label: "Voicing", value: voicingLabel(voicing) },
         ...instVarietyRows(voicing, "pattern", () => patternLabel(voicing, instVariety(inst).pattern)),
+        ...arpRateRows(voicing, inst ? inst.follow_note : 0, () => ARP_RATE_LABELS[instVariety(inst).arp_rate]),
         ...(voicing !== "bass" ? [{ key: "inversion", label: "Inversion", value: inversionLabel(inst ? inst.inversion : 0) }] : []),
         ...instVarietyRows(voicing, "approach", () => APPROACH_LABELS[instVariety(inst).approach]),
         ...instVarietyRows(voicing, "strum", () => strumLabel(instVariety(inst).strum)),
@@ -8237,6 +8253,7 @@ function itemLabel(track, it) {
         const inst = instrumentForTrack(track);
         parts.push(patternLabel(it.voicing || (inst ? inst.voicing : "bass"), it.pattern));
     }
+    if (typeof it.arp_rate === "number") parts.push(ARP_RATE_LABELS[it.arp_rate] || "");
     if (typeof it.inversion === "number") parts.push(inversionLabel(it.inversion));
     if (typeof it.approach === "number") parts.push("Appr " + APPROACH_LABELS[it.approach]);
     if (typeof it.strum === "number") parts.push("Strum " + strumLabel(it.strum));
@@ -8517,6 +8534,9 @@ function itemEditRows() {
         const iv = instVariety(inst);
         rows.push(...instVarietyRows(voicing, "pattern", () =>
             itemDefault(w.pattern, patternLabel(voicing, iv.pattern)) || patternLabel(voicing, w.pattern)));
+        const follow = typeof w.follow_note === "number" ? w.follow_note : (inst ? inst.follow_note : 0);
+        rows.push(...arpRateRows(voicing, follow, () =>
+            itemDefault(w.arp_rate, ARP_RATE_LABELS[iv.arp_rate]) || ARP_RATE_LABELS[w.arp_rate]));
         if (voicing !== "bass") rows.push({ key: "inversion", label: "Inversion",
             value: itemDefault(w.inversion, inversionLabel(inst ? inst.inversion : 0)) || inversionLabel(w.inversion) });
         rows.push(...instVarietyRows(voicing, "approach", () =>
@@ -8638,6 +8658,10 @@ function handleInstrumentBarMenuInput(cc, value) {
                 w.pattern = cycleOptionalInt(w.pattern, delta, 0, 3);
             } else if (row.key === "approach") {
                 w.approach = cycleOptionalInt(w.approach, delta, 0, 3);
+            } else if (row.key === "arp_rate") {
+                const steps = [null, ...ARP_RATES];
+                const cur = steps.indexOf(w.arp_rate === undefined ? null : w.arp_rate);
+                w.arp_rate = steps[Math.max(0, Math.min(steps.length - 1, (cur < 0 ? 0 : cur) + delta))];
             } else if (row.key === "strum") {
                 /* Default, Off, 5 ... 100 ms. */
                 const steps = [null, 0];

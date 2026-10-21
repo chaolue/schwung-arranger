@@ -234,7 +234,7 @@ Click tracks show **(add chords first)** in place of **+ Add**.
 |------------|---------|
 | Bar / Beat / Advanced | Where the item starts, as for chords |
 | Sound | **Play**, or **Mute** from here (a mute mid-bar cuts the note there) |
-| Octave, Follow Note, Voicing, Pattern, Inversion, Approach, Strum, Strum Dir, Note Gap, Velocity, Vel Follow, Chance | **Default (x)** uses the track setting (shown); or a value of its own — see Instrument Settings. As there, only the rows for the voicing in effect are shown. An item that only changes Velocity re-strikes a chord already held there, so an item per beat gives per-beat accents |
+| Octave, Follow Note, Voicing, Pattern, Rate, Inversion, Approach, Strum, Strum Dir, Note Gap, Velocity, Vel Follow, Chance | **Default (x)** uses the track setting (shown); or a value of its own — see Instrument Settings. As there, only the rows for the voicing in effect are shown. An item that only changes Velocity re-strikes a chord already held there, so an item per beat gives per-beat accents |
 | Delete | Remove the item |
 
 Songs made before items existed are converted when opened: their per-bar mutes
@@ -278,8 +278,9 @@ Instrument track.
 | Enabled | On/Off for this instrument track |
 | Octave | Octave shift applied to the chord/note (-1 to 8) |
 | Follow Note | When set (1–127), the instrument fires alongside that drum note instead of on the chord/bar grid (e.g. a bass that follows the kick). 0 = off, follows the bar grid instead. With Bass voicing, turning up from Off jumps straight to 36 (the kick) |
-| Voicing | **Bass** plays the chord's root/bass note; **Chord** plays the full chord; **Arp** plays one chord note per attack, stepping through them |
+| Voicing | **Bass** plays the chord's root/bass note; **Chord** plays the full chord; **Arp** plays the chord's notes one at a time — on each Follow Note hit, or with Follow Note Off at its **Rate** |
 | Pattern | *Bass and Arp.* Which note each attack plays; it starts again on each new chord. Bass: **Root** (always), **Root/5th** (alternating with the chord's fifth above), **Root/Oct** (alternating with the octave), **R-5-O-5** (root, fifth, octave, fifth). Arp: **Up**, **Down**, **Up-Down**, **Random** (never the same note twice running). Patterns move on each attack, so they come alive with a Follow Note |
+| Rate | *Arp, with Follow Note Off.* How fast it steps: **1/4**, **1/8** (default), **1/8T**, **1/16**, **1/16T**, starting from each chord change and holding each note a step (less the Note Gap, at most half a step). Following a drum, the hits set the rhythm instead and this row is hidden |
 | Inversion | *Chord and Arp.* Which chord note is at the bottom: **Root**, **1st**, **2nd**, **3rd**, or **Auto** (see below). For Arp it sets the notes it steps through |
 | Approach | *Bass.* A passing note half a beat before each new bass note: **Below** or **Above** it by a semitone, or **Scale** — the scale step below in the song key. On the chord grid it leads into the chord change; following a drum, into the first hit on the new chord, so it never leads into a rest. Not when the bass note stays the same, and not with a Note Gap of half a beat or more |
 | Strum | *Chord.* Plays the chord's notes this far apart (5–100 ms, Off) instead of together, like a strummed guitar |

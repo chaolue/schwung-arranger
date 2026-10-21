@@ -299,6 +299,7 @@ typedef struct {
     int8_t strum_dir;
     int8_t chance;
     int8_t vel_follow;
+    int8_t arp_rate;
 } inst_item_t;
 
 /* An instrument track: emits chord-derived notes on its own output/channel. */
@@ -335,6 +336,9 @@ typedef struct {
     uint8_t strum_dir;
     uint8_t chance;
     uint8_t vel_follow;
+    /* Arp with Follow Note Off: steps per beat (1 = 1/4, 2 = 1/8, 3 = 1/8T,
+     * 4 = 1/16, 6 = 1/16T); 0 = the default, 1/8. See service_arp_rate. */
+    uint8_t arp_rate;
     /* Per-section per-bar on/off map: 1 = send, 0 = muted. */
     uint8_t bars[MAX_SONG_SECTIONS][MAX_SECTION_BARS];
     /* Sparse per-bar overrides of octave/follow_note/voicing/inversion. */
@@ -364,7 +368,7 @@ typedef struct {
     uint8_t inversion;
     double note_gap;
     uint8_t velocity;        /* 0 = the default -- see voice_velocity */
-    uint8_t pattern, approach, strum_ms, strum_dir, chance, vel_follow; /* see instrument_t */
+    uint8_t pattern, approach, strum_ms, strum_dir, chance, vel_follow, arp_rate; /* see instrument_t */
     /* What the attack that this voice was stored for ACTUALLY played (set by
      * instrument_attack), so its note-off releases exactly those notes:
      * a pattern, an arpeggio or an approach note is not a function of the
@@ -389,6 +393,7 @@ typedef struct {
     int8_t last_arp;         /* Random arp: the tone it played last, not repeated */
     uint8_t strum_flip;      /* Alternating strum: which way the next one goes */
     uint32_t approach_end;   /* the change an approach note is leading into; 0 = none */
+    uint32_t arp_next;       /* Arp on the chord grid: the next step's tick; 0 = not running */
 } inst_play_t;
 
 static int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
@@ -429,6 +434,7 @@ static void inst_voice_from(const instrument_t *inst, inst_voice_t *out) {
     out->strum_dir = inst->strum_dir;
     out->chance = inst->chance;
     out->vel_follow = inst->vel_follow;
+    out->arp_rate = inst->arp_rate;
     out->played_valid = 0;
     out->played_n = 0;
     out->played_sent = 0;
@@ -2836,6 +2842,7 @@ static void resolve_instrument_at(const instrument_t *inst, int section, uint32_
     if (last->strum_dir >= 0) out->strum_dir = (uint8_t)last->strum_dir;
     if (last->chance >= 1) out->chance = (uint8_t)last->chance;
     if (last->vel_follow >= 0) out->vel_follow = (uint8_t)last->vel_follow;
+    if (last->arp_rate >= 1) out->arp_rate = (uint8_t)last->arp_rate;
 }
 
 /* Song ticks a section spans: its assembled length, or whole bars for a song
@@ -2955,6 +2962,21 @@ static int chord_equal(const chord_t *a, const chord_t *b) {
            a->degree == b->degree && a->key_pc == b->key_pc;
 }
 
+/* An Arp's step on the chord grid, in ticks: a beat over its Rate. */
+static uint32_t arp_step_ticks(const engine_t *e, const inst_voice_t *v) {
+    int n = v->arp_rate;
+    if (n != 1 && n != 2 && n != 3 && n != 4 && n != 6) n = 2;
+    uint32_t t = e->ticks_per_beat / (uint32_t)n;
+    return t ? t : 1;
+}
+
+/* The gap before an Arp's next step: the Note Gap, but never more than half
+ * a step, or a long gap would leave nothing of a fast arpeggio. */
+static uint32_t arp_gap_ticks(const engine_t *e, const inst_voice_t *v, uint32_t step) {
+    uint32_t gap = (uint32_t)(v->note_gap * e->ticks_per_beat);
+    return gap > step / 2 ? step / 2 : gap;
+}
+
 /* Emit the chord for every enabled instrument at a given absolute tick. Used
  * at bar boundaries (follow_note == 0). A chord is held across multiple bars:
  * the note-on fires only when the chord changes, and the note-off is scheduled
@@ -3068,6 +3090,15 @@ static void emit_instruments_at_tick(engine_t *e, uint32_t tick) {
                 uint32_t off_tick = bar_end_tick > gap ? bar_end_tick - gap : 0;
                 if (off_tick <= tick) off_tick = tick + 1;
                 schedule_instrument_note_off(e, i, &resolved, off_tick);
+            }
+            /* An arpeggio on the chord grid runs on from this attack at its
+             * Rate (service_arp_rate): this note lasts one step. */
+            if (resolved.voicing == 2 && (!chord_unchanged || chord_explicit_here)) {
+                uint32_t step = arp_step_ticks(e, &resolved);
+                e->inst_play[i].arp_next = tick + step;
+                uint32_t off = tick + step - arp_gap_ticks(e, &resolved, step);
+                if (!e->pending_off_set[i] || off < e->pending_off_tick[i])
+                    schedule_instrument_note_off(e, i, &resolved, off);
             }
         } else {
             /* No chord here: cut off any sounding note, using the resolved
@@ -3895,6 +3926,8 @@ static void parse_chords_and_instruments(const char *json, song_t *song) {
                     char v[16];
                     if (json_get_string_at(p, "vel_follow", v, sizeof(v)))
                         inst->vel_follow = (strcmp(v, "true") == 0 || strcmp(v, "1") == 0) ? 1 : 0;
+                } else if (strncmp(p + 1, "arp_rate\"", 9) == 0) {
+                    int v; if (json_get_int_at(p, "arp_rate", &v)) inst->arp_rate = (uint8_t)clampi(v, 1, 6);
                 } else if (strncmp(p + 1, "bars", 4) == 0) {
                     /* "bars": [[1,0,...], [1,1,...], ...] — per-section arrays. */
                     const char *bars_arr = strchr(p + 4, '[');
@@ -4320,6 +4353,8 @@ static void parse_instrument_items(const char *arr, instrument_t *inst) {
                     char v[16];
                     if (json_get_string_at(p, "vel_follow", v, sizeof(v)))
                         cur.vel_follow = (strcmp(v, "true") == 0 || strcmp(v, "1") == 0) ? 1 : 0;
+                } else if (strncmp(p + 1, "arp_rate\"", 9) == 0) {
+                    int v; if (json_get_int_at(p, "arp_rate", &v)) cur.arp_rate = (int8_t)clampi(v, 1, 6);
                 }
             }
             p++;
@@ -4334,7 +4369,7 @@ static void parse_instrument_items(const char *arr, instrument_t *inst) {
                 cur.note_gap = -1.0f;
                 cur.velocity = -1;
                 cur.pattern = -1; cur.approach = -1; cur.strum_ms = -1; cur.strum_dir = -1;
-                cur.chance = -1; cur.vel_follow = -1;
+                cur.chance = -1; cur.vel_follow = -1; cur.arp_rate = -1;
                 sec = -1; bar = -1; beat = 1.0;
             }
             p++;
@@ -5019,6 +5054,7 @@ static void copy_song_used(song_t *dst, const song_t *src) {
         di->strum_dir = si->strum_dir;
         di->chance = si->chance;
         di->vel_follow = si->vel_follow;
+        di->arp_rate = si->arp_rate;
         memcpy(di->bars, si->bars, (size_t)ns * sizeof di->bars[0]);
         di->override_count = si->override_count;
         memcpy(di->overrides, si->overrides,
@@ -5695,6 +5731,45 @@ static uint32_t inst_bar_key_at(engine_t *e, uint32_t tick) {
     return ((uint32_t)sec << 20) | ((bar & 0xFFF) << 8) | (seg & 0xFF);
 }
 
+/* An Arp with Follow Note Off steps on its own clock: from each chord
+ * attack (emit_instruments_at_tick starts it), every Rate step plays the
+ * pattern's next tone, each held a step less the gap. It stops where the
+ * chord does (No Chord, the song end), on a mute, or when the voicing or
+ * Follow Note change; the next chord attack starts it again. */
+static void service_arp_rate(engine_t *e, uint32_t tick) {
+    song_t *song = &e->live_slot.song;
+    for (int i = 0; i < song->instrument_count && i < MAX_INSTRUMENTS; i++) {
+        inst_play_t *ps = &e->inst_play[i];
+        if (!ps->arp_next) continue;
+        instrument_t *inst = &song->instruments[i];
+        if (!inst->enabled || !e->inst_live_enabled[i]) { ps->arp_next = 0; continue; }
+        /* Left far ahead by a loop wrap: the loop start's attack restarts it. */
+        if (ps->arp_next > tick + 4 * e->ticks_per_beat) { ps->arp_next = 0; continue; }
+        if (tick < ps->arp_next) continue;
+        uint32_t at = ps->arp_next;
+        uint32_t bar = 0;
+        chord_pos_t cp;
+        int sec = chord_at_song_tick(song, at, e->ticks_per_bar, e->ticks_per_beat, &bar, &cp);
+        if (sec < 0 || !cp.chord) { ps->arp_next = 0; continue; }
+        inst_voice_t v;
+        int muted = 0;
+        resolve_instrument_at(inst, sec, bar, bar_offset_at(song, at, e->ticks_per_bar),
+                              e->ticks_per_beat, &v, &muted);
+        if (muted || v.voicing != 2 || v.follow_note > 0) { ps->arp_next = 0; continue; }
+        if (e->last_inst_chord_set[i])
+            emit_instrument_chord_off(e, &e->last_inst_resolved[i], &e->last_inst_chord[i]);
+        instrument_attack(e, &v, ps, cp.chord, voice_velocity(&v), tick);
+        e->last_inst_chord[i] = *cp.chord;
+        e->last_inst_chord_set[i] = 1;
+        e->last_inst_resolved[i] = v;
+        e->last_inst_via_follow[i] = 0;
+        uint32_t step = arp_step_ticks(e, &v);
+        ps->arp_next = at + step;
+        if (ps->arp_next <= tick) ps->arp_next = tick + 1;   /* never more than one step a block */
+        schedule_instrument_note_off(e, i, &v, at + step - arp_gap_ticks(e, &v, step));
+    }
+}
+
 static void update_bar_counter(engine_t *e) {
     uint32_t bar = e->live_slot.end_tick > 0
         ? (e->playhead_tick / e->ticks_per_bar)
@@ -5726,6 +5801,8 @@ static void update_bar_counter(engine_t *e) {
             e->inst_bar_key = key;
             emit_instruments_at_tick(e, e->playhead_tick);
         }
+        /* After the chord's own attack, so a step never doubles a change. */
+        service_arp_rate(e, e->playhead_tick);
     }
 }
 

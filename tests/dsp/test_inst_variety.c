@@ -243,6 +243,46 @@ int main(int argc, char **argv) {
     }
     CHECK(after >= 2 && oct_ok, "item at bar 3: Root/Oct from there (D2 plain before)");
 
+    /* ---- Run 5: Arp on the chord grid (Follow Note Off) at its Rate ----
+     * D for bar 1, G for bar 2 (then held). Inst 1: Arp Up at 1/8 (120
+     * ticks), octave 3: D3 F#3 A3 D3 ... from the bar, then G3 B3 D4 ...
+     * starting again on G. Inst 2: Arp Down at 1/16 (60 ticks) on the same. */
+    snprintf(json, sizeof(json),
+        "{\"source_folder\":\"%s\",\"name\":\"T\",\"tempo_bpm\":120,"
+        "\"time_sig_num\":4,\"time_sig_den\":4,\"sections\":["
+        "{\"name\":\"A\",\"clips\":[" CLIP "],"
+        "\"chords\":[{\"root\":\"D\",\"quality\":\"maj\",\"bass\":\"\"},"
+        "{\"root\":\"G\",\"quality\":\"maj\",\"bass\":\"\"}]}"
+        "],\"instruments\":["
+        "{\"enabled\":true,\"output\":\"schwung\",\"channel\":2,\"octave\":3,\"follow_note\":0,"
+        "\"voicing\":\"arp\",\"inversion\":0,\"note_gap\":0.5,\"pattern\":0,\"arp_rate\":2},"
+        "{\"enabled\":true,\"output\":\"schwung\",\"channel\":3,\"octave\":3,\"follow_note\":0,"
+        "\"voicing\":\"arp\",\"inversion\":0,\"note_gap\":0.125,\"pattern\":1,\"arp_rate\":4}"
+        "]}", folder);
+    CHECK(play_song(api, inst, json, 3000), "run 5 published");
+    na = note_ons(1, an, NULL, at, 256);
+    printf("info: arp 1/8:");
+    for (int i = 0; i < na && i < 20; i++) printf(" %d@%d", an[i], at[i]);
+    printf("\n");
+    int up8 = na >= 24, even8 = 1;
+    const int dup[3] = { 50, 54, 57 }, gup[3] = { 55, 59, 62 };
+    for (int i = 0; i < na && i < 24; i++) {
+        int expect = i < 8 ? dup[i % 3] : gup[(i - 8) % 3];
+        if (an[i] != expect) up8 = 0;
+        if (at[i] < i * 120 || at[i] > i * 120 + 4) even8 = 0;
+    }
+    CHECK(up8, "Arp Up at 1/8: D F# A D... for bar 1, then G B D G... from bar 2 (held into bar 3)");
+    CHECK(even8, "a note every 120 ticks (an eighth), on the grid");
+    CHECK(all_released(1), "arp 1/8: every note released");
+    bn = note_ons(2, an, NULL, at, 256);
+    int down16 = bn >= 16, even16 = 1;
+    for (int i = 0; i < 16 && i < bn; i++) {
+        if (an[i] != dup[2 - i % 3]) down16 = 0;
+        if (at[i] < i * 60 || at[i] > i * 60 + 4) even16 = 0;
+    }
+    CHECK(down16 && even16, "Arp Down at 1/16: A F# D A... every 60 ticks");
+    CHECK(all_released(2), "arp 1/16: every note released");
+
     api->destroy_instance(inst);
     if (g_failures == 0) printf("\nALL TESTS PASSED\n");
     else printf("\n%d TEST(S) FAILED\n", g_failures);
