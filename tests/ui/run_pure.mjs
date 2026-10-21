@@ -203,7 +203,7 @@ function deepEqual(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
     const d = instVariety({});
     CHECK(d.pattern === 0 && d.approach === 0 && d.strum === 0 && d.strum_dir === 0 && d.chance === 100 && d.vel_follow === false,
         "a song from before: plain playing");
-    CHECK(instVariety({ chance: 0, pattern: 9, strum: 500 }).chance === 100 && instVariety({ pattern: 9 }).pattern === 0 &&
+    CHECK(instVariety({ chance: 0, pattern: 12, strum: 500 }).chance === 100 && instVariety({ pattern: 12 }).pattern === 0 &&
         instVariety({ strum: 500 }).strum === 0, "out-of-range values fall back to the defaults");
     CHECK(stepVoicing("bass", 1) === "chord" && stepVoicing("chord", 1) === "arp" && stepVoicing("arp", 1) === "arp" &&
         stepVoicing("bass", -1) === "bass", "voicing steps Bass, Chord, Arp");
@@ -211,6 +211,9 @@ function deepEqual(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
     CHECK(d.arp_rate === 2 && instVariety({ arp_rate: 5 }).arp_rate === 2 && instVariety({ arp_rate: 6 }).arp_rate === 6,
         "Arp Rate: 1/8 by default, only the offered rates");
     CHECK(i0.arp_rate === 2, "the Arp Rate reaches the engine: " + i0.arp_rate);
+    CHECK(d.arp_range === 1 && d.arp_vel === 0, "Arp Range 1 octave and Vel Range off by default");
+    CHECK(patternLabel("bass", 7) === "Boogie" && patternLabel("arp", 9) === "1-5-8-10" && patternLabel("bass", 9) === "Root",
+        "the new pattern names; an Arp-only pattern on Bass reads Root, as it plays");
 }
 
 console.log(`${passes} passed, ${failures} failed`);

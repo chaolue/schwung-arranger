@@ -28,8 +28,14 @@
   - **Arp** voicing: the chord's notes one at a time, by **Pattern** Up,
     Down, Up-Down or Random -- on each Follow Note hit, or with Follow Note
     Off at its **Rate** (1/4, 1/8, 1/8T, 1/16, 1/16T).
-  - Bass **Pattern**: Root/5th, Root/Oct, or root-fifth-octave-fifth on
-    successive attacks, starting again on each new chord.
+  - Bass **Pattern**: Root/5th, Root/Oct, root-fifth-octave-fifth,
+    Country (the fifth below), 1-3-5-3, 1-3-5-8 or Boogie on successive
+    attacks, starting again on each new chord.
+  - More Arp patterns: Rnd Walk, Shuffle, Alberti, Pedal, Converge and
+    1-5-8-10; **Range** (1-3 octaves); **Vel Range** plays the notes other
+    than the base quieter by a random amount. The base note always plays
+    (Chance only thins the others), and the random patterns start each
+    chord on it.
   - **Approach** (Bass): a passing note half a beat before each new bass
     note -- a semitone below or above, or the scale step below.
   - **Strum** (Chord): the chord's notes 5-100 ms apart, up, down or

@@ -80,20 +80,28 @@ check(/Rate/.test(t) && /1\/8/.test(t), "Follow Note Off: a Rate row, 1/8: " + t
 jog(5); click(); jog(2); click();
 t = menuText();
 check(/1\/16/.test(t), "Rate 1/16: " + t);
+check(/Range/.test(t) && /1 Oct/.test(t) && /Vel Range/.test(t), "Arp: Range (1 Oct) and Vel Range rows: " + t);
+/* Range (row 6) to 2 Oct; Vel Range (row 7) to 30%; Pattern (row 4) from
+ * Random on to Pedal. */
+jog(6); click(); jog(1); click();
+jog(1); click(); jog(3); click();
+jog(-3); click(); jog(4); click();
+t = menuText();
+check(/2 Oct/.test(t) && /30%/.test(t) && /Pedal/.test(t), "2 Oct, Vel Range 30%, Pedal: " + t);
 
 back(); back();               /* out of the menu, out of the song: saved */
 const inst = saved().instruments[0];
-check(inst.voicing === "arp" && inst.pattern === 3 && inst.strum === 30 && inst.vel_follow === true && inst.chance === 50 &&
-      inst.follow_note === 0 && inst.arp_rate === 4,
-      "saved: Arp, Random, Strum 30, Vel Follow, 50%, Follow Off, Rate 1/16: " + JSON.stringify(inst));
+check(inst.voicing === "arp" && inst.pattern === 7 && inst.strum === 30 && inst.vel_follow === true && inst.chance === 50 &&
+      inst.follow_note === 0 && inst.arp_rate === 4 && inst.arp_range === 2 && inst.arp_vel === 30,
+      "saved: Arp, Pedal, Strum 30, Vel Follow, 50%, Follow Off, Rate 1/16, 2 Oct, Vel Range 30%: " + JSON.stringify(inst));
 
 /* ---- An item: Pattern Up-Down and Chance 50% from bar 2 ---- */
 jog(1); click();              /* Var again */
 press(C.MoveRow2);
 jog(5); click();              /* + Add: a new item */
-/* Bar Beat Sound Octave Follow Voicing Pattern(6) Rate Inversion Gap Velocity VelFollow Chance(12) */
+/* Bar Beat Sound Octave Follow Voicing Pattern(6) Rate Range VelRange Inversion Gap Velocity VelFollow Chance(14) */
 jog(6); click(); jog(3); click();
-jog(6); click(); jog(10); click();
+jog(8); click(); jog(10); click();
 back(); back();
 const items = (saved().sections[0].inst || [])[0] || [];
 check(items.length === 1 && items[0].pattern === 2 && items[0].chance === 50,

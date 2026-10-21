@@ -283,6 +283,99 @@ int main(int argc, char **argv) {
     CHECK(down16 && even16, "Arp Down at 1/16: A F# D A... every 60 ticks");
     CHECK(all_released(2), "arp 1/16: every note released");
 
+    /* ---- Run 6: Random arp around its base; Pedal over two octaves ----
+     * D held 4 bars, both arps at 1/16 (60 ticks) on the chord grid.
+     * Inst 1: Random, Chance 50%, Vel Range 40%, velocity 100: it starts on
+     * the base D3 50, every D3 plays at 100 and is never skipped, and the
+     * others are skipped about half the time and play at 60-90. Inst 2:
+     * Pedal, Range 2: D3 under each of F#3 A3 D4 F#4 A4 in turn. */
+    snprintf(json, sizeof(json),
+        "{\"source_folder\":\"%s\",\"name\":\"T\",\"tempo_bpm\":120,"
+        "\"time_sig_num\":4,\"time_sig_den\":4,\"sections\":["
+        "{\"name\":\"A\",\"clips\":[" CLIP "],"
+        "\"chords\":[{\"root\":\"D\",\"quality\":\"maj\",\"bass\":\"\"}]}"
+        "],\"instruments\":["
+        "{\"enabled\":true,\"output\":\"schwung\",\"channel\":2,\"octave\":3,\"follow_note\":0,"
+        "\"voicing\":\"arp\",\"inversion\":0,\"note_gap\":0.125,\"pattern\":3,\"arp_rate\":4,"
+        "\"chance\":50,\"arp_vel\":40,\"velocity\":100},"
+        "{\"enabled\":true,\"output\":\"schwung\",\"channel\":3,\"octave\":3,\"follow_note\":0,"
+        "\"voicing\":\"arp\",\"inversion\":0,\"note_gap\":0.125,\"pattern\":7,\"arp_rate\":4,\"arp_range\":2}"
+        "]}", folder);
+    CHECK(play_song(api, inst, json, 3000), "run 6 published");
+    na = note_ons(1, an, av, at, 256);
+    int bases = 0, base_vel_ok = 1, other = 0, other_vel_ok = 1;
+    for (int i = 0; i < na; i++) {
+        if (an[i] == 50) { bases++; if (av[i] != 100) base_vel_ok = 0; }
+        else { other++; if (av[i] < 60 || av[i] > 90) other_vel_ok = 0; }
+    }
+    printf("info: random arp: %d notes (%d base, %d other) of 64 steps\n", na, bases, other);
+    CHECK(na > 0 && an[0] == 50 && at[0] < 4 && av[0] == 100, "Random starts on the base, D3, at full velocity");
+    CHECK(base_vel_ok, "the base always at full velocity");
+    CHECK(other > 0 && other_vel_ok, "the other notes quieter: 60-90 with Vel Range 40%");
+    CHECK(na < 64, "Chance skips some of the other notes");
+    bn = note_ons(2, an, NULL, NULL, 256);
+    const int pedal[10] = { 50, 54, 50, 57, 50, 62, 50, 66, 50, 69 };
+    int ped_ok = bn >= 20;
+    for (int i = 0; i < bn && i < 20; i++) if (an[i] != pedal[i % 10]) ped_ok = 0;
+    CHECK(ped_ok, "Pedal over two octaves: D3 F#3 D3 A3 D3 D4 D3 F#4 D3 A4 ...");
+    CHECK(all_released(1) && all_released(2), "run 6: every note released");
+
+    /* ---- Run 7: Alberti and Converge; Shuffle rounds ---- */
+    snprintf(json, sizeof(json),
+        "{\"source_folder\":\"%s\",\"name\":\"T\",\"tempo_bpm\":120,"
+        "\"time_sig_num\":4,\"time_sig_den\":4,\"sections\":["
+        "{\"name\":\"A\",\"clips\":[" CLIP "],"
+        "\"chords\":[{\"root\":\"D\",\"quality\":\"maj\",\"bass\":\"\"}]}"
+        "],\"instruments\":["
+        "{\"enabled\":true,\"output\":\"schwung\",\"channel\":2,\"octave\":3,\"follow_note\":0,"
+        "\"voicing\":\"arp\",\"inversion\":0,\"note_gap\":0.125,\"pattern\":6,\"arp_rate\":4},"
+        "{\"enabled\":true,\"output\":\"schwung\",\"channel\":3,\"octave\":3,\"follow_note\":0,"
+        "\"voicing\":\"arp\",\"inversion\":0,\"note_gap\":0.125,\"pattern\":8,\"arp_rate\":4,\"arp_range\":2}"
+        "]}", folder);
+    CHECK(play_song(api, inst, json, 3000), "run 7 published");
+    na = note_ons(1, an, NULL, NULL, 256);
+    const int alb[4] = { 50, 57, 54, 57 };
+    int alb_ok = na >= 16;
+    for (int i = 0; i < na && i < 16; i++) if (an[i] != alb[i % 4]) alb_ok = 0;
+    CHECK(alb_ok, "Alberti: D A F# A ...");
+    bn = note_ons(2, an, NULL, NULL, 256);
+    const int conv[6] = { 50, 69, 54, 66, 57, 62 };
+    int conv_ok = bn >= 12;
+    for (int i = 0; i < bn && i < 12; i++) if (an[i] != conv[i % 6]) conv_ok = 0;
+    CHECK(conv_ok, "Converge over two octaves: D3 A4 F#3 F#4 A3 D4 ...");
+
+    snprintf(json, sizeof(json),
+        "{\"source_folder\":\"%s\",\"name\":\"T\",\"tempo_bpm\":120,"
+        "\"time_sig_num\":4,\"time_sig_den\":4,\"sections\":["
+        "{\"name\":\"A\",\"clips\":[" CLIP "],"
+        "\"chords\":[{\"root\":\"D\",\"quality\":\"maj\",\"bass\":\"\"}]}"
+        "],\"instruments\":["
+        "{\"enabled\":true,\"output\":\"schwung\",\"channel\":2,\"octave\":3,\"follow_note\":0,"
+        "\"voicing\":\"arp\",\"inversion\":0,\"note_gap\":0.125,\"pattern\":5,\"arp_rate\":4,\"arp_range\":2},"
+        "{\"enabled\":true,\"output\":\"schwung\",\"channel\":3,\"octave\":2,\"follow_note\":36,"
+        "\"voicing\":\"bass\",\"note_gap\":0.125,\"pattern\":7}"
+        "]}", folder);
+    CHECK(play_song(api, inst, json, 3000), "run 8 published");
+    na = note_ons(1, an, NULL, NULL, 256);
+    int shuf_ok = na >= 24 && an[0] == 50, varied = 0;
+    for (int r = 0; r + 6 <= na && r < 24; r += 6) {
+        int seen = 0;
+        for (int i = r; i < r + 6; i++) {
+            int bit = an[i] == 50 ? 0 : an[i] == 54 ? 1 : an[i] == 57 ? 2 : an[i] == 62 ? 3 : an[i] == 66 ? 4 : an[i] == 69 ? 5 : 6;
+            seen |= 1 << bit;
+            if (r > 0 && an[i] != an[i - 6]) varied = 1;
+        }
+        if (seen != 0x3F) shuf_ok = 0;
+    }
+    CHECK(shuf_ok, "Shuffle: each round of six plays every tone once, the first starting on the base");
+    CHECK(varied, "...in a different order from round to round");
+    bn = note_ons(2, an, NULL, NULL, 256);
+    const int boogie[8] = { 38, 42, 45, 47, 48, 47, 45, 42 };   /* D2 F#2 A2 B2 C3 B2 A2 F#2 */
+    int boo_ok = bn >= 8;
+    for (int i = 0; i < bn; i++) if (an[i] != boogie[i % 8]) boo_ok = 0;
+    CHECK(boo_ok, "Boogie bass on the kicks: 1 3 5 6 b7 6 5 3");
+    CHECK(all_released(1) && all_released(2), "runs 7-8: every note released");
+
     api->destroy_instance(inst);
     if (g_failures == 0) printf("\nALL TESTS PASSED\n");
     else printf("\n%d TEST(S) FAILED\n", g_failures);

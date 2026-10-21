@@ -300,6 +300,8 @@ typedef struct {
     int8_t chance;
     int8_t vel_follow;
     int8_t arp_rate;
+    int8_t arp_range;
+    int8_t arp_vel;
 } inst_item_t;
 
 /* An instrument track: emits chord-derived notes on its own output/channel. */
@@ -339,6 +341,10 @@ typedef struct {
     /* Arp with Follow Note Off: steps per beat (1 = 1/4, 2 = 1/8, 3 = 1/8T,
      * 4 = 1/16, 6 = 1/16T); 0 = the default, 1/8. See service_arp_rate. */
     uint8_t arp_rate;
+    /* Arp: octaves its tones span (1-3; 0 = 1), and Vel Range -- how much
+     * quieter (up to, %) its non-base notes play, at random; 0 = off. */
+    uint8_t arp_range;
+    uint8_t arp_vel;
     /* Per-section per-bar on/off map: 1 = send, 0 = muted. */
     uint8_t bars[MAX_SONG_SECTIONS][MAX_SECTION_BARS];
     /* Sparse per-bar overrides of octave/follow_note/voicing/inversion. */
@@ -368,7 +374,7 @@ typedef struct {
     uint8_t inversion;
     double note_gap;
     uint8_t velocity;        /* 0 = the default -- see voice_velocity */
-    uint8_t pattern, approach, strum_ms, strum_dir, chance, vel_follow, arp_rate; /* see instrument_t */
+    uint8_t pattern, approach, strum_ms, strum_dir, chance, vel_follow, arp_rate, arp_range, arp_vel; /* see instrument_t */
     /* What the attack that this voice was stored for ACTUALLY played (set by
      * instrument_attack), so its note-off releases exactly those notes:
      * a pattern, an arpeggio or an approach note is not a function of the
@@ -394,6 +400,8 @@ typedef struct {
     uint8_t strum_flip;      /* Alternating strum: which way the next one goes */
     uint32_t approach_end;   /* the change an approach note is leading into; 0 = none */
     uint32_t arp_next;       /* Arp on the chord grid: the next step's tick; 0 = not running */
+    uint8_t shuffle[12];     /* Shuffle arp: this round's order */
+    uint8_t shuffle_len;
 } inst_play_t;
 
 static int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
@@ -435,6 +443,8 @@ static void inst_voice_from(const instrument_t *inst, inst_voice_t *out) {
     out->chance = inst->chance;
     out->vel_follow = inst->vel_follow;
     out->arp_rate = inst->arp_rate;
+    out->arp_range = inst->arp_range;
+    out->arp_vel = inst->arp_vel;
     out->played_valid = 0;
     out->played_n = 0;
     out->played_sent = 0;
@@ -2603,59 +2613,142 @@ static uint32_t rng_next(engine_t *e) {
     return x;
 }
 
-/* A chord's fifth, as an interval above its root: every quality lists root,
- * third, fifth first (a diminished or augmented fifth included). */
-static int chord_fifth_interval(const char *quality) {
+/* A chord tone of `ch` placed at or above note `b`: the chord's interval
+ * `iv` from its root, in the octave starting at b (b itself if it IS that
+ * tone -- callers that need it above add the octave). */
+static int tone_above(int b, const chord_t *ch, int iv) {
+    int root_pc = note_name_semitone(ch->root);
+    if (root_pc < 0) root_pc = 0;
+    int pc = (root_pc + iv) % 12;
+    return b + ((pc - b) % 12 + 12) % 12;
+}
+
+/* Bass patterns, as steps from the bass note b (k = attacks since the chord
+ * changed). Third and fifth are the chord's own (a minor chord's minor
+ * third, a diminished fifth), placed above b. */
+static int bass_pattern_note(const chord_t *ch, int b, int pattern, uint32_t k) {
     int raw[4];
-    int n = chord_quality_intervals(quality, raw, 4);
-    return n >= 3 ? raw[2] : 7;
+    int n = chord_quality_intervals(ch->quality, raw, 4);
+    int third_iv = n >= 2 ? raw[1] : 4, fifth_iv = n >= 3 ? raw[2] : 7;
+    int third = tone_above(b, ch, third_iv), fifth = tone_above(b, ch, fifth_iv);
+    if (third == b) third += 12;
+    if (fifth == b) fifth += 12;   /* a slash bass on the fifth: its octave */
+    switch (pattern) {
+        case 1: return (k % 2) ? fifth : b;                                   /* Root/5th */
+        case 2: return (k % 2) ? b + 12 : b;                                  /* Root/Oct */
+        case 3: { const int s4[4] = { b, fifth, b + 12, fifth }; return s4[k % 4]; }
+        case 4: return (k % 2) ? fifth - 12 : b;                              /* Country: the 5th below */
+        case 5: { const int s4[4] = { b, third, fifth, third }; return s4[k % 4]; }
+        case 6: { const int s4[4] = { b, third, fifth, b + 12 }; return s4[k % 4]; }
+        case 7: {                                                             /* Boogie: 1 3 5 6 b7 6 5 3 */
+            const int s8[8] = { b, third, fifth, b + 9, b + 10, b + 9, fifth, third };
+            return s8[k % 8];
+        }
+        default: return b;
+    }
+}
+
+/* The Arp's note for step k of `pattern` over `tones` (ascending, nt of
+ * them, Range octaves deep). notes/n are the voiced chord in its base
+ * octave (Alberti and 1-5-8-10 shape only that). The random patterns start
+ * each chord on the base note. */
+static int arp_pattern_note(engine_t *e, inst_play_t *ps, const chord_t *ch, int pattern, uint32_t k,
+                            const int *tones, int nt, const int *notes, int n) {
+    int idx = 0;
+    switch (pattern) {
+        case 1: idx = nt - 1 - (int)(k % (uint32_t)nt); break;                       /* Down */
+        case 2: {                                                                    /* Up-Down */
+            int per = nt > 1 ? 2 * nt - 2 : 1;
+            int j = (int)(k % (uint32_t)per);
+            idx = j < nt ? j : per - j;
+            break;
+        }
+        case 3:                                                                      /* Random */
+            if (k == 0 || nt < 2) { idx = 0; break; }
+            idx = (int)(rng_next(e) % (uint32_t)nt);
+            if (idx == ps->last_arp) idx = (idx + 1 + (int)(rng_next(e) % (uint32_t)(nt - 1))) % nt;
+            break;
+        case 4: {                                                                    /* Rnd Walk */
+            if (k == 0 || nt < 2 || ps->last_arp < 0) { idx = 0; break; }
+            int dir = (rng_next(e) & 1) ? 1 : -1;
+            idx = ps->last_arp + dir;
+            if (idx < 0) idx = 1;
+            if (idx >= nt) idx = nt - 2;
+            break;
+        }
+        case 5: {                                                                    /* Shuffle */
+            int p = (int)(k % (uint32_t)nt);
+            if (p == 0 || ps->shuffle_len != nt) {
+                for (int i = 0; i < nt; i++) ps->shuffle[i] = (uint8_t)i;
+                for (int i = nt - 1; i > 0; i--) {
+                    int j = (int)(rng_next(e) % (uint32_t)(i + 1));
+                    uint8_t t = ps->shuffle[i]; ps->shuffle[i] = ps->shuffle[j]; ps->shuffle[j] = t;
+                }
+                if (k == 0) {   /* the chord's first round starts on the base */
+                    for (int i = 0; i < nt; i++) if (ps->shuffle[i] == 0) { ps->shuffle[i] = ps->shuffle[0]; ps->shuffle[0] = 0; }
+                }
+                ps->shuffle_len = (uint8_t)nt;
+            }
+            idx = ps->shuffle[p];
+            break;
+        }
+        case 6: {                                                                    /* Alberti: low high mid high */
+            int hi = n >= 3 ? 2 : n - 1, mid = n >= 2 ? 1 : 0;
+            const int s4[4] = { 0, hi, mid, hi };
+            return notes[s4[k % 4]];
+        }
+        case 7:                                                                      /* Pedal: base between each */
+            if (nt < 2 || k % 2 == 0) { idx = 0; break; }
+            idx = 1 + (int)((k / 2) % (uint32_t)(nt - 1));
+            break;
+        case 8: {                                                                    /* Converge: outside in */
+            int j = (int)(k % (uint32_t)nt);
+            idx = (j % 2 == 0) ? j / 2 : nt - 1 - j / 2;
+            break;
+        }
+        case 9: {                                                                    /* 1-5-8-10 */
+            int raw[4];
+            int m = chord_quality_intervals(ch->quality, raw, 4);
+            int r = tone_above(notes[0] - 11, ch, 0);    /* the root, at or below the lowest note */
+            const int s4[4] = { r, r + (m >= 3 ? raw[2] : 7), r + 12, r + 12 + (m >= 2 ? raw[1] : 4) };
+            return s4[k % 4];
+        }
+        default: idx = (int)(k % (uint32_t)nt); break;                               /* Up */
+    }
+    ps->last_arp = (int8_t)idx;
+    return tones[idx];
 }
 
 /* The notes one attack plays for `ch`, into out[] (count returned): the
  * voicing's notes -- and for Bass and Arp the single one the pattern picks
- * at ps->step. Bass patterns move off the bass note to the chord's fifth
- * (above it) and the octave; arpeggios walk the voiced chord tones. */
+ * at ps->step. *is_base is set when that note is the chord's base (the bass
+ * note, or the Arp's lowest): it always plays, at full velocity. */
 static int attack_notes(engine_t *e, const inst_voice_t *v, inst_play_t *ps,
-                        const chord_t *ch, int *out) {
+                        const chord_t *ch, int *out, int *is_base) {
     int notes[4];
     int n = chord_voiced_notes(v, ch, notes);
+    *is_base = 0;
     if (n <= 0) return 0;
     uint32_t k = ps->step;
     if (v->voicing == 0) {
-        int b = notes[0], pick = b;
-        if (v->pattern) {
-            int root_pc = note_name_semitone(ch->root);
-            if (root_pc < 0) root_pc = 0;
-            int fifth_pc = (root_pc + chord_fifth_interval(ch->quality)) % 12;
-            int fifth = b + ((fifth_pc - b) % 12 + 12) % 12;
-            if (fifth == b) fifth += 12;   /* a slash bass on the fifth: its octave */
-            if (v->pattern == 1) pick = (k % 2) ? fifth : b;
-            else if (v->pattern == 2) pick = (k % 2) ? b + 12 : b;
-            else { const int seq[4] = { b, fifth, b + 12, fifth }; pick = seq[k % 4]; }
-        }
+        int pick = v->pattern ? bass_pattern_note(ch, notes[0], v->pattern, k) : notes[0];
         out[0] = clampi(pick, 0, 127);
+        *is_base = pick == notes[0];
         return 1;
     }
     if (v->voicing == 2) {
-        int idx;
-        if (v->pattern == 1) {
-            idx = n - 1 - (int)(k % (uint32_t)n);
-        } else if (v->pattern == 2) {
-            int per = n > 1 ? 2 * n - 2 : 1;
-            int j = (int)(k % (uint32_t)per);
-            idx = j < n ? j : per - j;
-        } else if (v->pattern == 3) {
-            idx = (int)(rng_next(e) % (uint32_t)n);
-            /* Never the same tone twice running: another, at random. */
-            if (n > 1 && idx == ps->last_arp) idx = (idx + 1 + (int)(rng_next(e) % (uint32_t)(n - 1))) % n;
-        } else {
-            idx = (int)(k % (uint32_t)n);
-        }
-        ps->last_arp = (int8_t)idx;
-        out[0] = notes[idx];
+        int range = v->arp_range >= 1 && v->arp_range <= 3 ? v->arp_range : 1;
+        int tones[12], nt = 0;
+        for (int o = 0; o < range; o++)
+            for (int i = 0; i < n && nt < 12; i++) tones[nt++] = notes[i] + 12 * o;
+        int pick = arp_pattern_note(e, ps, ch, v->pattern, k, tones, nt, notes, n);
+        int base = v->pattern == 9 ? tone_above(notes[0] - 11, ch, 0) : tones[0];
+        out[0] = clampi(pick, 0, 127);
+        *is_base = pick == base;
         return 1;
     }
     for (int i = 0; i < n; i++) out[i] = notes[i];
+    *is_base = 1;
     return n;
 }
 
@@ -2681,12 +2774,23 @@ static void instrument_attack(engine_t *e, inst_voice_t *v, inst_play_t *ps,
     }
     ps->last_chord = *ch;
     ps->has_last = 1;
-    int notes[4];
-    int n = attack_notes(e, v, ps, ch, notes);
+    int notes[4], is_base = 0;
+    int n = attack_notes(e, v, ps, ch, notes, &is_base);
     ps->step++;
-    if (v->chance >= 1 && v->chance < 100 && (int)(rng_next(e) % 100u) >= v->chance) {
+    /* An Arp's base note always plays: Chance and Vel Range shape the rest. */
+    int arp_other = v->voicing == 2 && !is_base;
+    if (v->chance >= 1 && v->chance < 100 && (v->voicing != 2 || arp_other) &&
+        (int)(rng_next(e) % 100u) >= v->chance) {
         dsp_log_enqueue_worker("INSTATTACK skipped by chance %d%% tick=%u", v->chance, tick);
         return;
+    }
+    if (arp_other && v->arp_vel > 0) {
+        /* Quieter than the base by a random amount: between a quarter of
+         * Vel Range and all of it. */
+        int lo = v->arp_vel / 4, span = v->arp_vel - lo;
+        int cut = lo + (span > 0 ? (int)(rng_next(e) % (uint32_t)(span + 1)) : 0);
+        vel = (uint8_t)clampi(vel * (100 - cut) / 100, 1, 127);
+        v->played_vel = vel;
     }
     int strum = v->voicing == 1 && v->strum_ms > 0 && n > 1;
     int reverse = 0;
@@ -2843,6 +2947,8 @@ static void resolve_instrument_at(const instrument_t *inst, int section, uint32_
     if (last->chance >= 1) out->chance = (uint8_t)last->chance;
     if (last->vel_follow >= 0) out->vel_follow = (uint8_t)last->vel_follow;
     if (last->arp_rate >= 1) out->arp_rate = (uint8_t)last->arp_rate;
+    if (last->arp_range >= 1) out->arp_range = (uint8_t)last->arp_range;
+    if (last->arp_vel >= 0) out->arp_vel = (uint8_t)last->arp_vel;
 }
 
 /* Song ticks a section spans: its assembled length, or whole bars for a song
@@ -3913,7 +4019,7 @@ static void parse_chords_and_instruments(const char *json, song_t *song) {
                 } else if (strncmp(p + 1, "velocity\"", 9) == 0) {
                     int v; if (json_get_int_at(p, "velocity", &v)) inst->velocity = (uint8_t)(v < 1 ? 1 : (v > 127 ? 127 : v));
                 } else if (strncmp(p + 1, "pattern\"", 8) == 0) {
-                    int v; if (json_get_int_at(p, "pattern", &v)) inst->pattern = (uint8_t)clampi(v, 0, 3);
+                    int v; if (json_get_int_at(p, "pattern", &v)) inst->pattern = (uint8_t)clampi(v, 0, 9);
                 } else if (strncmp(p + 1, "approach\"", 9) == 0) {
                     int v; if (json_get_int_at(p, "approach", &v)) inst->approach = (uint8_t)clampi(v, 0, 3);
                 } else if (strncmp(p + 1, "strum\"", 6) == 0) {
@@ -3928,6 +4034,10 @@ static void parse_chords_and_instruments(const char *json, song_t *song) {
                         inst->vel_follow = (strcmp(v, "true") == 0 || strcmp(v, "1") == 0) ? 1 : 0;
                 } else if (strncmp(p + 1, "arp_rate\"", 9) == 0) {
                     int v; if (json_get_int_at(p, "arp_rate", &v)) inst->arp_rate = (uint8_t)clampi(v, 1, 6);
+                } else if (strncmp(p + 1, "arp_range\"", 10) == 0) {
+                    int v; if (json_get_int_at(p, "arp_range", &v)) inst->arp_range = (uint8_t)clampi(v, 1, 3);
+                } else if (strncmp(p + 1, "arp_vel\"", 8) == 0) {
+                    int v; if (json_get_int_at(p, "arp_vel", &v)) inst->arp_vel = (uint8_t)clampi(v, 0, 90);
                 } else if (strncmp(p + 1, "bars", 4) == 0) {
                     /* "bars": [[1,0,...], [1,1,...], ...] — per-section arrays. */
                     const char *bars_arr = strchr(p + 4, '[');
@@ -4340,7 +4450,7 @@ static void parse_instrument_items(const char *arr, instrument_t *inst) {
                 } else if (strncmp(p + 1, "velocity\"", 9) == 0) {
                     int v; if (json_get_int_at(p, "velocity", &v)) cur.velocity = (int16_t)(v < 1 ? 1 : (v > 127 ? 127 : v));
                 } else if (strncmp(p + 1, "pattern\"", 8) == 0) {
-                    int v; if (json_get_int_at(p, "pattern", &v)) cur.pattern = (int8_t)clampi(v, 0, 3);
+                    int v; if (json_get_int_at(p, "pattern", &v)) cur.pattern = (int8_t)clampi(v, 0, 9);
                 } else if (strncmp(p + 1, "approach\"", 9) == 0) {
                     int v; if (json_get_int_at(p, "approach", &v)) cur.approach = (int8_t)clampi(v, 0, 3);
                 } else if (strncmp(p + 1, "strum\"", 6) == 0) {
@@ -4355,6 +4465,10 @@ static void parse_instrument_items(const char *arr, instrument_t *inst) {
                         cur.vel_follow = (strcmp(v, "true") == 0 || strcmp(v, "1") == 0) ? 1 : 0;
                 } else if (strncmp(p + 1, "arp_rate\"", 9) == 0) {
                     int v; if (json_get_int_at(p, "arp_rate", &v)) cur.arp_rate = (int8_t)clampi(v, 1, 6);
+                } else if (strncmp(p + 1, "arp_range\"", 10) == 0) {
+                    int v; if (json_get_int_at(p, "arp_range", &v)) cur.arp_range = (int8_t)clampi(v, 1, 3);
+                } else if (strncmp(p + 1, "arp_vel\"", 8) == 0) {
+                    int v; if (json_get_int_at(p, "arp_vel", &v)) cur.arp_vel = (int8_t)clampi(v, 0, 90);
                 }
             }
             p++;
@@ -4370,6 +4484,7 @@ static void parse_instrument_items(const char *arr, instrument_t *inst) {
                 cur.velocity = -1;
                 cur.pattern = -1; cur.approach = -1; cur.strum_ms = -1; cur.strum_dir = -1;
                 cur.chance = -1; cur.vel_follow = -1; cur.arp_rate = -1;
+                cur.arp_range = -1; cur.arp_vel = -1;
                 sec = -1; bar = -1; beat = 1.0;
             }
             p++;
@@ -5055,6 +5170,8 @@ static void copy_song_used(song_t *dst, const song_t *src) {
         di->chance = si->chance;
         di->vel_follow = si->vel_follow;
         di->arp_rate = si->arp_rate;
+        di->arp_range = si->arp_range;
+        di->arp_vel = si->arp_vel;
         memcpy(di->bars, si->bars, (size_t)ns * sizeof di->bars[0]);
         di->override_count = si->override_count;
         memcpy(di->overrides, si->overrides,

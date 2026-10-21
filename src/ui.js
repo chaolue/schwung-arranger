@@ -3133,8 +3133,16 @@ export function instrumentVelocity(inst) {
  *   vel_follow  a drum-following attack is as loud as its hit (x velocity/100).
  *   arp_rate    Arp with Follow Note Off: steps per beat, ARP_RATES. */
 export const VOICINGS = ["bass", "chord", "arp"];
-const BASS_PATTERN_LABELS = ["Root", "Root/5th", "Root/Oct", "R-5-O-5"];
-const ARP_PATTERN_LABELS = ["Up", "Down", "Up-Down", "Random"];
+/* Bass: 1 = root, 3/5 = the chord's third/fifth above it, O = its octave;
+ * Country alternates the root with the fifth BELOW; Boogie walks
+ * 1 3 5 6 b7 6 5 3. */
+const BASS_PATTERN_LABELS = ["Root", "Root/5th", "Root/Oct", "R-5-O-5", "Country", "1-3-5-3", "1-3-5-8", "Boogie"];
+/* Arp: Random / Rnd Walk (a step up or down) / Shuffle (every tone once a
+ * round) start each chord on the base; Alberti low-high-mid-high; Pedal the
+ * base between each other tone; Converge outside in; 1-5-8-10 the root's
+ * broken chord. */
+const ARP_PATTERN_LABELS = ["Up", "Down", "Up-Down", "Random", "Rnd Walk", "Shuffle", "Alberti", "Pedal",
+    "Converge", "1-5-8-10"];
 const APPROACH_LABELS = ["Off", "Below", "Above", "Scale"];
 const STRUM_DIR_LABELS = ["Up", "Down", "Alt"];
 const STRUM_MAX_MS = 100;
@@ -3146,8 +3154,13 @@ const VARIETY_ROWS = {
     pattern: { label: "Pattern", voicings: ["bass", "arp"] },
     approach: { label: "Approach", voicings: ["bass"] },
     strum: { label: "Strum", voicings: ["chord"] },
-    strum_dir: { label: "Strum Dir", voicings: ["chord"] }
+    strum_dir: { label: "Strum Dir", voicings: ["chord"] },
+    arp_range: { label: "Range", voicings: ["arp"] },
+    arp_vel: { label: "Vel Range", voicings: ["arp"] }
 };
+
+function arpRangeLabel(r) { return r + " Oct"; }
+function arpVelLabel(v) { return v > 0 ? v + "%" : "Off"; }
 
 function voicingLabel(v) {
     return v === "chord" ? "Chord" : (v === "arp" ? "Arp" : "Bass");
@@ -3159,9 +3172,16 @@ export function stepVoicing(cur, delta) {
     return VOICINGS[Math.max(0, Math.min(VOICINGS.length - 1, i + delta))];
 }
 
+function patternList(voicing) {
+    return voicing === "arp" ? ARP_PATTERN_LABELS : BASS_PATTERN_LABELS;
+}
+
+/* A pattern past the voicing's list (an Arp pattern kept after switching to
+ * Bass) plays its first: the engine does the same. */
 export function patternLabel(voicing, p) {
-    const list = voicing === "arp" ? ARP_PATTERN_LABELS : BASS_PATTERN_LABELS;
-    return list[Math.max(0, Math.min(list.length - 1, p | 0))];
+    const list = patternList(voicing);
+    const i = p | 0;
+    return list[i >= 0 && i < list.length ? i : 0];
 }
 
 function strumLabel(ms) { return ms > 0 ? ms + "ms" : "Off"; }
@@ -3172,13 +3192,15 @@ export function instVariety(inst) {
     const o = inst || {};
     const int = (v, lo, hi, d) => (typeof v === "number" && v >= lo && v <= hi) ? Math.round(v) : d;
     return {
-        pattern: int(o.pattern, 0, 3, 0),
+        pattern: int(o.pattern, 0, ARP_PATTERN_LABELS.length - 1, 0),
         approach: int(o.approach, 0, 3, 0),
         strum: int(o.strum, 0, STRUM_MAX_MS, 0),
         strum_dir: int(o.strum_dir, 0, 2, 0),
         chance: int(o.chance, 1, 100, 100),
         vel_follow: !!o.vel_follow,
-        arp_rate: ARP_RATES.includes(o.arp_rate) ? o.arp_rate : 2
+        arp_rate: ARP_RATES.includes(o.arp_rate) ? o.arp_rate : 2,
+        arp_range: int(o.arp_range, 1, 3, 1),
+        arp_vel: int(o.arp_vel, 0, 90, 0)
     };
 }
 
@@ -3191,7 +3213,12 @@ function instVarietyRows(voicing, key, value) {
 /* Turn an instrument's variety field. */
 function stepInstVariety(inst, key, delta) {
     const v = instVariety(inst);
-    if (key === "pattern") inst.pattern = Math.max(0, Math.min(3, v.pattern + delta));
+    if (key === "pattern") {
+        const max = patternList(inst.voicing || "bass").length - 1;
+        inst.pattern = Math.max(0, Math.min(max, Math.min(max, v.pattern) + delta));
+    }
+    else if (key === "arp_range") inst.arp_range = Math.max(1, Math.min(3, v.arp_range + delta));
+    else if (key === "arp_vel") inst.arp_vel = Math.max(0, Math.min(90, v.arp_vel + delta * 10));
     else if (key === "approach") inst.approach = Math.max(0, Math.min(3, v.approach + delta));
     else if (key === "strum") inst.strum = Math.max(0, Math.min(STRUM_MAX_MS, v.strum + delta * 5));
     else if (key === "strum_dir") inst.strum_dir = Math.max(0, Math.min(2, v.strum_dir + delta));
@@ -3210,7 +3237,7 @@ function arpRateRows(voicing, followNote, value) {
 }
 
 const INST_ITEM_FIELDS = ["mute", "octave", "follow_note", "voicing", "inversion", "note_gap", "velocity",
-    "pattern", "approach", "strum", "strum_dir", "chance", "vel_follow", "arp_rate"];
+    "pattern", "approach", "strum", "strum_dir", "chance", "vel_follow", "arp_rate", "arp_range", "arp_vel"];
 
 /* Turn an instrument's old per-bar mutes (inst.bars) and per-bar overrides
  * (inst.overrides), both indexed by section number, into section items that
@@ -8100,6 +8127,8 @@ function instrumentRows(inst) {
         { key: "voicing", label: "Voicing", value: voicingLabel(voicing) },
         ...instVarietyRows(voicing, "pattern", () => patternLabel(voicing, instVariety(inst).pattern)),
         ...arpRateRows(voicing, inst ? inst.follow_note : 0, () => ARP_RATE_LABELS[instVariety(inst).arp_rate]),
+        ...instVarietyRows(voicing, "arp_range", () => arpRangeLabel(instVariety(inst).arp_range)),
+        ...instVarietyRows(voicing, "arp_vel", () => arpVelLabel(instVariety(inst).arp_vel)),
         ...(voicing !== "bass" ? [{ key: "inversion", label: "Inversion", value: inversionLabel(inst ? inst.inversion : 0) }] : []),
         ...instVarietyRows(voicing, "approach", () => APPROACH_LABELS[instVariety(inst).approach]),
         ...instVarietyRows(voicing, "strum", () => strumLabel(instVariety(inst).strum)),
@@ -8254,6 +8283,8 @@ function itemLabel(track, it) {
         parts.push(patternLabel(it.voicing || (inst ? inst.voicing : "bass"), it.pattern));
     }
     if (typeof it.arp_rate === "number") parts.push(ARP_RATE_LABELS[it.arp_rate] || "");
+    if (typeof it.arp_range === "number") parts.push(arpRangeLabel(it.arp_range));
+    if (typeof it.arp_vel === "number") parts.push("VelRng " + arpVelLabel(it.arp_vel));
     if (typeof it.inversion === "number") parts.push(inversionLabel(it.inversion));
     if (typeof it.approach === "number") parts.push("Appr " + APPROACH_LABELS[it.approach]);
     if (typeof it.strum === "number") parts.push("Strum " + strumLabel(it.strum));
@@ -8537,6 +8568,10 @@ function itemEditRows() {
         const follow = typeof w.follow_note === "number" ? w.follow_note : (inst ? inst.follow_note : 0);
         rows.push(...arpRateRows(voicing, follow, () =>
             itemDefault(w.arp_rate, ARP_RATE_LABELS[iv.arp_rate]) || ARP_RATE_LABELS[w.arp_rate]));
+        rows.push(...instVarietyRows(voicing, "arp_range", () =>
+            itemDefault(w.arp_range, arpRangeLabel(iv.arp_range)) || arpRangeLabel(w.arp_range)));
+        rows.push(...instVarietyRows(voicing, "arp_vel", () =>
+            itemDefault(w.arp_vel, arpVelLabel(iv.arp_vel)) || arpVelLabel(w.arp_vel)));
         if (voicing !== "bass") rows.push({ key: "inversion", label: "Inversion",
             value: itemDefault(w.inversion, inversionLabel(inst ? inst.inversion : 0)) || inversionLabel(w.inversion) });
         rows.push(...instVarietyRows(voicing, "approach", () =>
@@ -8655,7 +8690,16 @@ function handleInstrumentBarMenuInput(cc, value) {
                 const cur = states.indexOf(w.voicing === undefined ? null : w.voicing);
                 w.voicing = states[((cur + delta) % states.length + states.length) % states.length];
             } else if (row.key === "pattern") {
-                w.pattern = cycleOptionalInt(w.pattern, delta, 0, 3);
+                const inst = instrumentForTrack(itemEditTrack);
+                const voicing = w.voicing || (inst ? inst.voicing : "bass") || "bass";
+                w.pattern = cycleOptionalInt(w.pattern, delta, 0, patternList(voicing).length - 1);
+            } else if (row.key === "arp_range") {
+                w.arp_range = cycleOptionalInt(w.arp_range, delta, 1, 3);
+            } else if (row.key === "arp_vel") {
+                /* Default, Off, 10 ... 90%. */
+                const steps = [null, 0, 10, 20, 30, 40, 50, 60, 70, 80, 90];
+                const cur = steps.indexOf(w.arp_vel === undefined ? null : w.arp_vel);
+                w.arp_vel = steps[Math.max(0, Math.min(steps.length - 1, (cur < 0 ? 0 : cur) + delta))];
             } else if (row.key === "approach") {
                 w.approach = cycleOptionalInt(w.approach, delta, 0, 3);
             } else if (row.key === "arp_rate") {
