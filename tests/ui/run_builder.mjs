@@ -55,6 +55,11 @@ function root(row) { jog(-8); jog(row); }
 const hints = () => JSON.stringify(M.footerHints());
 const has = (pair) => M.footerHints().some(p => p[0] === pair[0] && p[1] === pair[1]);
 const clk = () => { const p = M.footerHints().find(p => p[0] === "CLK"); return p ? p[1] : null; };
+/* Track 1 steps Drum -> Chord -> Pads; each one's footer names the next. */
+function goTrack(want) {
+    const next = want === "chord" ? "PADS" : want === "pads" ? "DRUM" : "CHORD";
+    for (let i = 0; i < 4 && !has(["T1", next]); i++) press(C.MoveRow1);
+}
 
 g.init();
 tick(3);
@@ -182,7 +187,7 @@ H.files.set(SONGS + "/multi.json", song("Multi", { sections: [
     sec("Verse", 2, [{ root: "A", quality: "min" }]),
     sec("Chorus 2", 1, [{ root: "F", quality: "maj" }])] }));
 jog(-8); jog(3); click();
-if (!has(["T1", "DRUM"])) press(C.MoveRow1);    /* the Chord track */
+goTrack("chord");
 press(C.MoveLoop);
 jog(1); click();              /* tick Verse */
 jog(1); click();              /* untick Chorus 2 */
@@ -198,7 +203,7 @@ H.files.set(SONGS + "/multi.json", song("Multi", { sections: [
     sec("Verse", 2, [{ root: "A", quality: "min" }]),
     sec("Chorus 2", 1, [{ root: "F", quality: "maj" }])] }));
 jog(-8); jog(3); click();
-if (!has(["T1", "DRUM"])) press(C.MoveRow1);
+goTrack("chord");
 press(C.MoveLoop); jog(1); click(); back(); back();
 multi = JSON.parse(H.files.get(SONGS + "/multi.json"));
 check(ch(1) === '["A"]' && ch(2) === '["F"]', "Back copies nothing: " + ch(1) + " " + ch(2));
@@ -207,7 +212,7 @@ check(JSON.stringify(M.sameNamedSections(S, 0)) === "[1]", "same-named ignores c
 
 /* ---- deleting a drum clip in a section with chords leaves a placeholder ---- */
 jog(-8); jog(4); click();     /* Chorded, section A */
-if (has(["T1", "DRUM"])) press(C.MoveRow1);    /* the Drum track */
+goTrack("drum");
 jog(-8); jog(2);              /* clip 2 */
 press(C.MoveDelete);
 check(H.printed.includes("(empty)") && H.printed.includes("g3"), "Delete leaves (empty) in its place: " + JSON.stringify(H.printed));
@@ -242,7 +247,7 @@ check(M.toUiSong({ name: "P", sections: [{ name: "A", clips: [ph] }] }).sections
 
 /* ---- a clip added from a pad comes from the folder the pads show ---- */
 jog(-8); jog(5); click();     /* Kit (folder 11 Disco, the library's 2nd) */
-if (has(["T1", "DRUM"])) press(C.MoveRow1);
+goTrack("drum");
 const pads = (await import('./shared/constants.mjs')).MovePads;
 for (let p = 0; p < 32; p++) {   /* the first pad with a clip: tap it */
     g.onMidiMessageInternal([0x90, pads[p], 100]); tick(1);

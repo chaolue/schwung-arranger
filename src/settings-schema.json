@@ -51,6 +51,62 @@
             "default": 1
         },
         {
+            "key": "inst3_output",
+            "label": "Pads MIDI Output",
+            "type": "enum",
+            "options": ["External", "Move", "Schwung"],
+            "values": ["external", "move", "schwung"],
+            "default": "external"
+        },
+        {
+            "key": "inst3_channel",
+            "label": "Pads MIDI Channel",
+            "type": "int",
+            "min": 1,
+            "max": 16,
+            "default": 1
+        },
+        {
+            "key": "keys_output",
+            "label": "Keys MIDI Output",
+            "type": "enum",
+            "options": ["External", "Move", "Schwung"],
+            "values": ["external", "move", "schwung"],
+            "default": "schwung"
+        },
+        {
+            "key": "keys_channel",
+            "label": "Keys MIDI Channel",
+            "type": "int",
+            "min": 1,
+            "max": 16,
+            "default": 1
+        },
+        {
+            "key": "keys_layout",
+            "label": "Keys Layout",
+            "type": "enum",
+            "options": ["In Key 4ths", "In Key 3rds", "In Key Seq", "Chromatic 4ths", "Chromatic 3rds", "Chromatic Seq"],
+            "values": [0, 1, 2, 3, 4, 5],
+            "default": 0
+        },
+        {
+            "key": "keys_scale",
+            "label": "Keys Scale",
+            "type": "enum",
+            "options": ["Major", "Minor", "Dorian", "Mixolydian", "Major Pentatonic", "Minor Pentatonic", "Blues"],
+            "values": [0, 1, 2, 3, 4, 5, 6],
+            "default": 0
+        },
+        {
+            "key": "keys_octave",
+            "label": "Keys Octave",
+            "type": "int",
+            "min": -1,
+            "max": 8,
+            "default": 3
+        },
+        {
             "key": "click_output",
             "label": "Click Output",
             "type": "enum",

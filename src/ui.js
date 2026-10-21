@@ -130,6 +130,7 @@ const VIEW_PERFORMANCE = "performance_view";
 const VIEW_OPTIONS = "options";
 const VIEW_OPTIONS_DRUMS = "options_drums";
 const VIEW_OPTIONS_INST = "options_inst";
+const VIEW_OPTIONS_KEYS = "options_keys";
 const VIEW_OPTIONS_CLICK = "options_click";
 const VIEW_OPTIONS_CHAINS = "options_chains";
 const VIEW_KNOB_MAP = "knob_map";
@@ -177,8 +178,19 @@ const TRACK_INSTRUMENT_2 = 3;
  * toggles between them), Track 2 = Inst 1, Track 3 = Inst 2. Track 4 is the
  * click on/off in every mode -- see toggleClick. */
 const TRACK_CLICK = 4;
-const TRACK_ROW_CC = [MoveRow1, MoveRow1, MoveRow2, MoveRow3, MoveRow4];
-const TRACK_ROW_COLOUR = [White, AzureBlue, BrightYellow, Purple, 3 /* Bright Orange, CLICK_ROW_COLOUR */];
+/* Pads: a third instrument that only follows the chords (chord voicing on
+ * the chord grid -- no Follow Note, no patterns). Reached from Track 1,
+ * which steps Drum -> Chord -> Pads, since it plays the Chord track; Shift +
+ * Track 1 on it turns it on or off. */
+const TRACK_PADS = 5;
+const TRACK_ROW_CC = [MoveRow1, MoveRow1, MoveRow2, MoveRow3, MoveRow4, MoveRow1];
+const TRACK_ROW_COLOUR = [White, AzureBlue, BrightYellow, Purple, 3 /* Bright Orange, CLICK_ROW_COLOUR */,
+    12 /* Teal Green */];
+/* The song's instruments, in order: song.instruments[i] / sec.inst[i]. */
+const INST_TRACKS = [TRACK_INSTRUMENT_1, TRACK_INSTRUMENT_2, TRACK_PADS];
+const INST_TRACK_NAMES = ["Inst 1", "Inst 2", "Pads"];
+function instIndex(track) { return INST_TRACKS.indexOf(track); }
+function isInstTrack(track) { return instIndex(track) >= 0; }
 const CLICK_ROW_COLOUR = 3; /* Bright Orange */
 
 /* The 12 major keys, in chromatic order. Each entry is the tonic note name. */
@@ -343,6 +355,14 @@ let inst1Output = "external";
 let inst1Channel = 1;
 let inst2Output = "external";
 let inst2Channel = 1;
+/* Pads (Inst 3) and Keys (Perform/Jam's playable pads) routing. */
+let inst3Output = "external";
+let inst3Channel = 1;
+let keysOutput = "schwung";
+let keysChannel = 1;
+let keysLayout = 0;          /* index into KEYS_LAYOUTS */
+let keysScale = 0;           /* index into KEYS_SCALES */
+let keysStartOctave = 3;     /* the bottom-left pad's octave when Keys turn on */
 let dspDirectEmit = false;
 let pendingSongJson = null;
 let dspTimelineInfo = null;
@@ -553,7 +573,8 @@ function chainViewPlayingView() {
 function chainViewKeepsButton(cc) {
     if (isTrackCc(cc) || cc === MoveMenu || cc === MoveShift || cc === MovePlay) return true;
     return chainViewPlayingView() &&
-        (cc === MoveRec || cc === MoveUp || cc === MoveDown || cc === MoveLeft || cc === MoveRight);
+        (cc === MoveRec || cc === MoveUp || cc === MoveDown || cc === MoveLeft || cc === MoveRight ||
+         cc === MoveCapture);
 }
 
 /* Pads/steps whose press was dropped: their release is dropped too, even if
@@ -2264,6 +2285,7 @@ let lastSubFlashMs = 0;       /* wall-clock anchor of the current sub-beat flash
 let perfDrumEnabled = true;
 let perfInst1Enabled = true;
 let perfInst2Enabled = true;
+let perfInst3Enabled = true;   /* Pads: Shift + Track 1 */
 
 /* Performance / setlist playback state */
 let perfPlaying = false;            /* is the setlist advancing on its own */
@@ -2456,7 +2478,7 @@ const PAD_PREVIEW_DELAY_MS = 250; /* delay before pad tap triggers insert previe
  * Setlist / clip names that overflow the row width. */
 const SCROLLABLE_MENU_VIEWS = new Set([
     VIEW_ROOT, VIEW_FOLDER_LIST, VIEW_BUILDER, VIEW_TRIM, VIEW_SONG_SETTINGS, VIEW_SONG_BACKUPS,
-    VIEW_SONG_BANK, VIEW_OPTIONS, VIEW_OPTIONS_DRUMS, VIEW_OPTIONS_INST, VIEW_OPTIONS_CLICK, VIEW_OPTIONS_CHAINS,
+    VIEW_SONG_BANK, VIEW_OPTIONS, VIEW_OPTIONS_DRUMS, VIEW_OPTIONS_INST, VIEW_OPTIONS_KEYS, VIEW_OPTIONS_CLICK, VIEW_OPTIONS_CHAINS,
     VIEW_SETLIST_BANK, VIEW_SETLIST_EDIT,
     VIEW_SETLIST_PICK, VIEW_SETLIST_CLICK, VIEW_SETLIST_SECTIONS, VIEW_SETLIST_SECTION_PICK, VIEW_COPY_TRACK_PICK,
     VIEW_PERF_SETLIST, VIEW_PERFORMANCE,
@@ -3102,7 +3124,7 @@ export function sectionItems(sec, track) {
         if (!Array.isArray(sec.click)) sec.click = [];
         return sec.click;
     }
-    const k = track === TRACK_INSTRUMENT_2 ? 1 : 0;
+    const k = Math.max(0, instIndex(track));
     if (!Array.isArray(sec.inst)) sec.inst = [];
     if (!Array.isArray(sec.inst[k])) sec.inst[k] = [];
     return sec.inst[k];
@@ -3373,28 +3395,36 @@ function transposeSongChords(song, oldKey, newKey) {
 
 /* ── Instrument track helpers ───────────────────────────────────────── */
 
-/* The instrument config for a track index (TRACK_INSTRUMENT_1 or _2). */
+/* The instrument config for an instrument track (Inst 1, Inst 2, Pads). */
 function instrumentForTrack(track) {
     if (!currentSong) return null;
     if (!currentSong.instruments) currentSong.instruments = [];
-    const idx = track - TRACK_INSTRUMENT_1;
-    if (idx < 0 || idx > 1) return null;
-    if (!currentSong.instruments[idx]) {
-        currentSong.instruments[idx] = {
-            enabled: false,
-            octave: 3,
-            follow_note: 0,
-            voicing: "bass",
-            inversion: INVERSION_AUTO,
-            note_gap: 0.25,
-            velocity: 100,
-            bars: [],
-            overrides: []
-        };
+    const idx = instIndex(track);
+    if (idx < 0) return null;
+    /* Never a gap: a song saved with Pads but no Inst 1/2 still lists them. */
+    for (let k = 0; k <= idx; k++) {
+        if (!currentSong.instruments[k]) currentSong.instruments[k] = defaultInstrument(k);
     }
     if (!currentSong.instruments[idx].overrides) currentSong.instruments[idx].overrides = [];
     if (typeof currentSong.instruments[idx].inversion !== "number") currentSong.instruments[idx].inversion = INVERSION_AUTO;
     return currentSong.instruments[idx];
+}
+
+/* A new song's instrument `idx`: Inst 1/2 as they always were; Pads a
+ * chord an octave up, voice-led (Auto), off until switched on. */
+export function defaultInstrument(idx) {
+    const pads = idx === 2;
+    return {
+        enabled: false,
+        octave: pads ? 4 : 3,
+        follow_note: 0,
+        voicing: pads ? "chord" : "bass",
+        inversion: INVERSION_AUTO,
+        note_gap: pads ? 0.125 : 0.25,
+        velocity: pads ? 80 : 100,
+        bars: [],
+        overrides: []
+    };
 }
 
 /* "Play from section N"/"play from cursor" build a temporary song whose
@@ -3542,11 +3572,12 @@ export function toEngineSongJson(song) {
     const instrumentsOut = [];
     const instGlobals = [
         { output: inst1Output, channel: inst1Channel },
-        { output: inst2Output, channel: inst2Channel }
+        { output: inst2Output, channel: inst2Channel },
+        { output: inst3Output, channel: inst3Channel }
     ];
     const instList = song.instruments || [];
     for (let i = 0; i < instList.length; i++) {
-        const inst = instList[i];
+        const inst = instList[i] || defaultInstrument(i);
         const g = instGlobals[i] || instGlobals[0];
         /* Settings changes by position, from each section's items (see
          * sectionItems); the engine then ignores bars/overrides below. */
@@ -3566,8 +3597,9 @@ export function toEngineSongJson(song) {
             output: g.output || "external",
             channel: (typeof g.channel === "number" && g.channel >= 1 && g.channel <= 16) ? g.channel : 1,
             octave: (typeof inst.octave === "number") ? inst.octave : 3,
-            follow_note: (typeof inst.follow_note === "number") ? inst.follow_note : 0,
-            voicing: inst.voicing || "bass",
+            /* Pads (the third) are always a chord on the chord grid. */
+            follow_note: i === 2 ? 0 : (typeof inst.follow_note === "number") ? inst.follow_note : 0,
+            voicing: i === 2 ? "chord" : (inst.voicing || "bass"),
             /* Full-chord inversion (voicing "chord" only): 0 = root position,
              * 1/2/3 = first/second/third inversion. Meaningless for "bass"
              * voicing, but still carried so switching a bar back to "chord"
@@ -3696,7 +3728,7 @@ export function toUiSong(engineLike) {
                 };
             })
         })),
-        instruments: (s.instruments || []).map(inst => ({
+        instruments: (s.instruments || []).map((inst, i) => inst || defaultInstrument(i)).map(inst => ({
             enabled: !!inst.enabled,
             octave: (typeof inst.octave === "number") ? inst.octave : 3,
             follow_note: (typeof inst.follow_note === "number") ? inst.follow_note : 0,
@@ -3993,6 +4025,20 @@ function loadSettings() {
     if (typeof i2o === "string") inst2Output = i2o;
     const i2c = pick("inst2_channel", "number");
     if (typeof i2c === "number") inst2Channel = i2c;
+    const i3o = pick("inst3_output", "string");
+    if (typeof i3o === "string") inst3Output = i3o;
+    const i3c = pick("inst3_channel", "number");
+    if (typeof i3c === "number") inst3Channel = i3c;
+    const ko = pick("keys_output", "string");
+    if (typeof ko === "string") keysOutput = ko;
+    const kc = pick("keys_channel", "number");
+    if (typeof kc === "number") keysChannel = kc;
+    const kl = pick("keys_layout", "number");
+    if (typeof kl === "number") keysLayout = kl;
+    const ksc = pick("keys_scale", "number");
+    if (typeof ksc === "number") keysScale = ksc;
+    const koc = pick("keys_octave", "number");
+    if (typeof koc === "number") keysStartOctave = koc;
     if (outputChannel < 1) outputChannel = 1;
     if (outputChannel > 16) outputChannel = 16;
     if (moveChannel < 1) moveChannel = 1;
@@ -4013,6 +4059,14 @@ function loadSettings() {
     if (inst2Channel > 16) inst2Channel = 16;
     if (OUTPUT_TARGETS.indexOf(inst1Output) < 0) inst1Output = "external";
     if (OUTPUT_TARGETS.indexOf(inst2Output) < 0) inst2Output = "external";
+    inst3Channel = Math.max(1, Math.min(16, Math.round(inst3Channel) || 1));
+    if (OUTPUT_TARGETS.indexOf(inst3Output) < 0) inst3Output = "external";
+    keysChannel = Math.max(1, Math.min(16, Math.round(keysChannel) || 1));
+    if (OUTPUT_TARGETS.indexOf(keysOutput) < 0) keysOutput = "schwung";
+    keysLayout = Math.max(0, Math.min(KEYS_LAYOUTS.length - 1, Math.round(keysLayout) || 0));
+    keysScale = Math.max(0, Math.min(KEYS_SCALES.length - 1, Math.round(keysScale) || 0));
+    keysStartOctave = Math.max(-1, Math.min(8, Math.round(keysStartOctave)));
+    if (!Number.isFinite(keysStartOctave)) keysStartOctave = 3;
     selectedOutputIndex = OUTPUT_TARGETS.indexOf(outputTarget);
     if (selectedOutputIndex < 0) selectedOutputIndex = 0;
 }
@@ -4075,7 +4129,14 @@ function saveOutputSettings() {
         inst1_output: inst1Output,
         inst1_channel: inst1Channel,
         inst2_output: inst2Output,
-        inst2_channel: inst2Channel
+        inst2_channel: inst2Channel,
+        inst3_output: inst3Output,
+        inst3_channel: inst3Channel,
+        keys_output: keysOutput,
+        keys_channel: keysChannel,
+        keys_layout: keysLayout,
+        keys_scale: keysScale,
+        keys_octave: keysStartOctave
     };
     /* Keep the legacy file for backwards compatibility. */
     writeJson(SETTINGS_PATH, values);
@@ -4530,10 +4591,10 @@ function deleteSetlist(setlist) {
  * (Inst 2's once-per-bar default played it every bar) -- found live, where
  * it looked like Perform's Inst 2 mute not working. */
 function pushLiveMutesToDsp(set, t) {
-    let drums = true, inst1 = true, inst2 = true;
+    let drums = true, inst1 = true, inst2 = true, inst3 = true;
     let jamInst1 = false, jamInst2 = false;
     if (currentMode === MODE_PERFORMANCE) {
-        drums = perfDrumEnabled; inst1 = perfInst1Enabled; inst2 = perfInst2Enabled;
+        drums = perfDrumEnabled; inst1 = perfInst1Enabled; inst2 = perfInst2Enabled; inst3 = perfInst3Enabled;
     } else if (currentMode === MODE_JAM) {
         drums = jamDrumEnabled;
         jamInst1 = jamInst1Enabled; jamInst2 = jamInst2Enabled;
@@ -4541,6 +4602,7 @@ function pushLiveMutesToDsp(set, t) {
     set("drum_enabled", drums ? "1" : "0", t);
     set("inst1_enabled", inst1 ? "1" : "0", t);
     set("inst2_enabled", inst2 ? "1" : "0", t);
+    set("inst3_enabled", inst3 ? "1" : "0", t);
     set("jam_inst1_enabled", jamInst1 ? "1" : "0", t);
     set("jam_inst2_enabled", jamInst2 ? "1" : "0", t);
 }
@@ -5536,7 +5598,7 @@ function updateButtonLEDs() {
                 {
                     const t = builderTrack;
                     let rowColour = TRACK_ROW_COLOUR[t];
-                    if (t === TRACK_INSTRUMENT_1 || t === TRACK_INSTRUMENT_2) {
+                    if (isInstTrack(t)) {
                         const trackInst = instrumentForTrack(t);
                         if (trackInst && !trackInst.enabled) rowColour = veryDarkPartner(rowColour);
                     }
@@ -5804,6 +5866,18 @@ function updateButtonLEDs() {
                 active.set(MoveRow3, jamInst2Enabled ? TRACK_ROW_COLOUR[TRACK_INSTRUMENT_2] : Black);
                 active.set(MoveRow4, clickOn ? CLICK_ROW_COLOUR : Black);
                 break;
+        }
+        /* Perform and Jam: Capture is Keys (lit, bright while on), Up/Down
+         * its octave while on; in Perform, Shift shows Track 1 as Pads. */
+        if (keysViewActive()) {
+            active.set(MoveCapture, keysOn ? WhiteLedFull : WhiteLedDim);
+            if (keysOn) {
+                active.set(MoveUp, keysOctave < 8 ? WhiteLedFull : Black);
+                active.set(MoveDown, keysOctave > -1 ? WhiteLedFull : Black);
+            }
+            if (currentView === VIEW_PERFORMANCE && shiftHeld) {
+                active.set(MoveRow1, perfInst3Enabled ? TRACK_ROW_COLOUR[TRACK_PADS] : Black);
+            }
         }
         /* Song Builder's settings pages: Play works there as in Song Builder. */
         if (currentSong && SONG_BUILDER_SUBVIEWS.has(currentView)) {
@@ -7098,6 +7172,7 @@ function updateLEDs() {
                  * on every one of those floods the LED queue and makes the
                  * pad/step beat flash inconsistent. When neither the song nor
                  * the scroll row changed, use change-detection. */
+                if (keysOn) { drawKeysLEDs(); perfLastPadSongIdx = -1; break; }
                 if (perfSongIndex !== perfLastPadSongIdx || perfScrollRow !== perfLastPadScrollRow) {
                     perfLastPadSongIdx = perfSongIndex;
                     perfLastPadScrollRow = perfScrollRow;
@@ -7110,7 +7185,7 @@ function updateLEDs() {
                     drawPerformanceLEDs(false);
                 }
                 break;
-            case VIEW_JAM: drawJamLEDs(); break;
+            case VIEW_JAM: if (keysOn) drawKeysLEDs(); else drawJamLEDs(); break;
             default: clearPadLEDs();
         }
         ledDirtyAll = false;
@@ -7173,8 +7248,7 @@ function drawChordStepLEDs(force) {
     const maxScroll = totalBars > NUM_STEPS ? totalBars - NUM_STEPS : 0;
     if (stepScrollOffset > maxScroll) stepScrollOffset = maxScroll;
     if (stepScrollOffset < 0) stepScrollOffset = 0;
-    const inst = (builderTrack === TRACK_INSTRUMENT_1 || builderTrack === TRACK_INSTRUMENT_2)
-        ? instrumentForTrack(builderTrack) : null;
+    const inst = isInstTrack(builderTrack) ? instrumentForTrack(builderTrack) : null;
     /* Match the bar colour to the selected track's Row button colour. */
     const trackColour = TRACK_ROW_COLOUR[builderTrack];
     /* The white cursor: the bar of the row selected in this section's list,
@@ -8113,12 +8187,24 @@ function openInstrumentMenu(track) {
     instrumentFocus = 0;
     instrumentEditing = false;
     currentView = VIEW_INSTRUMENT;
-    menuStack.push({ title: track === TRACK_INSTRUMENT_1 ? "Inst 1" : "Inst 2", selectedIndex: 0 });
+    menuStack.push({ title: INST_TRACK_NAMES[instIndex(track)] || "Inst", selectedIndex: 0 });
     needsRedraw = true;
 }
 
+/* The settings Pads have: a chord on the chord grid, so no Voicing,
+ * Follow Note, Pattern, Approach or Vel Follow. */
+const PADS_ROW_KEYS = ["enabled", "octave", "inversion", "strum", "strum_dir", "gap", "velocity", "chance",
+    "bar", "beat", "mute", "adv", "delete"];
+function padsRowsOnly(track, rows) {
+    return track === TRACK_PADS ? rows.filter(r => PADS_ROW_KEYS.includes(r.key)) : rows;
+}
+
 /* Instrument Settings: the rows that apply to the track's voicing. */
-function instrumentRows(inst) {
+function instrumentRows(inst, track) {
+    return padsRowsOnly(track, instrumentRowsFor(inst));
+}
+
+function instrumentRowsFor(inst) {
     const voicing = inst ? inst.voicing : "bass";
     return [
         { key: "enabled", label: "Enabled", value: inst && inst.enabled ? "On" : "Off" },
@@ -8142,8 +8228,8 @@ function instrumentRows(inst) {
 
 function drawInstrument() {
     const inst = instrumentForTrack(instrumentEditTrack);
-    drawMenuHeader(instrumentEditTrack === TRACK_INSTRUMENT_1 ? "Inst 1" : "Inst 2", inst && inst.enabled ? "ON" : "OFF");
-    const items = instrumentRows(inst);
+    drawMenuHeader(INST_TRACK_NAMES[instIndex(instrumentEditTrack)] || "Inst", inst && inst.enabled ? "ON" : "OFF");
+    const items = instrumentRows(inst, instrumentEditTrack);
     if (instrumentFocus >= items.length) instrumentFocus = items.length - 1;
     drawMenuList({
         ...LIST_ROW_FIT,
@@ -8164,7 +8250,7 @@ function drawInstrument() {
 function handleInstrumentInput(cc, value) {
     const inst = instrumentForTrack(instrumentEditTrack);
     if (!inst) return;
-    const rows = instrumentRows(inst);
+    const rows = instrumentRows(inst, instrumentEditTrack);
     const row = rows[Math.max(0, Math.min(rows.length - 1, instrumentFocus))];
     if (cc === MoveMainKnob) {
         const delta = decodeDelta(value);
@@ -8263,11 +8349,11 @@ let itemFocus = 0;
 let itemEditing = false;
 
 function itemTrackName(track) {
-    return track === TRACK_CLICK ? "Click" : (track === TRACK_INSTRUMENT_1 ? "Inst 1" : "Inst 2");
+    return track === TRACK_CLICK ? "Click" : (INST_TRACK_NAMES[instIndex(track)] || "Inst");
 }
 
 function isItemTrack(track) {
-    return track === TRACK_INSTRUMENT_1 || track === TRACK_INSTRUMENT_2 || track === TRACK_CLICK;
+    return isInstTrack(track) || track === TRACK_CLICK;
 }
 
 /* A short summary of an item for its list row. */
@@ -8591,7 +8677,7 @@ function itemEditRows() {
     }
     rows.push({ key: "adv", label: "Advanced", value: w.adv ? "On" : "Off" });
     rows.push({ key: "delete", label: "Delete", value: "" });
-    return rows;
+    return padsRowsOnly(itemEditTrack, rows);
 }
 
 function drawInstrumentBarMenu() {
@@ -9614,18 +9700,26 @@ function drawSongBank() {
     });
 }
 
-function drawOptions() {
-    drawMenuHeader("Options", "");
-    const items = [
+/* The Options list. Rows up to Chains open a submenu; the rest edit in place. */
+function optionsRows() {
+    const route = (o, ch) => (OUTPUT_LABELS[o] || o) + " " + ch;
+    return [
         { key: "drums", label: "Drums", value: currentOutputLabel() + " " + activeOutputChannel() },
-        { key: "inst1", label: "Inst 1", value: (OUTPUT_LABELS[inst1Output] || inst1Output) + " " + inst1Channel },
-        { key: "inst2", label: "Inst 2", value: (OUTPUT_LABELS[inst2Output] || inst2Output) + " " + inst2Channel },
-        { key: "click", label: "Click", value: (OUTPUT_LABELS[clickOutput] || clickOutput) + " " + clickMidiChannel },
+        { key: "inst1", label: "Inst 1", value: route(inst1Output, inst1Channel) },
+        { key: "inst2", label: "Inst 2", value: route(inst2Output, inst2Channel) },
+        { key: "inst3", label: "Pads", value: route(inst3Output, inst3Channel) },
+        { key: "click", label: "Click", value: route(clickOutput, clickMidiChannel) },
+        { key: "keys", label: "Keys", value: route(keysOutput, keysChannel) },
         { key: "chains", label: "Chains", value: "Chain " + (optionsChainIndex + 1) },
         { key: "swapguard", label: "Swap Guard", value: Math.round(swapGuardFraction * 100) + "%" },
         { key: "clock", label: "Schwung Clock", value: sendClock ? "On" : "Off" },
         { key: "dspdebug", label: "DSP Debug", value: dspDebugEnabled ? "On" : "Off" }
     ];
+}
+
+function drawOptions() {
+    drawMenuHeader("Options", "");
+    const items = optionsRows();
     drawMenuList({
         ...LIST_ROW_FIT,
         labelX: 3,
@@ -9670,11 +9764,19 @@ function drawOptionsDrums() {
     });
 }
 
+/* Instrument i's (1 Inst 1, 2 Inst 2, 3 Pads) output route. */
+function instOutputOf(i) { return i === 1 ? inst1Output : i === 2 ? inst2Output : inst3Output; }
+function instChannelOf(i) { return i === 1 ? inst1Channel : i === 2 ? inst2Channel : inst3Channel; }
+function setInstRoute(i, output, channel) {
+    if (i === 1) { inst1Output = output; inst1Channel = channel; }
+    else if (i === 2) { inst2Output = output; inst2Channel = channel; }
+    else { inst3Output = output; inst3Channel = channel; }
+}
+
 function drawOptionsInst() {
-    const isInst1 = optionsInstIndex === 1;
-    const output = isInst1 ? inst1Output : inst2Output;
-    const channel = isInst1 ? inst1Channel : inst2Channel;
-    drawMenuHeader(isInst1 ? "Inst 1" : "Inst 2", "");
+    const output = instOutputOf(optionsInstIndex);
+    const channel = instChannelOf(optionsInstIndex);
+    drawMenuHeader(INST_TRACK_NAMES[optionsInstIndex - 1] || "Inst", "");
     const items = [
         { key: "output", label: "Output", value: OUTPUT_LABELS[output] || output },
         { key: "channel", label: "MIDI Channel", value: String(channel) }
@@ -9785,8 +9887,78 @@ function openOptionsInst(index) {
     optionsSubFocus = 0;
     optionsSubEditing = false;
     currentView = VIEW_OPTIONS_INST;
-    menuStack.push({ title: index === 1 ? "Inst 1" : "Inst 2", selectedIndex: 0 });
+    menuStack.push({ title: INST_TRACK_NAMES[index - 1] || "Inst", selectedIndex: 0 });
     needsRedraw = true;
+}
+
+/* Options > Keys: where Perform/Jam's playable pads (Capture) send, and how
+ * they are laid out. */
+function keysOptionRows() {
+    return [
+        { key: "output", label: "Output", value: OUTPUT_LABELS[keysOutput] || keysOutput },
+        { key: "channel", label: "MIDI Channel", value: String(keysChannel) },
+        { key: "layout", label: "Layout", value: KEYS_LAYOUTS[keysLayout] },
+        { key: "scale", label: "Scale", value: KEYS_SCALES[keysScale].name },
+        { key: "octave", label: "Octave", value: String(keysStartOctave) }
+    ];
+}
+
+function openOptionsKeys() {
+    optionsSubFocus = 0;
+    optionsSubEditing = false;
+    currentView = VIEW_OPTIONS_KEYS;
+    menuStack.push({ title: "Keys", selectedIndex: 0 });
+    needsRedraw = true;
+}
+
+function drawOptionsKeys() {
+    drawMenuHeader("Keys", "");
+    drawMenuList({
+        ...LIST_ROW_FIT,
+        labelX: 3,
+        items: keysOptionRows(),
+        selectedIndex: optionsSubFocus,
+        getLabel: (item) => item.label,
+        getValue: (item) => item.value,
+        valueAlignRight: true,
+        editMode: optionsSubEditing,
+        labelGap: 2,
+        prioritizeSelectedValue: true,
+        selectedMinLabelChars: 6,
+        listArea: { topY: LIST_TOP_Y, bottomY: LIST_INDICATOR_BOTTOM_Y }
+    });
+}
+
+function handleOptionsKeysInput(cc, value) {
+    const rows = keysOptionRows();
+    const key = (rows[optionsSubFocus] || rows[0]).key;
+    if (cc === MoveMainKnob) {
+        const delta = decodeDelta(value);
+        if (optionsSubEditing) {
+            const clampStep = (v, lo, hi) => Math.max(lo, Math.min(hi, v + delta));
+            if (key === "output") keysOutput = OUTPUT_TARGETS[clampStep(OUTPUT_TARGETS.indexOf(keysOutput), 0, OUTPUT_TARGETS.length - 1)];
+            else if (key === "channel") keysChannel = clampStep(keysChannel, 1, 16);
+            else if (key === "layout") keysLayout = clampStep(keysLayout, 0, KEYS_LAYOUTS.length - 1);
+            else if (key === "scale") keysScale = clampStep(keysScale, 0, KEYS_SCALES.length - 1);
+            else if (key === "octave") keysStartOctave = clampStep(keysStartOctave, -1, 8);
+            saveOutputSettings();
+            pushKeysToDsp();
+        } else {
+            optionsSubFocus = Math.max(0, Math.min(rows.length - 1, optionsSubFocus + delta));
+        }
+        needsRedraw = true;
+    } else if (cc === MoveMainButton && value > 0) {
+        optionsSubEditing = !optionsSubEditing;
+        needsRedraw = true;
+    } else if (cc === MoveBack && value > 0) {
+        if (optionsSubEditing) {
+            optionsSubEditing = false;
+        } else {
+            menuStack.pop();
+            currentView = VIEW_OPTIONS;
+        }
+        needsRedraw = true;
+    }
 }
 
 /* Options > Chains: Schwung's chain slots as Arranger sees them. Rows: the
@@ -10579,8 +10751,13 @@ function handleBuilderInput(cc, value) {
      * Inst 1/Inst 2, Track 4 toggles the click. */
     if ((cc === MoveRow1 || cc === MoveRow2 || cc === MoveRow3) && value > 0) {
         if (cc === MoveRow1) {
-            builderTrack = (builderTrack === TRACK_DRUM) ? TRACK_CHORD : TRACK_DRUM;
+            /* Shift + Track 1 on the Pads track turns them on or off. */
+            if (shiftHeld && builderTrack === TRACK_PADS) { toggleBuilderInstrument(TRACK_PADS); return; }
+            /* Drum -> Chord -> Pads -> Drum; from Inst 1/2 or Click, Drum. */
+            builderTrack = builderTrack === TRACK_DRUM ? TRACK_CHORD
+                         : builderTrack === TRACK_CHORD ? TRACK_PADS : TRACK_DRUM;
             if (builderTrack === TRACK_CHORD) { chordCursorBar = 0; chordCursorIdx = 0; chordListCursor = 0; }
+            if (builderTrack === TRACK_PADS) { itemListCursor = 0; chordCursorBar = -1; }
         } else {
             const track = (cc === MoveRow2) ? TRACK_INSTRUMENT_1 : TRACK_INSTRUMENT_2;
             /* Pressed again on its own track, it turns the instrument on or
@@ -10674,7 +10851,7 @@ function handleBuilderInput(cc, value) {
     } else if (cc === MoveShift) {
         shiftHeld = value > 0;
     } else if (cc === MoveMenu && value > 0) {
-        if (builderTrack === TRACK_INSTRUMENT_1 || builderTrack === TRACK_INSTRUMENT_2) {
+        if (isInstTrack(builderTrack)) {
             openInstrumentMenu(builderTrack);
         } else {
             openSongSettings();
@@ -10827,7 +11004,7 @@ function toggleBuilderInstrument(track) {
     inst.enabled = !inst.enabled;
     unsavedChanges = true;
     if (playbackState === "playing" && typeof host_module_set_param === "function") {
-        host_module_set_param(track === TRACK_INSTRUMENT_1 ? "inst1_enabled" : "inst2_enabled", inst.enabled ? "1" : "0");
+        host_module_set_param("inst" + (instIndex(track) + 1) + "_enabled", inst.enabled ? "1" : "0");
     }
     showPopup(itemTrackName(track), inst.enabled ? "On" : "Off", 2000);
     needsRedraw = true;
@@ -11224,13 +11401,12 @@ function duplicateSelectedSong() {
 }
 
 function handleOptionsInput(cc, value) {
-    /* Rows 0-4 (Drums, Instrument 1, Instrument 2, Click, Chains) navigate
-     * into a submenu; rows 5-7 (Swap Guard, Schwung Clock, DSP Debug) edit in
-     * place. */
+    const rows = optionsRows();
+    const key = (rows[optionsFocus] || rows[0]).key;
     if (cc === MoveMainKnob) {
         const delta = decodeDelta(value);
         if (optionsEditing) {
-            if (optionsFocus === 5) {
+            if (key === "swapguard") {
                 /* Adjust the mid-clip swap guard (0-100%, in 5% steps). */
                 const newG = Math.max(0, Math.min(1, swapGuardFraction + delta * 0.05));
                 if (newG !== swapGuardFraction) {
@@ -11238,12 +11414,12 @@ function handleOptionsInput(cc, value) {
                     saveOutputSettings();
                     pushSwapGuardToDsp();
                 }
-            } else if (optionsFocus === 6) {
+            } else if (key === "clock") {
                 /* Toggle the MIDI clock to Schwung. */
                 sendClock = !sendClock;
                 saveOutputSettings();
                 pushSendClockToDsp();
-            } else if (optionsFocus === 7) {
+            } else if (key === "dspdebug") {
                 /* Toggle the DSP debug log. */
                 dspDebugEnabled = !dspDebugEnabled;
                 saveOutputSettings();
@@ -11255,24 +11431,18 @@ function handleOptionsInput(cc, value) {
                 }
             }
         } else {
-            const newIdx = Math.max(0, Math.min(7, optionsFocus + delta));
-            if (newIdx !== optionsFocus) {
-                optionsFocus = newIdx;
-            }
+            optionsFocus = Math.max(0, Math.min(rows.length - 1, optionsFocus + delta));
         }
         needsRedraw = true;
     } else if (cc === MoveMainButton && value > 0) {
-        if (optionsFocus === 0) {
-            openOptionsDrums();
-        } else if (optionsFocus === 1) {
-            openOptionsInst(1);
-        } else if (optionsFocus === 2) {
-            openOptionsInst(2);
-        } else if (optionsFocus === 3) {
-            openOptionsClick();
-        } else if (optionsFocus === 4) {
-            openOptionsChains();
-        } else {
+        if (key === "drums") openOptionsDrums();
+        else if (key === "inst1") openOptionsInst(1);
+        else if (key === "inst2") openOptionsInst(2);
+        else if (key === "inst3") openOptionsInst(3);
+        else if (key === "click") openOptionsClick();
+        else if (key === "keys") openOptionsKeys();
+        else if (key === "chains") openOptionsChains();
+        else {
             optionsEditing = !optionsEditing;
             needsRedraw = true;
         }
@@ -11340,21 +11510,16 @@ function handleOptionsDrumsInput(cc, value) {
 }
 
 function handleOptionsInstInput(cc, value) {
-    const isInst1 = optionsInstIndex === 1;
+    const i = optionsInstIndex;
     if (cc === MoveMainKnob) {
         const delta = decodeDelta(value);
         if (optionsSubEditing) {
             if (optionsSubFocus === 0) {
-                const cur = isInst1 ? inst1Output : inst2Output;
-                const idx = Math.max(0, Math.min(OUTPUT_TARGETS.length - 1, OUTPUT_TARGETS.indexOf(cur) + delta));
-                if (isInst1) inst1Output = OUTPUT_TARGETS[idx];
-                else inst2Output = OUTPUT_TARGETS[idx];
+                const idx = Math.max(0, Math.min(OUTPUT_TARGETS.length - 1, OUTPUT_TARGETS.indexOf(instOutputOf(i)) + delta));
+                setInstRoute(i, OUTPUT_TARGETS[idx], instChannelOf(i));
                 saveOutputSettings();
             } else {
-                const cur = isInst1 ? inst1Channel : inst2Channel;
-                const newCh = Math.max(1, Math.min(16, cur + delta));
-                if (isInst1) inst1Channel = newCh;
-                else inst2Channel = newCh;
+                setInstRoute(i, instOutputOf(i), Math.max(1, Math.min(16, instChannelOf(i) + delta)));
                 saveOutputSettings();
             }
         } else {
@@ -11862,6 +12027,18 @@ function handlePerformanceInput(cc, value) {
     /* Main knob is intentionally unused in performance view: song/section
      * selection is done with pads, and the display uses plain print(). The
      * 8 knobs drive the setlist's Schwung parameters (see KNOB_COUNT). */
+    if (cc === MoveCapture) { if (value > 0) setKeys(!keysOn); return; }
+    if (keysOn && (cc === MoveUp || cc === MoveDown)) { if (value > 0) shiftKeysOctave(cc === MoveUp ? 1 : -1); return; }
+    if (cc === MoveRow1 && shiftHeld) {
+        /* Shift + Track 1: the Pads track, live, as Track 1-3 mute the others. */
+        if (value > 0) {
+            perfInst3Enabled = !perfInst3Enabled;
+            showPopup("Pads", perfInst3Enabled ? "On" : "Off", 2000);
+            if (typeof host_module_set_param === "function") host_module_set_param("inst3_enabled", perfInst3Enabled ? "1" : "0");
+            needsRedraw = true;
+        }
+        return;
+    }
     if (cc >= 71 && cc <= 78) {
         turnPerfKnob(cc - 71, decodeDelta(value));
     } else if (cc === MoveUp && value > 0) {
@@ -12882,6 +13059,8 @@ function jamTick() {
 }
 
 function handleJamInput(cc, value) {
+    if (cc === MoveCapture) { if (value > 0) setKeys(!keysOn); return; }
+    if (keysOn && (cc === MoveUp || cc === MoveDown)) { if (value > 0) shiftKeysOctave(cc === MoveUp ? 1 : -1); return; }
     if (cc === MoveMainKnob) {
         const delta = decodeDelta(value);
         if (shiftHeld) {
@@ -13275,6 +13454,8 @@ function handleJamPad(padIndex, velocity) {
 }
 
 function handlePadPress(note, velocity) {
+    /* Keys: the engine plays the pads; only their lights are ours. */
+    if (keysOn && keysViewActive() && getPadIndex(note) >= 0) { keysPadPress(getPadIndex(note), velocity); return; }
     /* Step buttons (notes 16-31) drive the chord/instrument track bar grid. */
     if (note >= MoveStep1 && note <= MoveStep16) {
         handleStepPress(note - MoveStep1, velocity);
@@ -13545,7 +13726,7 @@ function writeSectionChords(sec, list) {
 }
 
 /* The item lists a section carries: Inst 1, Inst 2, Click (see sectionItems). */
-const SECTION_ITEM_TRACKS = [TRACK_INSTRUMENT_1, TRACK_INSTRUMENT_2, TRACK_CLICK];
+const SECTION_ITEM_TRACKS = [TRACK_INSTRUMENT_1, TRACK_INSTRUMENT_2, TRACK_PADS, TRACK_CLICK];
 
 /* Mute: merge the current section with the next one. The next section's
  * clips, chords and items follow on, shifted by this section's length. A
@@ -14247,6 +14428,7 @@ function perfLoadSong(index, resetToggles) {
         perfDrumEnabled = true;
         perfInst1Enabled = !!(perfFullSong.instruments && perfFullSong.instruments[0] && perfFullSong.instruments[0].enabled);
         perfInst2Enabled = !!(perfFullSong.instruments && perfFullSong.instruments[1] && perfFullSong.instruments[1].enabled);
+        perfInst3Enabled = !!(perfFullSong.instruments && perfFullSong.instruments[2] && perfFullSong.instruments[2].enabled);
     }
     /* Three different keys back to back -- use the blocking variant so none
      * of them can be clobbered by the next before the DSP consumes it (see
@@ -14259,6 +14441,7 @@ function perfLoadSong(index, resetToggles) {
         set("drum_enabled", perfDrumEnabled ? "1" : "0", t);
         set("inst1_enabled", perfInst1Enabled ? "1" : "0", t);
         set("inst2_enabled", perfInst2Enabled ? "1" : "0", t);
+        set("inst3_enabled", perfInst3Enabled ? "1" : "0", t);
     }
     perfSongSections = buildPerfLayout();
     currentSectionIndex = 0;
@@ -15395,6 +15578,147 @@ function drawHeaderBattery() {
     drawBatteryBadge(SCREEN_WIDTH - 3, 1);
 }
 
+/* ── Keys: the pads as a keyboard, in Perform and Jam ─────────────────
+ *
+ * Capture turns the pads into a keyboard on the Keys route (Options > Keys),
+ * and back. Up/Down change octave while it is on; the song plays on, and the
+ * steps and Track buttons keep their jobs. The ENGINE plays the notes:
+ * Schwung hands it the pad notes on the audio thread (arr_on_midi), so a key
+ * sounds with no round trip through here. This side only switches it,
+ * feeds it the layout, key and octave, and lights the pads. Keys go off on
+ * leaving Perform/Jam, so a pad in any other screen is never a note. */
+export const KEYS_LAYOUTS = ["In Key 4ths", "In Key 3rds", "In Key Seq", "Chrom 4ths", "Chrom 3rds", "Chrom Seq"];
+export const KEYS_SCALES = [
+    { name: "Major", steps: [0, 2, 4, 5, 7, 9, 11] },
+    { name: "Minor", steps: [0, 2, 3, 5, 7, 8, 10] },
+    { name: "Dorian", steps: [0, 2, 3, 5, 7, 9, 10] },
+    { name: "Mixolydian", steps: [0, 2, 4, 5, 7, 9, 10] },
+    { name: "Maj Pent", steps: [0, 2, 4, 7, 9] },
+    { name: "Min Pent", steps: [0, 3, 5, 7, 10] },
+    { name: "Blues", steps: [0, 3, 5, 6, 7, 10] }
+];
+const KEYS_ROOT_COLOUR = AzureBlue;
+const KEYS_SCALE_COLOUR = White;
+let keysOn = false;
+let keysOctave = 3;
+let keysSentRoot = -1;
+const keysPressed = new Set();
+
+/* The note pad `pad` (0 = bottom left, row-major) plays, or -1: the engine's
+ * keys_note, for the pad lights. In Key layouts step through the scale (a
+ * row up is 3 scale steps -- a 4th in a seven-note scale -- or 2, or the
+ * row carries on); Chromatic ones by semitone (a row up is 5, 4 or 8). */
+export function keysPadNote(layout, scale, root, octave, pad) {
+    if (pad < 0 || pad > 31) return -1;
+    const row = Math.floor(pad / 8), col = pad % 8;
+    const steps = (KEYS_SCALES[scale] || KEYS_SCALES[0]).steps;
+    const base = (octave + 1) * 12 + ((root % 12) + 12) % 12;
+    let note;
+    if (layout >= 3) {
+        note = base + col + row * (layout === 3 ? 5 : layout === 4 ? 4 : 8);
+    } else {
+        const d = col + row * (layout === 1 ? 2 : layout === 2 ? 8 : 3);
+        note = base + 12 * Math.floor(d / steps.length) + steps[d % steps.length];
+    }
+    return note >= 0 && note <= 127 ? note : -1;
+}
+
+function keysViewActive() {
+    return currentView === VIEW_PERFORMANCE || currentView === VIEW_JAM;
+}
+
+/* The key the pads are rooted on: the song's (a setlist's key change
+ * included) in Perform, Jam's own key in Jam. */
+function keysRootPc() {
+    const name = currentView === VIEW_JAM ? jamKey : (currentSong && currentSong.key) || DEFAULT_KEY;
+    const i = KEYS.indexOf(name);
+    return i < 0 ? 0 : i;
+}
+
+function keysSet(key, val) {
+    if (typeof host_module_set_param === "function") host_module_set_param("keys_" + key, String(val));
+}
+
+/* Hand the engine the route, layout, key and octave. */
+function pushKeysToDsp() {
+    keysSet("output", keysOutput);
+    keysSet("channel", keysChannel);
+    keysSet("layout", keysLayout);
+    keysSet("scale", keysScale);
+    keysSentRoot = keysRootPc();
+    keysSet("root", keysSentRoot);
+    keysSet("octave", keysOctave);
+}
+
+function keysNoteName(note) {
+    return note < 0 ? "-" : NOTE_NAMES[note % 12] + (Math.floor(note / 12) - 1);
+}
+
+/* Capture: Keys on or off. */
+function setKeys(on, quiet) {
+    if (on === keysOn) return;
+    keysOn = on;
+    keysPressed.clear();
+    if (on) {
+        keysOctave = keysStartOctave;
+        pushKeysToDsp();
+    }
+    keysSet("on", on ? 1 : 0);
+    ledDirtyAll = true;
+    needsRedraw = true;
+    if (!quiet) {
+        showPopup("Keys", on ? keysNoteName(keysPadNote(keysLayout, keysScale, keysSentRoot, keysOctave, 0)) + "  " +
+            KEYS_LAYOUTS[keysLayout] : "Off", 1500);
+    }
+}
+
+/* Up/Down while Keys are on. */
+function shiftKeysOctave(delta) {
+    const next = Math.max(-1, Math.min(8, keysOctave + delta));
+    if (next === keysOctave) return;
+    keysOctave = next;
+    keysSet("octave", keysOctave);
+    ledDirtyAll = true;
+    showPopup("Keys", "Octave " + keysOctave + "  (" + keysNoteName(keysPadNote(keysLayout, keysScale, keysSentRoot, keysOctave, 0)) + ")", 1200);
+}
+
+/* Once a tick: Keys follow the key (a new song in Perform), and end with
+ * the screen. */
+function tickKeys() {
+    if (!keysOn) return;
+    if (!keysViewActive()) { setKeys(false, true); return; }
+    const root = keysRootPc();
+    if (root !== keysSentRoot) {
+        keysSentRoot = root;
+        keysSet("root", root);
+        ledDirtyAll = true;
+    }
+}
+
+/* The pads as a keyboard: the key's root in blue, other scale notes white,
+ * notes outside the scale (Chromatic layouts) dark; a pad held green. */
+function keysPadColour(p) {
+    if (keysPressed.has(p)) return PureGreen;
+    const note = keysPadNote(keysLayout, keysScale, keysSentRoot, keysOctave, p);
+    if (note < 0) return Black;
+    const rel = ((note - keysSentRoot) % 12 + 12) % 12;
+    if (rel === 0) return KEYS_ROOT_COLOUR;
+    return (KEYS_SCALES[keysScale] || KEYS_SCALES[0]).steps.includes(rel) ? KEYS_SCALE_COLOUR : Black;
+}
+
+function drawKeysLEDs() {
+    for (let p = 0; p < NUM_PADS; p++) padColor(p, keysPadColour(p), true);
+    flushPadGridImmediate();
+}
+
+/* A pad pressed or released while Keys are on: its light only -- the
+ * engine has already played it. */
+function keysPadPress(padIndex, velocity) {
+    if (padIndex < 0) return;
+    if (velocity > 0) keysPressed.add(padIndex); else keysPressed.delete(padIndex);
+    padColor(padIndex, keysPadColour(padIndex), true);
+}
+
 /* Arranger's own popups (record, click, mutes, exit confirm, backups,
  * missing clip): the shared multi-line card -- a title band plus the message
  * wrapped onto up to three lines -- drawn after every redraw and timed by the
@@ -15517,7 +15841,7 @@ export function footerHints() {
              * the same on every screen -- gives way. */
             return shiftHeld ? [["JOG", "MOVE"], ["BACK", "OUT"]] : [["CLK", "OPEN"], ["SMPL", "BANK"]];
         case VIEW_OPTIONS: return editMenuHints(optionsEditing);
-        case VIEW_OPTIONS_DRUMS: case VIEW_OPTIONS_INST: case VIEW_OPTIONS_CLICK:
+        case VIEW_OPTIONS_DRUMS: case VIEW_OPTIONS_INST: case VIEW_OPTIONS_KEYS: case VIEW_OPTIONS_CLICK:
         case VIEW_OPTIONS_CHAINS:
             return editMenuHints(optionsSubEditing);
         case VIEW_SONG_SETTINGS:
@@ -15611,8 +15935,9 @@ function builderFooterHints() {
         return !locked && cursor >= 0 && cursor < n ? [["JOG", "MOVE"], ["PLAY", "SONG"]] : [["PLAY", "SONG"], ["BACK", "OUT"]];
     }
     if (builderTrack === TRACK_CLICK) return [first, ["T4", clickOn ? "OFF" : "ON"], ["T1", "DRUM"]];
-    if (builderTrack === TRACK_CHORD) return [first, ["T1", "DRUM"], clk ? ["MENU", "SET"] : ["BACK", "OUT"]];
+    if (builderTrack === TRACK_CHORD) return [first, ["T1", "PADS"], clk ? ["MENU", "SET"] : ["BACK", "OUT"]];
     const inst = instrumentForTrack(builderTrack);
+    if (builderTrack === TRACK_PADS) return [first, ["S+T1", inst && inst.enabled ? "OFF" : "ON"], ["T1", "DRUM"]];
     return [first, [builderTrack === TRACK_INSTRUMENT_1 ? "T2" : "T3", inst && inst.enabled ? "OFF" : "ON"], ["T1", "DRUM"]];
 }
 
@@ -15628,6 +15953,7 @@ function drawPopup() {
 
 globalThis.tick = function() {
     pollBattery();
+    tickKeys();
     tickPopup();
     {
         const nowMs = Date.now();
@@ -15951,6 +16277,7 @@ globalThis.tick = function() {
                 case VIEW_OPTIONS: drawOptions(); break;
                 case VIEW_OPTIONS_DRUMS: drawOptionsDrums(); break;
                 case VIEW_OPTIONS_INST: drawOptionsInst(); break;
+                case VIEW_OPTIONS_KEYS: drawOptionsKeys(); break;
                 case VIEW_OPTIONS_CLICK: drawOptionsClick(); break;
                 case VIEW_OPTIONS_CHAINS: drawOptionsChains(); break;
                 case VIEW_KNOB_MAP: drawKnobMap(); break;
@@ -16048,6 +16375,7 @@ function routeCcInput(rawData, cc, value) {
         case VIEW_OPTIONS: handleOptionsInput(cc, value); break;
         case VIEW_OPTIONS_DRUMS: handleOptionsDrumsInput(cc, value); break;
         case VIEW_OPTIONS_INST: handleOptionsInstInput(cc, value); break;
+        case VIEW_OPTIONS_KEYS: handleOptionsKeysInput(cc, value); break;
         case VIEW_OPTIONS_CLICK: handleOptionsClickInput(cc, value); break;
         case VIEW_OPTIONS_CHAINS: handleOptionsChainsInput(cc, value); break;
         case VIEW_KNOB_MAP: handleKnobMapInput(cc, value); break;

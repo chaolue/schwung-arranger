@@ -72,6 +72,21 @@
 ### Jam
 - Record records the Schwung mix to a WAV, as in Perform.
 
+### Pads and Keys
+- **Pads**: a third instrument that plays the chords as a full chord on the
+  chord grid -- piano pads under the song. Track 1 now steps Drum -> Chord
+  -> Pads; Shift + Track 1 on the Pads track turns it on or off, and in
+  Perform too (live). Its settings (Octave, Inversion, Strum, Note Gap,
+  Velocity, Chance) and items work as Inst 1/2's; its output is Options >
+  Pads. Off in new songs.
+- **Keys**: Capture in Perform or Jam turns the pads into a keyboard (and
+  back); Up/Down change octave. Played straight from the engine, so with no
+  added latency. Options > Keys sets its output, channel, layout (In Key or
+  Chromatic; rows in 4ths, 3rds or in sequence), scale and starting octave;
+  the root is the song's key (Jam's in Jam).
+- Options lists Drums, Inst 1, Inst 2, Pads, Click, Keys, Chains, ...; the
+  web settings page has Pads and Keys too.
+
 ### Schwung chains
 - While a chain, Send or Master FX editor is open over the Arranger, only
   playing controls still work: Play, the Track buttons, Menu, Shift, and in

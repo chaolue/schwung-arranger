@@ -85,7 +85,7 @@ buttons above the pads:
 
 | Track button | Track | LED colour |
 |---------------|-------|------------|
-| Track 1 | Drum, or Chord — press again to switch between them | White (Drum) / Azure Blue (Chord) |
+| Track 1 | Drum, Chord or **Pads** — press again to step Drum → Chord → Pads → Drum. On the Pads track, **Shift + Track 1** turns the Pads on or off | White (Drum) / Azure Blue (Chord) / Teal (Pads) |
 | Track 2 | Instrument 1 | Bright Yellow |
 | Track 3 | Instrument 2 | Purple |
 | Track 4 | Click track — press again to turn the click on/off | Bright Orange (dim while the click is off) |
@@ -202,6 +202,24 @@ A bar can hold several chords, each on its own beat. A chord you open but don't
 change is kept exactly as it was, even one whose root is outside the key.
 
 **Button LED hints:** Back and Main are lit.
+
+---
+
+### Pads Track
+
+A third instrument that only follows the chords — piano pads under the song.
+Press **Track 1** until it shows Pads (Drum → Chord → Pads). It plays every
+chord of the Chord track as a full chord on the chord grid, on its own output
+(**Options > Pads**); **Shift + Track 1** on it turns it on or off. **Menu**
+opens its settings — Enabled, Octave, Inversion, Strum, Strum Dir, Note Gap,
+Velocity and Chance (see Instrument Settings); there's no Voicing, Follow Note,
+Pattern or Approach, because the Pads are always a chord. Its items work as the
+Instrument Track's below: mute it, or change those settings, from any bar and
+beat of a section. A new song's Pads are off, an octave above Inst 2 (octave 4),
+voice-led (Auto inversion), at velocity 80.
+
+**Button LED hints:** Track 1 is teal on the Pads track (very dark while the
+Pads are off).
 
 ---
 
@@ -485,9 +503,11 @@ Play through a setlist.
 |---------|--------|
 | Pad press (section of current song) | Select that section; Play will start from there |
 | Pad press (other song / click pad) | Select that song; Play will start from there |
-| Up / Down | Scroll the pad window up / down one row |
+| Up / Down | Scroll the pad window up / down one row (with Keys on: octave up / down) |
+| Capture | **Keys**: turn the pads into a keyboard, and back — see **Keys** below |
 | Jog wheel | Scroll the info display |
 | Track 1 / 2 / 3 | Turn Drums / Inst 1 / Inst 2 on or off (kept until you leave Perform) |
+| Shift + Track 1 | Turn the Pads on or off (Track 1 is lit teal while Shift is held and the Pads are on) |
 | Track 4 | Turn the click on or off (lit orange while on) |
 | Record | Start or stop recording the Schwung mix to a WAV file (see below) |
 | Knobs 1–8 | Change the Schwung parameter mapped to that knob — see **Performance Knobs** |
@@ -502,8 +522,10 @@ Play through a setlist.
 | Pad press (current song section) | Queue a jump to that section at the end of the current section |
 | Pad press again (same section) | Escalate the jump to the end of the current bar |
 | Pad press (other song / click pad) | Queue a jump to that song at the next section boundary |
-| Up / Down | Scroll the pad window up / down one row |
+| Up / Down | Scroll the pad window up / down one row (with Keys on: octave up / down) |
+| Capture | **Keys** on / off — see **Keys** below |
 | Track 1 / 2 / 3 | Turn Drums / Inst 1 / Inst 2 on or off immediately |
+| Shift + Track 1 | Turn the Pads on or off immediately |
 | Track 4 | Turn the click on or off (lit orange while on) |
 | Record | Start or stop recording the Schwung mix to a WAV file (see below) |
 | Knobs 1–8 | Change the Schwung parameter mapped to that knob |
@@ -637,6 +659,7 @@ Press Track 2 or Track 3 to turn on Inst 1 or Inst 2 and play chords over the gr
 | Hold a chord pad | Show the chord's name and degree in the overlay (doesn't select it) |
 | Jog wheel | Adjust the BPM in realtime |
 | Shift + Jog wheel | Change the key of the chord pads |
+| Capture | **Keys** on / off (Up / Down then change octave) — see **Keys** below |
 | Track 1 / 2 / 3 | Turn Drums / Inst 1 / Inst 2 on or off |
 | Track 4 | Turn the click on or off (lit orange while on) |
 | Shift + Track 2 / 3 | Open the settings for Inst 1 / Inst 2 |
@@ -654,7 +677,8 @@ Press Track 2 or Track 3 to turn on Inst 1 or Inst 2 and play chords over the gr
 | Press the return groove's pad during a fill | Restart that groove from its beginning when the fill ends (pad turns red) |
 | Tap a chord pad | Queue that chord for the start of the next bar (pad turns red, then white once playing) |
 | Hold a chord pad | Show the chord's name and degree in the overlay (doesn't select it) |
-| Up / Down | Scroll the groove pads up / down |
+| Up / Down | Scroll the groove pads up / down (with Keys on: octave up / down) |
+| Capture | **Keys** on / off — see **Keys** below |
 | Left / Right | Scroll the fill pads up / down |
 | Jog wheel | Change the BPM in realtime |
 | Shift + Jog wheel | Change the key of the chord pads |
@@ -710,6 +734,32 @@ Inst 1 starts on Follow Note = kick with Bass voicing; Inst 2 starts on Follow N
 
 ---
 
+## Keys
+
+Play the pads as a keyboard over the song, in **Perform** or **Jam**. Press
+**Capture**: the pads become keys on the **Keys** output (Options > Keys), and
+Capture lights bright. Press it again for the normal pads (the song, sections,
+grooves and fills). Everything else keeps working — the transport, the Track
+mutes, the steps, the knobs — and so do Keys under a Schwung chain editor.
+
+| Control (Keys on) | Action |
+|-------------------|--------|
+| Pads | Play notes, at the pad's velocity. The key's root lights blue, the other scale notes white, notes outside the scale (Chromatic layouts) stay dark; a held pad lights green |
+| Up / Down | Octave up / down (−1 to 8) |
+| Capture | Back to the normal pads |
+
+The bottom-left pad is the root of the key — the song's key in Perform (a
+setlist's key change included), the chord pads' key in Jam — in the Keys
+octave, which each time Keys turn on starts at Options > Keys > Octave. The
+**Layout** sets how the pads run: **In Key** layouts play only scale notes, each
+row of eight a **4th** (three scale steps) or a **3rd** above the row below, or
+carrying straight on (**Seq**); **Chromatic** layouts play every semitone, a row
+a 4th, a major 3rd or eight semitones up. The notes play straight from the
+Arranger's engine, so there's no extra latency. Keys turn off when you leave
+Perform or Jam.
+
+---
+
 ## Options
 
 Choose where the Arranger sends MIDI, on which channel, and other playback options.
@@ -718,8 +768,8 @@ routing — opened as a sub-screen from here.
 
 | Control | Action |
 |---------|--------|
-| Jog wheel (browse mode) | Move between Drums, Inst 1, Inst 2, Click, Chains, Swap Guard, Schwung Clock, DSP Debug |
-| Jog click (on Drums / Inst 1 / Inst 2 / Click / Chains) | Open that sub-screen |
+| Jog wheel (browse mode) | Move between Drums, Inst 1, Inst 2, Pads, Click, Keys, Chains, Swap Guard, Schwung Clock, DSP Debug |
+| Jog click (on Drums / Inst 1 / Inst 2 / Pads / Click / Keys / Chains) | Open that sub-screen |
 | Jog wheel (edit mode, other fields) | Adjust the value |
 | Jog click (other fields) | Toggle edit / browse mode |
 | Back (edit mode) | Exit edit mode |
@@ -730,7 +780,9 @@ routing — opened as a sub-screen from here.
 | Drums | Drum track's output + MIDI channel (opens a sub-screen — see below) |
 | Inst 1 | Instrument 1's output + MIDI channel (opens a sub-screen — see below) |
 | Inst 2 | Instrument 2's output + MIDI channel (opens a sub-screen — see below) |
+| Pads | The Pads track's output + MIDI channel (opens a sub-screen — see below) |
 | Click | The click track's output, MIDI channel and notes (opens a sub-screen — see below) |
+| Keys | Where Keys (Perform/Jam's playable pads) send, and their layout (opens a sub-screen — see below) |
 | Chains | Schwung's chains (4, or 8 with the aux slots): each one's MIDI channel, and a way into its editor (opens a sub-screen — see below) |
 | Swap Guard | Mid-clip swap guard window (0–100%). Removed at the outgoing side of a clip boundary to avoid overlaps; on the incoming side (e.g. a fill swapping back into a partially-played groove), any note that fell inside this window is replayed right at the resume point instead of being lost |
 | Schwung Clock | **On** (default): while the Arranger plays, it sends MIDI clock to Schwung at the song's tempo, so clock-synced Schwung modules and effects (synced LFOs, tempo delays, arpeggiators) follow the song and start on its first beat. Move's own clock takes over whenever Move's sequencer is playing. Move's own tempo is not changed |
@@ -742,7 +794,21 @@ Settings are saved to file and restored when the module restarts.
 
 ---
 
-### Options: Drums / Inst 1 / Inst 2
+### Options: Keys
+
+The playable pads (see **Keys**).
+
+| Field | Meaning |
+|-------|---------|
+| Output | Where the keys send: External, Move or Schwung (default) |
+| MIDI Channel | 1–16 |
+| Layout | In Key 4ths (default), In Key 3rds, In Key Seq, Chrom 4ths, Chrom 3rds, Chrom Seq |
+| Scale | Major (default), Minor, Dorian, Mixolydian, Maj Pent, Min Pent, Blues — on the song's (or Jam's) key |
+| Octave | The bottom-left pad's octave when Keys turn on (default 3); Up / Down change it from there |
+
+---
+
+### Options: Drums / Inst 1 / Inst 2 / Pads
 
 Output routing for one track, opened from the Options list.
 

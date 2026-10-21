@@ -155,7 +155,7 @@ static void *arranger_worker_thread(void *arg);
 #define MAX_PATH_LEN       512
 #define MAX_JSON_LEN       8192
 #define MAX_SECTION_BARS   256   /* max bars per section for chord/instrument arrays */
-#define MAX_INSTRUMENTS    2     /* two instrument tracks (Bass, Keys/Pads) */
+#define MAX_INSTRUMENTS    3     /* Inst 1, Inst 2 and Pads (chord-following) */
 
 /* Cap on the ASSEMBLED, multi-clip timeline built by the async primary/staging
  * channels (arranger_worker_iterate). Derived from MAX_CLIP_EVENTS (a per-clip
@@ -938,6 +938,18 @@ typedef struct engine {
      * bass line that's following the kick pattern. Defaults to 1 (audible)
      * -- see arr_create_instance. */
     uint8_t drum_enabled;
+    /* Keys: Perform/Jam's playable pads (keys_note). While keys_on, pad
+     * notes reaching on_midi play the layout's note on the keys route,
+     * straight from the audio thread; keys_held remembers what each pad
+     * sent, so its note-off matches after an octave change. */
+    uint8_t keys_on;
+    uint8_t keys_target;     /* OUTPUT_TARGET_* */
+    uint8_t keys_channel;    /* 0-15 */
+    uint8_t keys_layout;     /* KEYS_LAYOUT_* */
+    uint8_t keys_scale;      /* index into KEYS_SCALES */
+    uint8_t keys_root;       /* the key's pitch class, 0-11 */
+    int8_t keys_octave;      /* the bottom-left pad's octave */
+    uint8_t keys_held[32];   /* note each pad is sounding, 0xFF = none */
     /* Perform's live mute for the song's own Inst 1/Inst 2 tracks, set via
      * inst1_enabled/inst2_enabled. Engine-level for the same reason as
      * drum_enabled: it must survive a song_json rebuild. It used to be
@@ -6170,6 +6182,8 @@ static void* arr_create_instance(const char *module_dir, const char *config_json
     e->click_normal_note = 77;     /* GM Low Wood Block */
     e->click_last_beat = UINT32_MAX;
     for (int i = 0; i < MAX_INSTRUMENTS; i++) e->inst_live_enabled[i] = 1;
+    memset(e->keys_held, 0xFF, sizeof e->keys_held);
+    e->keys_octave = 3;
     /* Pre-existing latent bug, newly reachable now that JS/the test harness
      * must poll get_param("state") for primary_published_gen BEFORE any
      * build has ever completed (to capture a baseline generation) rather
@@ -6249,12 +6263,91 @@ static void arr_destroy_instance(void *instance) {
     free(e);
 }
 
+/* Keys layouts: In Key (scale notes only) or Chromatic, each row of eight
+ * pads a 4th / a 3rd above the one below it, or carrying on in sequence.
+ * The bottom-left pad is the key's root, in keys_octave. */
+enum { KEYS_LAYOUT_KEY_4THS, KEYS_LAYOUT_KEY_3RDS, KEYS_LAYOUT_KEY_SEQ,
+       KEYS_LAYOUT_CHROM_4THS, KEYS_LAYOUT_CHROM_3RDS, KEYS_LAYOUT_CHROM_SEQ, KEYS_LAYOUT_COUNT };
+static const int8_t KEYS_SCALES[][8] = {     /* [0] = count, then the steps */
+    { 7, 0, 2, 4, 5, 7, 9, 11 },             /* Major */
+    { 7, 0, 2, 3, 5, 7, 8, 10 },             /* Minor */
+    { 7, 0, 2, 3, 5, 7, 9, 10 },             /* Dorian */
+    { 7, 0, 2, 4, 5, 7, 9, 10 },             /* Mixolydian */
+    { 5, 0, 2, 4, 7, 9, 0, 0 },              /* Major pentatonic */
+    { 5, 0, 3, 5, 7, 10, 0, 0 },             /* Minor pentatonic */
+    { 6, 0, 3, 5, 6, 7, 10, 0 },             /* Blues */
+};
+#define KEYS_SCALE_COUNT ((int)(sizeof KEYS_SCALES / sizeof KEYS_SCALES[0]))
+
+/* The note pad `pad` (0 = bottom left, row-major) plays, or -1 off the MIDI
+ * range. The UI has the same function (keysPadNote) for its pad lights. */
+static int keys_note(int layout, int scale, int root, int octave, int pad) {
+    if (pad < 0 || pad > 31) return -1;
+    int row = pad / 8, col = pad % 8;
+    if (scale < 0 || scale >= KEYS_SCALE_COUNT) scale = 0;
+    int base = (octave + 1) * 12 + ((root % 12) + 12) % 12;
+    int note;
+    if (layout >= KEYS_LAYOUT_CHROM_4THS && layout < KEYS_LAYOUT_COUNT) {
+        int row_step = layout == KEYS_LAYOUT_CHROM_4THS ? 5 : layout == KEYS_LAYOUT_CHROM_3RDS ? 4 : 8;
+        note = base + col + row * row_step;
+    } else {
+        int n = KEYS_SCALES[scale][0];
+        int row_step = layout == KEYS_LAYOUT_KEY_3RDS ? 2 : layout == KEYS_LAYOUT_KEY_SEQ ? 8 : 3;
+        int d = col + row * row_step;
+        note = base + 12 * (d / n) + KEYS_SCALES[scale][1 + d % n];
+    }
+    return note >= 0 && note <= 127 ? note : -1;
+}
+
+/* The Keys route as a voice, for emit_instrument_event (which counts what is
+ * sounding, so Stop can release a held key too). */
+static inst_voice_t keys_voice(const engine_t *e) {
+    inst_voice_t v;
+    memset(&v, 0, sizeof v);
+    v.output_target = e->keys_target;
+    v.channel = e->keys_channel;
+    return v;
+}
+
+/* Release every key still held. */
+static void keys_release_all(engine_t *e) {
+    inst_voice_t v = keys_voice(e);
+    for (int i = 0; i < 32; i++) {
+        if (e->keys_held[i] == 0xFF) continue;
+        emit_instrument_event(e, &v, 0x80, e->keys_held[i], 0);
+        e->keys_held[i] = 0xFF;
+    }
+}
+
 static void arr_on_midi(void *instance, const uint8_t *msg, int len, int source) {
     /* Arranger is a generator with its own transport: it doesn't pass
      * through external input, and Move's own transport (MIDI Start/Continue/
      * Stop) deliberately doesn't start or stop it -- only Arranger's own Play
-     * and Stop do. (It still sends its clock to Schwung -- see clock_tick.) */
-    (void)instance; (void)msg; (void)len; (void)source;
+     * and Stop do. (It still sends its clock to Schwung -- see clock_tick.)
+     *
+     * Its one input is Keys: Schwung hands an overtake module's DSP Move's
+     * pad notes on the audio thread, so a pad played as a key sounds with no
+     * round trip through the UI. Only while the UI has Keys on (Perform or
+     * Jam, toggled by Capture). */
+    engine_t *e = instance;
+    (void)source;
+    if (!e || !msg || len < 3) return;
+    uint8_t type = msg[0] & 0xF0, pad_note = msg[1], vel = msg[2];
+    if ((type != 0x90 && type != 0x80) || pad_note < 68 || pad_note > 99) return;
+    int pad = pad_note - 68;
+    inst_voice_t v = keys_voice(e);
+    if (type == 0x90 && vel > 0) {
+        if (!e->keys_on) return;
+        int note = keys_note(e->keys_layout, e->keys_scale, e->keys_root, e->keys_octave, pad);
+        if (note < 0) return;
+        if (e->keys_held[pad] != 0xFF) emit_instrument_event(e, &v, 0x80, e->keys_held[pad], 0);
+        emit_instrument_event(e, &v, 0x90, (uint8_t)note, vel);
+        e->keys_held[pad] = (uint8_t)note;
+    } else if (e->keys_held[pad] != 0xFF) {
+        /* Even after Keys went off: a pad held across it ends its note. */
+        emit_instrument_event(e, &v, 0x80, e->keys_held[pad], 0);
+        e->keys_held[pad] = 0xFF;
+    }
 }
 
 static int arr_get_error(void *instance, char *buf, int buf_len) {
@@ -6738,12 +6831,40 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
         if (!e->rng) e->rng = 1;
         return;
     }
-    if (strcmp(key, "inst1_enabled") == 0 || strcmp(key, "inst2_enabled") == 0) {
+    if (strncmp(key, "keys_", 5) == 0) {
+        /* Keys (see arr_on_midi). Switching off, or moving the route,
+         * releases what is held first; layout/scale/key/octave changes leave
+         * held notes alone (their offs are remembered per pad). */
+        const char *k = key + 5;
+        int v = atoi(val);
+        if (strcmp(k, "on") == 0) {
+            if (!v) keys_release_all(e);
+            e->keys_on = v ? 1 : 0;
+        } else if (strcmp(k, "output") == 0) {
+            keys_release_all(e);
+            e->keys_target = strcmp(val, "move") == 0 ? OUTPUT_TARGET_MOVE
+                           : strcmp(val, "schwung") == 0 ? OUTPUT_TARGET_SCHWUNG : OUTPUT_TARGET_EXTERNAL;
+        } else if (strcmp(k, "channel") == 0) {
+            keys_release_all(e);
+            if (v >= 1 && v <= 16) e->keys_channel = (uint8_t)(v - 1);
+        } else if (strcmp(k, "layout") == 0) {
+            e->keys_layout = (uint8_t)clampi(v, 0, KEYS_LAYOUT_COUNT - 1);
+        } else if (strcmp(k, "scale") == 0) {
+            e->keys_scale = (uint8_t)clampi(v, 0, KEYS_SCALE_COUNT - 1);
+        } else if (strcmp(k, "root") == 0) {
+            e->keys_root = (uint8_t)clampi(v, 0, 11);
+        } else if (strcmp(k, "octave") == 0) {
+            e->keys_octave = (int8_t)clampi(v, -1, 8);
+        }
+        return;
+    }
+    if (strcmp(key, "inst1_enabled") == 0 || strcmp(key, "inst2_enabled") == 0 ||
+        strcmp(key, "inst3_enabled") == 0) {
         /* Perform live mute for a song-authored instrument track -- see
          * inst_live_enabled. Disabling while a note is sounding cuts it off
          * immediately rather than waiting for its own scheduled/bar-boundary
-         * off. */
-        int idx = (key[4] == '1') ? 0 : 1;
+         * off. Inst 3 is the Pads track. */
+        int idx = key[4] - '1';
         e->inst_live_enabled[idx] = atoi(val) ? 1 : 0;
         if (idx < e->live_slot.song.instrument_count) {
             if (!e->inst_live_enabled[idx] && e->last_inst_chord_set[idx]) {

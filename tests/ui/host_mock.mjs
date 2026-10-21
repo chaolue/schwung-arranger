@@ -34,7 +34,10 @@ g.host_file_exists = (path) => files.has(path);
 export const knobLeds = new Array(8);
 /* buttonLeds.get(cc): the last colour sent to that button's light. */
 export const buttonLeds = new Map();
+/* padLeds.get(note): the last colour sent to that pad's (or step's) light. */
+export const padLeds = new Map();
 g.move_midi_internal_send = (msg) => {
+    if (msg && (msg[1] & 0xF0) === 0x90) padLeds.set(msg[2], msg[3]);
     if (msg && (msg[1] & 0xF0) === 0xB0) {
         if (msg[2] >= 71 && msg[2] <= 78) knobLeds[msg[2] - 71] = msg[3];
         buttonLeds.set(msg[2], msg[3]);
