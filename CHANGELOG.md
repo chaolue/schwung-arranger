@@ -68,6 +68,9 @@
   list, not its number. Preset comes first in the knob's parameter list
   (then My Presets); a module that leaves it out of its parameter list
   still offers it.
+- A knob on a list -- a module's Preset, My Presets, or any option list --
+  takes four detents per item (two before; one for Preset), so it no longer
+  skids past the one you want. Turning back answers at once.
 - Knobs follow their parameters changed elsewhere — Schwung's Remote UI or
   its editor: the new value is saved for the current song, the knob light
   follows, and the knob feedback shows it. With Schwung's parameter change

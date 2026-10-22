@@ -56,18 +56,18 @@ sl = saved();
 check(sl.knobs[0] && sl.knobs[0].key === "__user_preset" && !sl.knobs[1], "and back to knob 1: " + JSON.stringify(sl.knobs));
 back(); back(); back();      /* Setlist Edit, Bank, Root */
 
-/* Perform: nothing chosen, so nothing is loaded. A turn (two detents per
+/* Perform: nothing chosen, so nothing is loaded. A turn (four detents per
  * preset) loads the first by name, Bright, then the next, Warm. */
 H.writes.length = 0;
 root(2); click(); click();
 tick(3);
 check(lastWrite(0, "synth:state") === undefined, "no preset loaded with nothing chosen");
-cc(71, 1); cc(71, 1); tick();
+cc(71, 1); cc(71, 1); cc(71, 1); cc(71, 1); tick();
 check(lastWrite(0, "synth:state") === '{"a":1}', "first turn loads Bright's state: " + lastWrite(0, "synth:state"));
 check(H.printed.some(t => /Bright/.test(t)), "knob feedback names the preset: " + JSON.stringify(H.printed.slice(-3)));
-cc(71, 1); cc(71, 1); tick();
+cc(71, 1); cc(71, 1); cc(71, 1); cc(71, 1); tick();
 check(lastWrite(0, "synth:state") === "raw-warm", "next loads Warm's raw state: " + lastWrite(0, "synth:state"));
-cc(71, 1); cc(71, 1); tick();
+cc(71, 1); cc(71, 1); cc(71, 1); cc(71, 1); tick();
 check(lastWrite(0, "synth:state") === "raw-warm" && H.writes.filter(w => w[1] === "synth:state").length === 2,
       "past the last preset nothing more is loaded");
 tick(Math.ceil(1700 / 23));

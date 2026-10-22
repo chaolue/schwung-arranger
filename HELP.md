@@ -561,7 +561,8 @@ Presets) also offers **My Presets**: the knob steps through them by name and
 loads each one. A module's own **built-in presets** (an SF2's programs, a
 synth's factory banks — whatever its preset browser lists) can be mapped too,
 as its **Preset** parameter — first in the list, ahead of My Presets:
-turning the knob loads them in turn, and the
+turning the knob loads them in turn (as for any list, it takes four detents
+to move one item, so you can stop on the one you want), and the
 popup shows each preset's **name**, not its number. A name appears once the
 Arranger has seen that preset loaded (straight away for the one you turn to);
 until then the number shows.

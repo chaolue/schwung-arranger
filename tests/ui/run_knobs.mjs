@@ -146,7 +146,7 @@ g.onMidiMessageInternal([0x90, MovePads[1], 100]); g.onMidiMessageInternal([0x80
 tick(3);
 check(lastWrite(2, "synth:wave") === "Saw" && lastWrite(0, "fx1:mix") === undefined,
       "song B restores its own knob 1 and not the knob it turned off: " + JSON.stringify(H.writes));
-cc(71, 1); tick(); cc(71, 1); tick();
+cc(71, 1); tick(); cc(71, 1); tick(); cc(71, 1); tick(); cc(71, 1); tick();   /* four detents an item */
 check(lastWrite(2, "synth:wave") === "Square", "song B knob 1 steps the enum to Square");
 cc(72, 5); tick();
 check(lastWrite(0, "fx1:mix") === undefined, "an Off knob writes nothing");

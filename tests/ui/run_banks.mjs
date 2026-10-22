@@ -47,7 +47,7 @@ check(lastWrite(0, "synth:cutoff") === "0.99", "bank 1: knob 1 turns Cutoff: " +
 /* Sample -> bank 2: knob 1 is Wave, lit along the rainbow sweep. */
 cc(SAMPLE, 127); cc(SAMPLE, 0); tick(20);
 check(H.knobLeds[0] === 33, "bank 2 (rainbow sweep): Wave at Sine (first of 3) is Blue 33 (" + H.knobLeds[0] + ")");
-cc(71, 1); cc(71, 1); tick();
+cc(71, 1); cc(71, 1); cc(71, 1); cc(71, 1); tick();   /* four detents: one list item */
 check(lastWrite(0, "synth:wave") === "Saw", "bank 2: knob 1 steps Wave to Saw: " + lastWrite(0, "synth:wave"));
 tick(20);
 check(H.knobLeds[0] === 11, "Wave at Saw (middle) is Neon Green 11 (" + H.knobLeds[0] + ")");

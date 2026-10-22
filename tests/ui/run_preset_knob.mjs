@@ -42,8 +42,11 @@ check(shown("Preset Grand Piano"), "touching the knob names the preset: " + JSON
 check(!H.printed.some(p => /Preset 0\b/.test(p)), "...not its number");
 g.onMidiMessageInternal([0x80, 0, 0]); tick();
 
-/* Turn one detent: preset 1, Strings. */
-cc(71, 1); tick(3);
+/* Four detents (one list item): preset 1, Strings. Three alone do nothing. */
+const turn = (d, n) => { for (let i = 0; i < n; i++) cc(71, d > 0 ? 1 : 127); };
+turn(1, 3); tick(3);
+check(sf2.preset === "0", "three detents: still preset 0");
+turn(1, 1); tick(3);
 check(sf2.preset === "1", "the turn loads preset 1");
 H.printed.length = 0;
 tick(2);
@@ -51,16 +54,22 @@ check(shown("Preset Strings"), "the popup names it: " + JSON.stringify(H.printed
 
 /* Two detents in one tick: it lands on 2 without a name for 1 being read
  * from the module while 2 is loaded. */
-cc(71, 127); tick(25);      /* back to 0 (cached) */
-cc(71, 1); cc(71, 1); tick(25);
-check(sf2.preset === "2", "a fast turn lands on preset 2");
+turn(-1, 4); tick(25);      /* back to 0 (cached) */
+turn(1, 8); tick(25);
+check(sf2.preset === "2", "a fast turn (eight detents at once) lands on preset 2");
 H.printed.length = 0;
 tick(2);
 check(shown("Drawbar Organ"), "and names it: " + JSON.stringify(H.printed.slice(-3)));
-cc(71, 127); tick(25);
+turn(-1, 4); tick(25);
 H.printed.length = 0;
 tick(2);
 check(shown("Preset Strings"), "preset 1 still reads Strings (never Organ): " + JSON.stringify(H.printed.slice(-3)));
+/* Turning back answers at once: three detents up gather nothing, and four
+ * down then step back a preset -- not seven. */
+turn(1, 3); tick(3);
+check(sf2.preset === "1", "three detents up: still preset 1");
+turn(-1, 4); tick(3);
+check(sf2.preset === "0", "four back: preset 0");
 
 /* ---- the picker: Preset first, then My Presets, then the rest ---- */
 cc(51, 127); cc(51, 0); tick(3);   /* Back: out of Perform */

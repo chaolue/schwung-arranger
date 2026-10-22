@@ -1192,6 +1192,22 @@ function knobDecimals(step) {
 /* One knob turn applied to a parameter value. Returns the new value in the
  * form the plugin uses (an option name or an index, for enums), or null when
  * it does not change. */
+/* Knob detents per list item -- an enum's option, My Presets, or a module's
+ * own Preset -- so a list is stepped through deliberately rather than
+ * skidding past the item you wanted. */
+const KNOB_LIST_DETENTS = 4;
+
+/* Items a list knob moves for this detent `delta`: detents gather until
+ * there are KNOB_LIST_DETENTS of them; turning back starts afresh, so a
+ * reversal answers as quickly as the first turn. */
+function knobListSteps(knob, delta) {
+    if (Math.sign(delta) !== Math.sign(knobEnumAcc[knob])) knobEnumAcc[knob] = 0;
+    knobEnumAcc[knob] += delta;
+    const steps = Math.trunc(knobEnumAcc[knob] / KNOB_LIST_DETENTS);
+    knobEnumAcc[knob] -= steps * KNOB_LIST_DETENTS;
+    return steps;
+}
+
 function knobStepValue(meta, cur, delta, knob) {
     const options = knobOptions(meta);
     if (options) {
@@ -1202,11 +1218,8 @@ function knobStepValue(meta, cur, delta, knob) {
             const n = parseInt(cur, 10);
             idx = Number.isFinite(n) && n >= 0 && n < options.length ? n : 0;
         }
-        /* Two detents per option, so a list can be stepped through deliberately. */
-        knobEnumAcc[knob] += delta;
-        const steps = knobEnumAcc[knob] > 0 ? Math.floor(knobEnumAcc[knob] / 2) : Math.ceil(knobEnumAcc[knob] / 2);
+        const steps = knobListSteps(knob, delta);
         if (steps === 0) return null;
-        knobEnumAcc[knob] -= steps * 2;
         const next = Math.max(0, Math.min(options.length - 1, idx + steps));
         if (next === idx || next < 0) return null;
         return usesIndex ? String(next) : options[next];
@@ -1217,6 +1230,11 @@ function knobStepValue(meta, cur, delta, knob) {
     const max = Number.isFinite(meta.max) ? meta.max : (meta.type === "int" ? 127 : 1);
     let step = meta.step > 0 ? meta.step : (meta.type === "int" ? 1 : (max - min) / 100);
     if (!(step > 0)) step = 0.01;
+    /* A module's own presets are a list too. */
+    if (meta.name_param) {
+        delta = knobListSteps(knob, delta);
+        if (delta === 0) return null;
+    }
     let next = Math.max(min, Math.min(max, num + delta * step));
     if (meta.type === "int") {
         next = Math.round(next);

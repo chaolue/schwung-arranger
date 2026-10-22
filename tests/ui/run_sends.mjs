@@ -97,7 +97,7 @@ check(lastWrite(1, "buses:main_send1") === "10", "turning knob 4 writes buses:ma
 
 /* Knob 5 -> Chain 2 -> Settings -> Mute: an Off/On switch. */
 jog(1); click(); jog(2); click(); click(); jog(2); click();
-cc(75, 2); tick();
+cc(75, 4); tick();   /* four detents: one step of an Off/On list */
 check(lastWrite(1, "slot:muted") === "1", "turning knob 5 mutes chain 2: " + JSON.stringify(H.writes.slice(-2)));
 
 console.log(`${passes} passed, ${failures} failed`);
