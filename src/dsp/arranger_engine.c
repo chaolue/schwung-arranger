@@ -602,6 +602,7 @@ static void scan_songs_into(engine_t *e, song_entry_t *songs, int *out_count);
 static const char* clip_lookup_find(engine_t *e, const char *leaf);
 static void clip_lookup_free(engine_t *e);
 static void parse_chords_and_instruments(const char *json, song_t *song);
+static int parse_instruments_array(const char *inst_arr, instrument_t *insts, int max);
 static void parse_section_chords(const char *arr, song_t *song, int section_idx);
 static int mid_chord_cmp(const void *a, const void *b);
 static void parse_click_items(const char *json, song_t *song);
@@ -958,6 +959,12 @@ typedef struct engine {
      * saved value -- found live: Inst 1/2 muted while stopped kept playing
      * after Play, while the pads/buttons showed them muted. Defaults to 1. */
     uint8_t inst_live_enabled[MAX_INSTRUMENTS];
+    /* Live updates of the song's instruments (inst_at): Song Builder's
+     * Instrument Settings and item pages, heard while playing without a
+     * rebuild. Parsed into here on the audio thread (set_param), so nothing
+     * else writes them; cleared by the next song_json. */
+    instrument_t inst_live[MAX_INSTRUMENTS];
+    uint8_t inst_live_set[MAX_INSTRUMENTS];
     /* How many times each instrument note is currently sounding, per output
      * route (external/move/schwung) and channel -- see
      * emit_instrument_notes_release. */
@@ -2613,6 +2620,22 @@ static int chord_voiced_notes(const inst_voice_t *inst, const chord_t *ch, int *
     return n;
 }
 
+/* The song's instrument i as it plays now: a live update from Song
+ * Builder's settings pages (inst_live, "inst<N>_live") while one is set,
+ * else the song's own. A live update holds until the next song_json, which
+ * carries the same settings anyway (the UI saved them). */
+static instrument_t *inst_at(engine_t *e, int i) {
+    return e->inst_live_set[i] ? &e->inst_live[i] : &e->live_slot.song.instruments[i];
+}
+
+/* How many instruments play: the song's, or more when a live update adds
+ * one it did not have (Pads switched on in a song saved before them). */
+static int inst_count(const engine_t *e) {
+    int n = e->live_slot.song.instrument_count;
+    for (int i = 0; i < MAX_INSTRUMENTS; i++) if (e->inst_live_set[i] && i + 1 > n) n = i + 1;
+    return n > MAX_INSTRUMENTS ? MAX_INSTRUMENTS : n;
+}
+
 static int chord_equal(const chord_t *a, const chord_t *b);
 
 /* xorshift32: Chance and the Random arpeggio. */
@@ -2855,7 +2878,7 @@ static void service_strum(engine_t *e, inst_voice_t *v, uint32_t tick) {
 }
 
 static void service_instrument_strums(engine_t *e, uint32_t tick) {
-    for (int i = 0; i < e->live_slot.song.instrument_count && i < MAX_INSTRUMENTS; i++)
+    for (int i = 0; i < inst_count(e) && i < MAX_INSTRUMENTS; i++)
         if (e->last_inst_chord_set[i]) service_strum(e, &e->last_inst_resolved[i], tick);
     for (int i = 0; i < 2; i++)
         if (e->jam_last_chord_set[i]) service_strum(e, &e->jam_last_resolved[i], tick);
@@ -3100,7 +3123,7 @@ static uint32_t arp_gap_ticks(const engine_t *e, const inst_voice_t *v, uint32_t
  * the note-on fires only when the chord changes, and the note-off is scheduled
  * `note_gap` before the next chord change (or the song end). */
 static void emit_instruments_at_tick(engine_t *e, uint32_t tick) {
-    if (!e || e->live_slot.song.instrument_count == 0) return;
+    if (!e || inst_count(e) == 0) return;
     uint32_t bar = 0;
     chord_pos_t cp;
     int sec_idx = chord_at_song_tick(&e->live_slot.song, tick, e->ticks_per_bar, e->ticks_per_beat, &bar, &cp);
@@ -3115,8 +3138,8 @@ static void emit_instruments_at_tick(engine_t *e, uint32_t tick) {
     dsp_log_enqueue_worker("EMIT_INST tick=%u sec=%d bar=%u chord=%s next=%s", tick, sec_idx, bar,
             (ch && ch->set) ? ch->root : "null",
             (next_ch && next_ch->set) ? next_ch->root : "null");
-    for (int i = 0; i < e->live_slot.song.instrument_count && i < MAX_INSTRUMENTS; i++) {
-        instrument_t *inst = &e->live_slot.song.instruments[i];
+    for (int i = 0; i < inst_count(e) && i < MAX_INSTRUMENTS; i++) {
+        instrument_t *inst = inst_at(e, i);
         if (!inst->enabled || !e->inst_live_enabled[i]) continue;
         inst_voice_t resolved;
         int muted = 0;
@@ -3234,8 +3257,8 @@ static void emit_instruments_at_tick(engine_t *e, uint32_t tick) {
  * Called on stop so instrument notes don't ring on after playback ends. */
 static void emit_instruments_all_off(engine_t *e) {
     if (!e) return;
-    for (int i = 0; i < e->live_slot.song.instrument_count && i < MAX_INSTRUMENTS; i++) {
-        instrument_t *inst = &e->live_slot.song.instruments[i];
+    for (int i = 0; i < inst_count(e) && i < MAX_INSTRUMENTS; i++) {
+        instrument_t *inst = inst_at(e, i);
         if (!inst->enabled) continue;
         if (e->last_inst_chord_set[i]) {
             emit_instrument_chord_off(e, &e->last_inst_resolved[i], &e->last_inst_chord[i]);
@@ -3262,7 +3285,7 @@ static void schedule_instrument_note_off(engine_t *e, int i, const inst_voice_t 
  * playhead. Called each render block from advance_playhead. */
 static void fire_pending_instrument_notes_off(engine_t *e, uint32_t tick) {
     if (!e) return;
-    for (int i = 0; i < e->live_slot.song.instrument_count && i < MAX_INSTRUMENTS; i++) {
+    for (int i = 0; i < inst_count(e) && i < MAX_INSTRUMENTS; i++) {
         if (!e->pending_off_set[i]) continue;
         if (e->pending_off_tick[i] > tick) continue;
         if (e->last_inst_chord_set[i]) {
@@ -3291,7 +3314,7 @@ static uint32_t find_next_note_on_tick(engine_t *e, uint8_t note, uint32_t from_
  * fires. Called from the event drain path. The note is held until the next
  * matching drum hit, cut short by `note_gap` before it (or the song end). */
 static void emit_instruments_follow(engine_t *e, uint8_t note, uint8_t hit_vel, uint32_t tick) {
-    if (!e || e->live_slot.song.instrument_count == 0) return;
+    if (!e || inst_count(e) == 0) return;
     uint32_t bar = 0;
     int sec_idx = tick_to_section_bar(&e->live_slot.song, tick, e->ticks_per_bar, &bar);
     if (sec_idx < 0) return;
@@ -3327,8 +3350,8 @@ static void emit_instruments_follow(engine_t *e, uint8_t note, uint8_t hit_vel, 
         }
     }
     uint32_t eval_off = bar_offset_at(&e->live_slot.song, eval_tick, e->ticks_per_bar);
-    for (int i = 0; i < e->live_slot.song.instrument_count && i < MAX_INSTRUMENTS; i++) {
-        instrument_t *inst = &e->live_slot.song.instruments[i];
+    for (int i = 0; i < inst_count(e) && i < MAX_INSTRUMENTS; i++) {
+        instrument_t *inst = inst_at(e, i);
         if (!inst->enabled || !e->inst_live_enabled[i]) continue;
         inst_voice_t resolved;
         int muted = 0;
@@ -3414,7 +3437,7 @@ static uint32_t find_note_on_before(engine_t *e, uint8_t note, uint32_t from, ui
  * coming note is. Called once a block. */
 static void emit_instrument_approaches(engine_t *e, uint32_t tick) {
     song_t *song = &e->live_slot.song;
-    if (!e->running || song->instrument_count == 0 || e->ticks_per_beat == 0 || e->ticks_per_bar == 0) return;
+    if (!e->running || inst_count(e) == 0 || e->ticks_per_beat == 0 || e->ticks_per_bar == 0) return;
     uint32_t half = e->ticks_per_beat / 2;
     uint32_t guard = (uint32_t)(e->swap_guard_fraction * e->ticks_per_beat);
     chord_pos_t cp;
@@ -3422,8 +3445,8 @@ static void emit_instrument_approaches(engine_t *e, uint32_t tick) {
     int sec_now = chord_at_song_tick(song, tick, e->ticks_per_bar, e->ticks_per_beat, &bar_now, &cp);
     if (sec_now < 0) return;
     uint32_t off_now = bar_offset_at(song, tick, e->ticks_per_bar);
-    for (int i = 0; i < song->instrument_count && i < MAX_INSTRUMENTS; i++) {
-        instrument_t *inst = &song->instruments[i];
+    for (int i = 0; i < inst_count(e) && i < MAX_INSTRUMENTS; i++) {
+        instrument_t *inst = inst_at(e, i);
         inst_play_t *ps = &e->inst_play[i];
         if (!inst->enabled || !e->inst_live_enabled[i]) continue;
         inst_voice_t now;
@@ -3929,61 +3952,11 @@ static int parse_song_json(engine_t *e, const char *json, song_t *song,
  * into `song`. Chords are stored per-bar (null entries are skipped); a chord
  * object is {root, quality, bass}. Instruments are {enabled, output, channel,
  * octave, follow_note, voicing, bars:[[1,0,...],...]}. */
-static void parse_chords_and_instruments(const char *json, song_t *song) {
-    /* --- Chords: walk each section object and read its "chords" array. --- */
-    song->mid_chord_count = 0;
-    const char *sec_pos = strstr(json, "\"sections\"");
-    if (sec_pos) {
-        const char *arr_start = strchr(sec_pos, '[');
-        if (arr_start) {
-            int depth = 0, in_string = 0, escape = 0;
-            int section_idx = -1;
-            const char *p = arr_start;
-            while (*p) {
-                char c = *p;
-                if (escape) { escape = 0; p++; continue; }
-                if (c == '\\') { escape = 1; p++; continue; }
-                if (c == '"') {
-                    in_string = !in_string;
-                    /* On entering a string at section depth, detect the
-                     * "chords" key and parse its array. This must happen here
-                     * (not after the generic quote handling) because the quote
-                     * is consumed by this branch. */
-                    if (in_string && depth == 1 && section_idx >= 0 &&
-                        section_idx < MAX_SONG_SECTIONS &&
-                        strncmp(p, "\"chords\"", 8) == 0) {
-                        const char *ch_arr = strchr(p + 8, '[');
-                        if (ch_arr) {
-                            parse_section_chords(ch_arr, song, section_idx);
-                        }
-                    }
-                    p++;
-                    continue;
-                }
-                if (in_string) { p++; continue; }
-                if (c == '{') {
-                    depth++;
-                    if (depth == 1) section_idx++;
-                    p++;
-                    continue;
-                }
-                if (c == '}') { depth--; p++; continue; }
-                if (c == '[') { p++; continue; }
-                if (c == ']') { if (depth == 0) break; p++; continue; }
-                p++;
-            }
-        }
-    }
-
-    if (song->mid_chord_count > 1)
-        qsort(song->mid_chords, (size_t)song->mid_chord_count, sizeof song->mid_chords[0], mid_chord_cmp);
-    parse_click_items(json, song);
-
-    /* --- Instruments: read the top-level "instruments" array. --- */
-    const char *inst_pos = strstr(json, "\"instruments\"");
-    if (!inst_pos) return;
-    const char *inst_arr = strchr(inst_pos, '[');
-    if (!inst_arr) return;
+/* Parse an instruments array ("[{...}, ...]", as in song JSON) into
+ * insts[0..max). Returns how many it held (at most max + 1, as the song's
+ * instrument_count always was; readers clamp to MAX_INSTRUMENTS). Also used
+ * for a live instrument update (inst_live). */
+static int parse_instruments_array(const char *inst_arr, instrument_t *insts, int max) {
     int depth = 0, in_string = 0, escape = 0;
     int inst_idx = -1;
     const char *p = inst_arr;
@@ -3994,8 +3967,8 @@ static void parse_chords_and_instruments(const char *json, song_t *song) {
         if (c == '"') {
             in_string = !in_string;
             /* Parse a key when entering a string at instrument depth. */
-            if (in_string && depth == 1 && inst_idx >= 0 && inst_idx < MAX_INSTRUMENTS) {
-                instrument_t *inst = &song->instruments[inst_idx];
+            if (in_string && depth == 1 && inst_idx >= 0 && inst_idx < max) {
+                instrument_t *inst = &insts[inst_idx];
                 if (strncmp(p + 1, "enabled", 7) == 0) {
                     /* "enabled" is serialized as a JSON boolean (true/false),
                      * not a number, so atoi() would read 0 for "true". Parse
@@ -4073,8 +4046,8 @@ static void parse_chords_and_instruments(const char *json, song_t *song) {
             depth++;
             if (depth == 1) {
                 inst_idx++;
-                if (inst_idx >= MAX_INSTRUMENTS) break;
-                instrument_t *inst = &song->instruments[inst_idx];
+                if (inst_idx >= max) break;
+                instrument_t *inst = &insts[inst_idx];
                 memset(inst, 0, sizeof(*inst));
                 inst->output_target = OUTPUT_TARGET_EXTERNAL;
                 inst->channel = 0;
@@ -4096,7 +4069,65 @@ static void parse_chords_and_instruments(const char *json, song_t *song) {
         if (c == ']') { if (depth == 0) break; p++; continue; }
         p++;
     }
-    song->instrument_count = inst_idx + 1;
+    return inst_idx + 1;
+}
+
+static void parse_chords_and_instruments(const char *json, song_t *song) {
+    /* --- Chords: walk each section object and read its "chords" array. --- */
+    song->mid_chord_count = 0;
+    const char *sec_pos = strstr(json, "\"sections\"");
+    if (sec_pos) {
+        const char *arr_start = strchr(sec_pos, '[');
+        if (arr_start) {
+            int depth = 0, in_string = 0, escape = 0;
+            int section_idx = -1;
+            const char *p = arr_start;
+            while (*p) {
+                char c = *p;
+                if (escape) { escape = 0; p++; continue; }
+                if (c == '\\') { escape = 1; p++; continue; }
+                if (c == '"') {
+                    in_string = !in_string;
+                    /* On entering a string at section depth, detect the
+                     * "chords" key and parse its array. This must happen here
+                     * (not after the generic quote handling) because the quote
+                     * is consumed by this branch. */
+                    if (in_string && depth == 1 && section_idx >= 0 &&
+                        section_idx < MAX_SONG_SECTIONS &&
+                        strncmp(p, "\"chords\"", 8) == 0) {
+                        const char *ch_arr = strchr(p + 8, '[');
+                        if (ch_arr) {
+                            parse_section_chords(ch_arr, song, section_idx);
+                        }
+                    }
+                    p++;
+                    continue;
+                }
+                if (in_string) { p++; continue; }
+                if (c == '{') {
+                    depth++;
+                    if (depth == 1) section_idx++;
+                    p++;
+                    continue;
+                }
+                if (c == '}') { depth--; p++; continue; }
+                if (c == '[') { p++; continue; }
+                if (c == ']') { if (depth == 0) break; p++; continue; }
+                p++;
+            }
+        }
+    }
+
+    if (song->mid_chord_count > 1)
+        qsort(song->mid_chords, (size_t)song->mid_chord_count, sizeof song->mid_chords[0], mid_chord_cmp);
+    parse_click_items(json, song);
+
+    /* --- Instruments: read the top-level "instruments" array. --- */
+    const char *inst_pos = strstr(json, "\"instruments\"");
+    if (!inst_pos) return;
+    const char *inst_arr = strchr(inst_pos, '[');
+    if (!inst_arr) return;
+    song->instrument_count = parse_instruments_array(inst_arr, song->instruments, MAX_INSTRUMENTS);
 
     /* Diagnostic: confirm what was parsed so instrument emission can be
      * verified against the song JSON. */
@@ -5846,8 +5877,8 @@ static uint32_t inst_bar_key_at(engine_t *e, uint32_t tick) {
         if (mo < len && mo <= off) seg++;
     }
     /* Instrument items starting mid-bar are change points too. */
-    for (int k = 0; k < song->instrument_count && k < MAX_INSTRUMENTS; k++) {
-        const instrument_t *inst = &song->instruments[k];
+    for (int k = 0; k < inst_count(e) && k < MAX_INSTRUMENTS; k++) {
+        const instrument_t *inst = inst_at(e, k);
         if (!inst->uses_items) continue;
         int ni = inst->item_count > MAX_INST_ITEMS ? MAX_INST_ITEMS : inst->item_count;
         for (int i = 0; i < ni; i++) {
@@ -5867,10 +5898,10 @@ static uint32_t inst_bar_key_at(engine_t *e, uint32_t tick) {
  * Follow Note change; the next chord attack starts it again. */
 static void service_arp_rate(engine_t *e, uint32_t tick) {
     song_t *song = &e->live_slot.song;
-    for (int i = 0; i < song->instrument_count && i < MAX_INSTRUMENTS; i++) {
+    for (int i = 0; i < inst_count(e) && i < MAX_INSTRUMENTS; i++) {
         inst_play_t *ps = &e->inst_play[i];
         if (!ps->arp_next) continue;
-        instrument_t *inst = &song->instruments[i];
+        instrument_t *inst = inst_at(e, i);
         if (!inst->enabled || !e->inst_live_enabled[i]) { ps->arp_next = 0; continue; }
         /* Left far ahead by a loop wrap: the loop start's attack restarts it. */
         if (ps->arp_next > tick + 4 * e->ticks_per_beat) { ps->arp_next = 0; continue; }
@@ -5924,7 +5955,7 @@ static void update_bar_counter(engine_t *e) {
     /* Song instruments change chord at each chord bar, counted from each
      * section's own start -- not the absolute bar grid above, which drifts
      * from the song's sections once one ends mid-bar. */
-    if (e->running && e->live_slot.song.instrument_count > 0) {
+    if (e->running && inst_count(e) > 0) {
         uint32_t key = inst_bar_key_at(e, e->playhead_tick);
         if (key != e->inst_bar_key || wrapped) {
             e->inst_bar_key = key;
@@ -6627,6 +6658,8 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
         return;
     }
     if (strcmp(key, "song_json") == 0) {
+        /* The new song carries the settings live updates were previewing. */
+        memset(e->inst_live_set, 0, sizeof e->inst_live_set);
         /* Default to one-shot unless loop is explicitly set afterwards.
          * This prevents stale loop state from causing preview/song to loop
          * when the timeline is rebuilt. */
@@ -6831,6 +6864,26 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
         if (!e->rng) e->rng = 1;
         return;
     }
+    if (strlen(key) == 10 && strncmp(key, "inst", 4) == 0 && strcmp(key + 5, "_live") == 0 &&
+        key[4] >= '1' && key[4] < '1' + MAX_INSTRUMENTS) {
+        /* A live update of instrument N: its JSON as in song_json's
+         * "instruments" array, wrapped in [ ]. Whatever it was sounding is
+         * released first, so a change of octave or route never strands a
+         * note; the next attack plays the new settings. */
+        int idx = key[4] - '1';
+        if (e->last_inst_chord_set[idx]) {
+            emit_instrument_chord_off(e, &e->last_inst_resolved[idx], &e->last_inst_chord[idx]);
+            e->last_inst_chord_set[idx] = 0;
+        }
+        e->pending_off_set[idx] = 0;
+        e->inst_play[idx].arp_next = 0;
+        if (val && parse_instruments_array(val, &e->inst_live[idx], 1) >= 1) {
+            e->inst_live_set[idx] = 1;
+            /* The bar-boundary path attacks only on a change: have it re-attack. */
+            e->inst_bar_key = 0xFFFFFFFFu;
+        }
+        return;
+    }
     if (strncmp(key, "keys_", 5) == 0) {
         /* Keys (see arr_on_midi). Switching off, or moving the route,
          * releases what is held first; layout/scale/key/octave changes leave
@@ -6866,7 +6919,7 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
          * off. Inst 3 is the Pads track. */
         int idx = key[4] - '1';
         e->inst_live_enabled[idx] = atoi(val) ? 1 : 0;
-        if (idx < e->live_slot.song.instrument_count) {
+        if (idx < inst_count(e)) {
             if (!e->inst_live_enabled[idx] && e->last_inst_chord_set[idx]) {
                 emit_instrument_chord_off(e, &e->last_inst_resolved[idx], &e->last_inst_chord[idx]);
                 e->last_inst_chord_set[idx] = 0;

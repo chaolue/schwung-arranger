@@ -87,6 +87,16 @@
 - Options lists Drums, Inst 1, Inst 2, Pads, Click, Keys, Chains, ...; the
   web settings page has Pads and Keys too.
 
+### Instrument settings while playing
+- Play now works from Instrument Settings and the item pages of Inst 1/2 and
+  Pads (it sent the song but never started it: the build confirmation that
+  starts playback wasn't read from those pages).
+- While playing, a change to an instrument's settings or items -- on those
+  pages, or Delete/Copy/nudge in its list -- is heard at once: the engine
+  takes the instrument live and re-strikes, without rebuilding the song.
+- A setting changed while playing from a section or the cursor is no longer
+  lost on Stop (it went to the temporary copy being played).
+
 ### Schwung chains
 - While a chain, Send or Master FX editor is open over the Arranger, only
   playing controls still work: Play, the Track buttons, Menu, Shift, and in

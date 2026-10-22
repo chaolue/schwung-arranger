@@ -139,6 +139,65 @@ int main(int argc, char **argv) {
     api->set_param(inst, "inst3_enabled", "1");
 
     stop_and_ring_out(api, inst);
+
+    /* ---- Live instrument updates (Song Builder's settings while playing) ----
+     * A song with only Inst 1: bass, octave 2, D held for 4 bars (D2 38).
+     * Mid-bar, inst1_live moves it to octave 4: D2 is released at once and
+     * D4 (62) sounds straight away. inst3_live then adds Pads the song never
+     * had (a chord, octave 4: 62 66 69). A new song_json drops the updates. */
+    snprintf(json, sizeof(json),
+        "{\"source_folder\":\"%s\",\"name\":\"T\",\"tempo_bpm\":120,"
+        "\"time_sig_num\":4,\"time_sig_den\":4,\"sections\":["
+        "{\"name\":\"A\",\"clips\":[{\"source\":\"Grooves/120 Verse Half-Time.mid\",\"start_bar\":0,\"end_bar\":4,\"guard_fraction\":0}],"
+        "\"chords\":[{\"root\":\"D\",\"quality\":\"maj\",\"bass\":\"\"}]}"
+        "],\"instruments\":["
+        "{\"enabled\":true,\"output\":\"schwung\",\"channel\":2,\"octave\":2,\"follow_note\":0,\"voicing\":\"bass\",\"note_gap\":0.125}"
+        "]}", folder);
+    base = state_u32(api, inst, "primary_published_gen");
+    api->set_param(inst, "song_json", json);
+    CHECK(wait_field_change(api, inst, "primary_published_gen", base, 3000), "live: song published");
+    g_captured_count = 0;
+    api->set_param(inst, "play", "1");
+    for (int b = 0; b < 300; b++) api->render_block(inst, audio, MOVE_FRAMES_PER_BLOCK);
+    int d2_on = 0;
+    for (int i = 0; i < g_captured_count; i++)
+        if (g_captured[i].channel == 1 && g_captured[i].status == 0x90 && g_captured[i].vel > 0 && g_captured[i].note == 38) d2_on++;
+    CHECK(d2_on == 1, "Inst 1 holds D2");
+    g_captured_count = 0;
+    api->set_param(inst, "inst1_live", "[{\"enabled\":true,\"output\":\"schwung\",\"channel\":2,\"octave\":4,"
+                                       "\"follow_note\":0,\"voicing\":\"bass\",\"note_gap\":0.125}]");
+    int d2_off = 0, d4_on = 0;
+    for (int i = 0; i < g_captured_count; i++)
+        if (g_captured[i].channel == 1 && g_captured[i].note == 38 &&
+            (g_captured[i].status == 0x80 || (g_captured[i].status == 0x90 && g_captured[i].vel == 0))) d2_off++;
+    CHECK(d2_off == 1, "the live update releases D2 at once");
+    for (int b = 0; b < 3; b++) api->render_block(inst, audio, MOVE_FRAMES_PER_BLOCK);
+    for (int i = 0; i < g_captured_count; i++)
+        if (g_captured[i].channel == 1 && g_captured[i].status == 0x90 && g_captured[i].vel > 0 && g_captured[i].note == 62) d4_on++;
+    CHECK(d4_on == 1, "...and D4 sounds within a block or two, mid-bar");
+    g_captured_count = 0;
+    api->set_param(inst, "inst3_live", "[{\"enabled\":true,\"output\":\"schwung\",\"channel\":7,\"octave\":4,"
+                                       "\"follow_note\":0,\"voicing\":\"chord\",\"inversion\":0,\"note_gap\":0.125}]");
+    for (int b = 0; b < 3; b++) api->render_block(inst, audio, MOVE_FRAMES_PER_BLOCK);
+    int pads_on = 0;
+    for (int i = 0; i < g_captured_count; i++)
+        if (g_captured[i].channel == 6 && g_captured[i].status == 0x90 && g_captured[i].vel > 0) pads_on++;
+    CHECK(pads_on == 3, "Pads added live to a song without them play the chord: " );
+    stop_and_ring_out(api, inst);
+    base = state_u32(api, inst, "primary_published_gen");
+    api->set_param(inst, "song_json", json);
+    CHECK(wait_field_change(api, inst, "primary_published_gen", base, 3000), "live: song sent again");
+    g_captured_count = 0;
+    api->set_param(inst, "play", "1");
+    for (int b = 0; b < 300; b++) api->render_block(inst, audio, MOVE_FRAMES_PER_BLOCK);
+    int d2_again = 0, pads_again = 0;
+    for (int i = 0; i < g_captured_count; i++) {
+        if (g_captured[i].status != 0x90 || g_captured[i].vel == 0) continue;
+        if (g_captured[i].channel == 1 && g_captured[i].note == 38) d2_again++;
+        if (g_captured[i].channel == 6) pads_again++;
+    }
+    CHECK(d2_again == 1 && pads_again == 0, "a new song_json drops the live updates: the song's own D2, no Pads");
+    stop_and_ring_out(api, inst);
     api->destroy_instance(inst);
     if (g_failures == 0) printf("\nALL TESTS PASSED\n");
     else printf("\n%d TEST(S) FAILED\n", g_failures);

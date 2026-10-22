@@ -2057,6 +2057,8 @@ let activeSongObj = null;
  * the full song they were cut from, so a change the DSP reports for the temp
  * song can be applied to -- and saved as -- the full one. */
 const tempSongOrigin = new WeakMap();
+/* The section of the real song a temporary copy starts at (its section 0). */
+const tempSongStart = new WeakMap();
 let songFiles = [];
 let selectedSongIndex = 0;
 /* Set after a song file is added/removed on disk (duplicate/delete), so the
@@ -3397,17 +3399,62 @@ function transposeSongChords(song, oldKey, newKey) {
 
 /* The instrument config for an instrument track (Inst 1, Inst 2, Pads). */
 function instrumentForTrack(track) {
-    if (!currentSong) return null;
-    if (!currentSong.instruments) currentSong.instruments = [];
+    /* The real song, also while a temporary copy plays (Play from the
+     * cursor): a setting changed during playback used to go to the copy and
+     * was lost on Stop. Playback hears it through pushInstrumentLive. */
+    const song = viewSong();
+    if (!song) return null;
+    if (!song.instruments) song.instruments = [];
     const idx = instIndex(track);
     if (idx < 0) return null;
     /* Never a gap: a song saved with Pads but no Inst 1/2 still lists them. */
     for (let k = 0; k <= idx; k++) {
-        if (!currentSong.instruments[k]) currentSong.instruments[k] = defaultInstrument(k);
+        if (!song.instruments[k]) song.instruments[k] = defaultInstrument(k);
     }
-    if (!currentSong.instruments[idx].overrides) currentSong.instruments[idx].overrides = [];
-    if (typeof currentSong.instruments[idx].inversion !== "number") currentSong.instruments[idx].inversion = INVERSION_AUTO;
-    return currentSong.instruments[idx];
+    if (!song.instruments[idx].overrides) song.instruments[idx].overrides = [];
+    if (typeof song.instruments[idx].inversion !== "number") song.instruments[idx].inversion = INVERSION_AUTO;
+    return song.instruments[idx];
+}
+
+/* While Song Builder plays, a change to an instrument -- its settings, or
+ * its items -- is heard at once: the engine takes that instrument's JSON as
+ * a live update (inst<N>_live) and re-attacks, instead of the change waiting
+ * for the next Play. Built from the real song; while a temporary copy plays
+ * (from a section or the cursor), its items are renumbered onto the copy's
+ * sections. Sent once a tick at most (flushInstrumentLive). */
+const instLiveDirty = new Set();
+
+function markInstrumentLive(track) {
+    if (isInstTrack(track) && playbackState === "playing" && currentMode !== MODE_PERFORMANCE) instLiveDirty.add(track);
+}
+
+export function instrumentLiveJson(song, idx, start) {
+    const eng = JSON.parse(toEngineSongJson(song));
+    const inst = eng.instruments && eng.instruments[idx];
+    if (!inst) return null;
+    if (Array.isArray(inst.items)) {
+        inst.items = inst.items.filter(it => it.section >= start)
+            .map(it => Object.assign({}, it, { section: it.section - start }));
+    }
+    /* Items replace the old per-bar maps (the engine ignores them then). */
+    delete inst.bars;
+    delete inst.overrides;
+    return JSON.stringify([inst]);
+}
+
+function flushInstrumentLive() {
+    if (instLiveDirty.size === 0) return;
+    const tracks = [...instLiveDirty];
+    instLiveDirty.clear();
+    if (playbackState !== "playing" || typeof host_module_set_param !== "function") return;
+    const song = viewSong();
+    if (!song) return;
+    const start = builderPlayingFromTemp ? (tempSongStart.get(currentSong) || 0) : 0;
+    for (const track of tracks) {
+        const idx = instIndex(track);
+        const json = instrumentLiveJson(song, idx, start);
+        if (json) host_module_set_param("inst" + (idx + 1) + "_live", json);
+    }
 }
 
 /* A new song's instrument `idx`: Inst 1/2 as they always were; Pads a
@@ -8283,6 +8330,7 @@ function handleInstrumentInput(cc, value) {
                 stepInstVariety(inst, key, delta);
             }
             unsavedChanges = true;
+            markInstrumentLive(instrumentEditTrack);
         } else {
             instrumentFocus = Math.max(0, Math.min(rows.length - 1, instrumentFocus + delta));
         }
@@ -8291,9 +8339,11 @@ function handleInstrumentInput(cc, value) {
         if (row.key === "enabled") {
             inst.enabled = !inst.enabled;
             unsavedChanges = true;
+            markInstrumentLive(instrumentEditTrack);
         } else if (row.key === "vel_follow") {
             inst.vel_follow = !instVariety(inst).vel_follow;
             unsavedChanges = true;
+            markInstrumentLive(instrumentEditTrack);
         } else {
             instrumentEditing = !instrumentEditing;
         }
@@ -8507,6 +8557,7 @@ function itemListNudge(delta) {
     itemListCursor = list.indexOf(it);
     syncItemCursorBar(list);
     unsavedChanges = true;
+    markInstrumentLive(builderTrack);
     needsRedraw = true;
 }
 
@@ -8569,6 +8620,7 @@ function itemListDelete() {
     itemListCursor = Math.min(itemListCursor, list.length);
     syncItemCursorBar(list);
     unsavedChanges = true;
+    markInstrumentLive(builderTrack);
     needsRedraw = true;
 }
 
@@ -8588,6 +8640,7 @@ function itemListDuplicate() {
     itemListCursor = list.indexOf(copy);
     syncItemCursorBar(list);
     unsavedChanges = true;
+    markInstrumentLive(builderTrack);
     needsRedraw = true;
 }
 
@@ -8717,6 +8770,14 @@ function commitItemEdit() {
     unsavedChanges = true;
 }
 
+/* While playing, an item page's change is heard at once: the item is saved
+ * into its list (as Play from this page does) and the instrument sent live. */
+function itemLivePreview() {
+    if (!isInstTrack(itemEditTrack) || playbackState !== "playing") return;
+    applyOpenEditForPlay();
+    markInstrumentLive(itemEditTrack);
+}
+
 function closeItemEdit() {
     menuStack.pop();
     currentView = VIEW_BUILDER;
@@ -8820,6 +8881,7 @@ function handleInstrumentBarMenuInput(cc, value) {
         } else {
             itemFocus = Math.max(0, Math.min(rows.length - 1, itemFocus + delta));
         }
+        if (itemEditing && sec) itemLivePreview();
         needsRedraw = true;
     } else if (cc === MoveMainButton && value > 0) {
         if (row.key === "adv") {
@@ -8838,10 +8900,10 @@ function handleInstrumentBarMenuInput(cc, value) {
             needsRedraw = true;
             return;
         }
-        if (row.key === "mute") { w.mute = !w.mute; needsRedraw = true; return; }
+        if (row.key === "mute") { w.mute = !w.mute; itemLivePreview(); needsRedraw = true; return; }
         if (row.key === "delete") {
             const i = itemEditOrig ? list.indexOf(itemEditOrig) : -1;
-            if (i >= 0) { list.splice(i, 1); unsavedChanges = true; }
+            if (i >= 0) { list.splice(i, 1); unsavedChanges = true; markInstrumentLive(itemEditTrack); }
             itemListCursor = Math.min(itemListCursor, list.length);
             syncItemCursorBar(list);
             closeItemEdit();
@@ -11006,6 +11068,8 @@ function toggleBuilderInstrument(track) {
     if (playbackState === "playing" && typeof host_module_set_param === "function") {
         host_module_set_param("inst" + (instIndex(track) + 1) + "_enabled", inst.enabled ? "1" : "0");
     }
+    /* An instrument the playing song didn't have on (or at all) starts now. */
+    markInstrumentLive(track);
     showPopup(itemTrackName(track), inst.enabled ? "On" : "Off", 2000);
     needsRedraw = true;
     ledDirtyAll = true;
@@ -14226,6 +14290,7 @@ function playFromCurrentSection() {
     temp.sections = JSON.parse(JSON.stringify(currentSong.sections.slice(currentSectionIndex)));
     reindexInstrumentsForSectionSlice(temp, currentSectionIndex);
     tempSongOrigin.set(temp, currentSong);
+    tempSongStart.set(temp, currentSectionIndex);
     let barOffset = 0;
     for (let i = 0; i < currentSectionIndex; i++) {
         barOffset += sectionBars(currentSong.sections[i]);
@@ -14341,6 +14406,7 @@ function previewClipAtCursor() {
     temp.sections[0].id = "play-from-cursor-" + Date.now();
     temp.sections[0].clips = fromCursorClips;
     tempSongOrigin.set(temp, currentSong);
+    tempSongStart.set(temp, currentSectionIndex);
     /* Step-LED flash should still appear on the clip's actual step in the
      * original full section/song layout, not step 1 of the temporary section. */
     let barOffset = 0;
@@ -15954,6 +16020,7 @@ function drawPopup() {
 globalThis.tick = function() {
     pollBattery();
     tickKeys();
+    flushInstrumentLive();
     tickPopup();
     {
         const nowMs = Date.now();
@@ -16017,7 +16084,13 @@ globalThis.tick = function() {
 
     /* Always update DSP transport so every LED/draw call below uses the most
      * recent sample-accurate position. */
-    if (currentView === VIEW_PERFORMANCE || currentView === VIEW_BUILDER || currentView === VIEW_JAM || playbackState === "playing") {
+    /* ...and wherever Play works (Song Builder's settings pages) or a build
+     * is waiting to be confirmed: Play from Instrument Settings sent the song
+     * and then never started it -- the confirmation that starts playback is
+     * read here, and it was never read from those pages. */
+    if (currentView === VIEW_PERFORMANCE || currentView === VIEW_BUILDER || currentView === VIEW_JAM ||
+        playbackState === "playing" || SONG_BUILDER_SUBVIEWS.has(currentView) ||
+        pendingPrimaryConfirm || pendingStagingConfirm) {
         updateDspState();
     }
 

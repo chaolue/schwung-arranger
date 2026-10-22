@@ -281,7 +281,14 @@ click is off). Bars where an item starts are in orange.
 ### Instrument Settings
 
 Configure how an instrument track plays. Opened with **Menu** from that
-Instrument track.
+Instrument track (or the Pads track).
+
+**Play** works here as in the Song Builder (start from the cursor; Play again
+stops), and **while playing, every change is heard at once** — the instrument
+re-strikes with the new setting — so you can try settings against the song.
+The same goes for an item's page (the item is saved as you change it) and for
+Delete, Copy and nudging items in the track's list. Changes made while playing
+are kept when you stop.
 
 | Control | Action |
 |---------|--------|
