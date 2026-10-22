@@ -558,7 +558,12 @@ itself publishes. Each chain's **Settings** offer its Volume, Pan, Mute, Solo
 and Send A/B levels, and each send's Settings its **Return** level. (Send A/B
 appear only on a Schwung that has the send buses.) A chain component whose module has **user presets** (Schwung's My
 Presets) also offers **My Presets**: the knob steps through them by name and
-loads each one.
+loads each one. A module's own **built-in presets** (an SF2's programs, a
+synth's factory banks — whatever its preset browser lists) can be mapped too,
+as its **Preset** parameter: turning the knob loads them in turn, and the
+popup shows each preset's **name**, not its number. A name appears once the
+Arranger has seen that preset loaded (straight away for the one you turn to);
+until then the number shows.
 
 - **Four banks.** Press **Sample** in Perform to switch the knobs between 4
   banks of 8 mappings (bank 1 → 2 → 3 → 4 → 1); Sample lights in the bank's

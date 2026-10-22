@@ -905,6 +905,13 @@ let perfKnobs = new Array(KNOB_SLOTS).fill(null);   /* resolved, all banks; see 
 let perfKnobsKey = "";               /* which setlist+song perfKnobs was built for */
 const knobWriteQueue = new Map();    /* knob index -> { slot, fullKey, value, tries } */
 const knobMetaCache = new Map();     /* "slot|comp|module" -> { list, byKey } */
+/* Preset names by number, for a module's own presets mapped to a knob:
+ * "slot|comp|module|key|value" -> name. Learned by reading the module's
+ * name parameter while that preset is the one loaded (presetNameReads). */
+const presetNameCache = new Map();
+/* Name reads due after a preset knob's write:
+ * { due, slot, comp, meta, value, knob (write-queue index), current() }. */
+const presetNameReads = [];
 const knobEnumAcc = new Array(KNOB_COUNT).fill(0);
 const knobTouched = new Array(KNOB_COUNT).fill(false);
 let knobSaveDue = 0;                 /* Date.now() after which currentSetlist is saved */
@@ -1038,9 +1045,79 @@ function readCompMeta(slot, comp, moduleId) {
         list.push(p);
         byKey.set(p.key, p);
     }
+    /* The module's own presets: a ui_hierarchy level with a list_param is a
+     * preset browser, and its name_param names the preset loaded -- so a
+     * knob on that parameter can show the name, not the number. A module
+     * whose chain_params leaves the preset out still gets it, as a number
+     * from 0 to its count. */
+    const hierRaw = readCompParam(slot, comp, "ui_hierarchy");
+    let hier = null;
+    try { hier = hierRaw ? JSON.parse(hierRaw) : null; } catch (e) { hier = null; }
+    const levels = hier && hier.levels && typeof hier.levels === "object" ? Object.values(hier.levels) : [];
+    for (const lvl of levels) {
+        if (!lvl || typeof lvl.list_param !== "string" || !lvl.list_param) continue;
+        const key = lvl.list_param;
+        const nameParam = typeof lvl.name_param === "string" && lvl.name_param ? lvl.name_param : "preset_name";
+        let p = byKey.get(key);
+        if (!p) {
+            const count = lvl.count_param ? parseInt(readCompParam(slot, comp, lvl.count_param), 10) : NaN;
+            p = { key, name: "Preset", type: "int", min: 0, max: Number.isFinite(count) && count > 0 ? count - 1 : 127 };
+            list.push(p);
+        } else {
+            p = Object.assign({}, p);
+            list[list.indexOf(byKey.get(key))] = p;
+        }
+        p.name_param = nameParam;
+        p.name_ref = cacheKey + "|" + key;
+        byKey.set(key, p);
+    }
     const meta = { list, byKey };
-    knobMetaCache.set(cacheKey, meta);
+    /* A hierarchy that did not answer is retried next time. */
+    if (hierRaw !== null) knobMetaCache.set(cacheKey, meta);
     return withUserPresets(meta, slot, moduleId);
+}
+
+/* A preset knob's value as its preset's name, once known. */
+function presetNameFor(meta, value) {
+    if (!meta || !meta.name_ref || value === null || value === undefined) return null;
+    return presetNameCache.get(meta.name_ref + "|" + String(parseInt(value, 10))) || null;
+}
+
+/* Read the name of the preset now loaded, for `value`. Only kept while the
+ * knob still sits on that value: the name parameter names what is loaded,
+ * and a turn since would make it another preset's. */
+function readPresetName(slot, comp, meta, value) {
+    const name = readCompParam(slot, comp, meta.name_param);
+    if (typeof name === "string" && name.trim()) {
+        presetNameCache.set(meta.name_ref + "|" + String(parseInt(value, 10)), name.trim());
+        needsRedraw = true;
+    }
+}
+
+/* After a preset knob's write: read the name on the next tick, and again a
+ * little later for a module that loads its preset in the background. */
+function schedulePresetName(m, meta, value, knob, current) {
+    if (!meta || !meta.name_param) return;
+    const now = Date.now();
+    for (const delay of [0, 400]) {
+        presetNameReads.push({ due: now + delay, slot: m.slot, comp: m.comp, meta, value: String(value), knob, current });
+    }
+}
+
+function flushPresetNameReads() {
+    if (presetNameReads.length === 0) return;
+    const now = Date.now();
+    for (let i = 0; i < presetNameReads.length; i++) {
+        const r = presetNameReads[i];
+        if (r.due > now) continue;
+        presetNameReads.splice(i--, 1);
+        /* Still the knob's value, and its write has landed. */
+        const cur = r.current ? r.current() : r.value;
+        if (cur === null || cur === undefined || String(cur) !== r.value) continue;
+        if (knobWriteQueue.has(r.knob)) { r.due = now + 50; presetNameReads.push(r); continue; }
+        readPresetName(r.slot, r.comp, r.meta, r.value);
+        break;   /* one read a tick: each is a round trip */
+    }
 }
 
 /* A module's user presets, sorted by name as Schwung lists them:
@@ -1148,6 +1225,8 @@ function knobStepValue(meta, cur, delta, knob) {
 
 function formatKnobValue(meta, value) {
     if (value === null || value === undefined || value === "") return "—";
+    const preset = presetNameFor(meta, value);
+    if (preset) return preset;
     const options = meta ? knobOptions(meta) : null;
     if (options) {
         if (options.indexOf(String(value)) >= 0) return String(value);
@@ -1266,7 +1345,10 @@ function applyPerfKnobs(force) {
         const k = resolveKnob(res, modules);
         k.value = knobSavedValue(entry, i, res);
         perfKnobs[i] = k;
-        if (k.status === "ok" && k.value !== null) queueKnobWrite(i, res.m, k.value);
+        if (k.status === "ok" && k.value !== null) {
+            queueKnobWrite(i, res.m, k.value);
+            schedulePresetName(res.m, k.meta, k.value, i, () => perfKnobs[i] && perfKnobs[i].value);
+        }
     }
 }
 
@@ -1286,6 +1368,8 @@ function refreshPerfKnobs() {
         if (k.status === "ok") {
             const live = readKnobLive(res.m);
             k.value = live ? live : knobSavedValue(entry, i, res);
+            /* A preset knob: name the preset loaded now. */
+            if (live && k.meta && k.meta.name_param && !presetNameFor(k.meta, live)) readPresetName(res.m.slot, res.m.comp, k.meta, live);
         }
         perfKnobs[i] = k;
     }
@@ -1509,6 +1593,7 @@ function turnPerfKnob(i, delta) {
     if (next === null) return;
     k.value = next;
     queueKnobWrite(slot, m, next);
+    schedulePresetName(m, k.meta, next, slot, () => perfKnobs[slot] && perfKnobs[slot].value);
     const entry = currentSetlist ? currentSetlist.songs[perfSongIndex] : null;
     storeKnobValue(entry, slot, k.res, next);
     markKnobSave();
@@ -1570,7 +1655,11 @@ function drawPerfKnobFeedback() {
             : pre + compLabel(m.comp) + (m.moduleName ? " " + m.moduleName : "");
         if (k.status === "missing") what = m.label + ": not loaded";
         else if (k.status === "unknown") what = m.label + ": no answer";
-        else what = m.label + " " + formatKnobValue(k.meta, k.value);
+        else {
+            const v = formatKnobValue(k.meta, k.value);
+            /* A preset's name alone when the label would crowd it out. */
+            what = presetNameFor(k.meta, k.value) && (m.label + " " + v).length > 21 ? v : m.label + " " + v;
+        }
     }
     fill_rect(0, 40, 128, 24, 0);
     fill_rect(0, 40, 128, 1, 1);
@@ -1695,6 +1784,7 @@ function turnEditKnob(i, delta) {
     const next = knobStepValue(k.meta, cur, delta, i);
     if (next === null) return;
     queueKnobWrite(slot, m, next);
+    schedulePresetName(m, k.meta, next, slot, () => knobSavedValue(knobEditEntry(), slot, k.res));
     if (knobEditScope === "song") storeKnobValue(entry, slot, k.res, next);
     else m.value = next;
     perfKnobsKey = "";               /* Performance re-reads it */
@@ -16306,6 +16396,7 @@ globalThis.tick = function() {
     /* Knob values: send queued writes, save the setlist once turning stops,
      * and take the feedback down when it expires. */
     flushKnobWrites();
+    flushPresetNameReads();
     pollPerfKnobs(Date.now());
     flushKnobSave(Date.now());
     if (knobShowIndex >= 0 && Date.now() >= knobShowUntil && !knobTouched[knobShowIndex]) {

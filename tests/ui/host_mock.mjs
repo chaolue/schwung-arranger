@@ -141,8 +141,20 @@ export const slots = [
       midi_fx: 0, fx: 1 },
     { recv: 2, comps: {}, midi_fx: 0, fx: 0 },
     { recv: 0, comps: { synth: synth("obxd", "OB-Xd") }, midi_fx: 0, fx: 0 },
-    { recv: 4, comps: { synth: synth("sf2", "") }, midi_fx: 0, fx: 0 },
+    { recv: 4, comps: { synth: sf2() }, midi_fx: 0, fx: 0 },
 ];
+/* A module with its own presets, as sf2 declares them: a ui_hierarchy level
+ * with list_param/count_param/name_param, "preset" not in chain_params, and
+ * preset_name naming whichever is loaded. */
+function sf2() {
+    const c = synth("sf2", "");
+    c.values.preset = "0";
+    c.values.preset_count = "3";
+    c.hierarchy = { modes: null, levels: { root: { label: "SF2", list_param: "preset", count_param: "preset_count",
+                                                   name_param: "preset_name", params: [] } } };
+    c.computed = { preset_name: (v) => ["Grand Piano", "Strings", "Drawbar Organ"][parseInt(v.preset, 10)] || "" };
+    return c;
+}
 /* Master FX: positions fx1..fx8 at IPC slot 0, as "master_fx:fx<N>:<key>". */
 export const masterFx = {
     fx2: { module: "tapedelay", values: { feedback: "0.40" },
@@ -218,6 +230,8 @@ g.shadow_get_param = (slot, key) => {
         if (!c) return "";
         if (m[2] === "name") return c.name;
         if (m[2] === "chain_params") return JSON.stringify(c.params);
+        if (m[2] === "ui_hierarchy") return c.hierarchy ? JSON.stringify(c.hierarchy) : "";
+        if (c.computed && c.computed[m[2]]) return c.computed[m[2]](c.values);
         return c.values[m[2]] !== undefined ? String(c.values[m[2]]) : "";
     }
     return "";
