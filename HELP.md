@@ -560,7 +560,8 @@ appear only on a Schwung that has the send buses.) A chain component whose modul
 Presets) also offers **My Presets**: the knob steps through them by name and
 loads each one. A module's own **built-in presets** (an SF2's programs, a
 synth's factory banks — whatever its preset browser lists) can be mapped too,
-as its **Preset** parameter: turning the knob loads them in turn, and the
+as its **Preset** parameter — first in the list, ahead of My Presets:
+turning the knob loads them in turn, and the
 popup shows each preset's **name**, not its number. A name appears once the
 Arranger has seen that preset loaded (straight away for the one you turn to);
 until then the number shows.

@@ -11,6 +11,8 @@ H.files.set(SONGS + "/a.json", JSON.stringify({ name: "Song A", tempo_bpm: 120, 
     { name: "Verse", clips: [{ source: "Grooves/beat.mid", name: "beat" }] }] }));
 const knobs = [];
 knobs[0] = { slot: 3, comp: "synth", key: "preset", module: "sf2", moduleName: "", label: "Preset", value: "0" };
+/* A user preset of sf2's too, so the picker has both kinds. */
+H.files.set("/data/UserData/schwung/presets/sf2/mine.json", JSON.stringify({ name: "Mine", module: "sf2", version: 1, state: "x" }));
 H.files.set(SETLISTS + "/gig.json", JSON.stringify({ id: "s1", name: "Gig", move_set: { uuid: "set-a", name: "Gig Set" }, knobs,
     songs: [{ id: "e1", name: "Song A", path: SONGS + "/a.json", click_bars: 0 }] }));
 
@@ -59,6 +61,18 @@ cc(71, 127); tick(25);
 H.printed.length = 0;
 tick(2);
 check(shown("Preset Strings"), "preset 1 still reads Strings (never Organ): " + JSON.stringify(H.printed.slice(-3)));
+
+/* ---- the picker: Preset first, then My Presets, then the rest ---- */
+cc(51, 127); cc(51, 0); tick(3);   /* Back: out of Perform */
+jog(-8); jog(1); click();          /* Setlists */
+jog(1); click();                   /* Gig */
+jog(2); click();                   /* Knobs */
+click();                           /* knob 1 -> chain list */
+jog(4); click();                   /* Chain 4 (sf2) */
+H.printed.length = 0;
+click();                           /* Synth */
+check(H.printed[0] === "Preset" && H.printed[1] === "My Presets" && H.printed.includes("Cutoff"),
+      "sf2's parameters start with Preset, then My Presets: " + JSON.stringify(H.printed.slice(0, 5)));
 
 console.log(`${passes} passed, ${failures} failed`);
 process.exit(failures ? 1 : 0);

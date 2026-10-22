@@ -65,8 +65,9 @@
 ### Perform
 - A knob on a module's own presets (its preset browser's parameter -- an
   SF2's programs, say) shows the preset's name in the popup and the Knobs
-  list, not its number. A module that leaves the preset out of its
-  parameter list still offers it, as Preset.
+  list, not its number. Preset comes first in the knob's parameter list
+  (then My Presets); a module that leaves it out of its parameter list
+  still offers it.
 - Knobs follow their parameters changed elsewhere — Schwung's Remote UI or
   its editor: the new value is saved for the current song, the knob light
   follows, and the knob feedback shows it. With Schwung's parameter change

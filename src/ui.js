@@ -1062,11 +1062,12 @@ function readCompMeta(slot, comp, moduleId) {
         if (!p) {
             const count = lvl.count_param ? parseInt(readCompParam(slot, comp, lvl.count_param), 10) : NaN;
             p = { key, name: "Preset", type: "int", min: 0, max: Number.isFinite(count) && count > 0 ? count - 1 : 127 };
-            list.push(p);
         } else {
+            list.splice(list.indexOf(p), 1);
             p = Object.assign({}, p);
-            list[list.indexOf(byKey.get(key))] = p;
         }
+        /* First in the picker: it is what a preset knob is usually for. */
+        list.unshift(p);
         p.name_param = nameParam;
         p.name_ref = cacheKey + "|" + key;
         byKey.set(key, p);
@@ -1156,7 +1157,9 @@ function withUserPresets(meta, slot, moduleId) {
                  options: presets.map(p => p.name), files: presets };
     const byKey = new Map(meta.byKey);
     byKey.set(USER_PRESET_KEY, up);
-    return { list: [up].concat(meta.list), byKey };
+    /* After the module's own Preset (see readCompMeta), ahead of the rest. */
+    const own = meta.list.filter(p => p.name_param);
+    return { list: own.concat([up], meta.list.filter(p => !p.name_param)), byKey };
 }
 
 /* A user preset's state as the string to write to "<comp>:state", or null. */
