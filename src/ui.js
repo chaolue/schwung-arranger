@@ -258,8 +258,31 @@ export function bassNotesForKey(key) {
     return out;
 }
 
-/* Root-row value meaning "No Chord" (a silent bar), after the seven degrees. */
-const NO_CHORD_DEGREE = 7;
+/* The chord page's Root row: semitones above the key's root, 0-11 -- every
+ * root, in or out of the key -- then No Chord (a silent bar). Named as
+ * degrees of the major key: the key's own chords as I ii iii IV V vi vii°,
+ * the others as the flat (or sharp IV) degrees they usually are. */
+const CHORD_ROOT_NONE = 12;
+const CHORD_ROOT_DEGREES = ["I", "bII", "ii", "bIII", "iii", "IV", "#IV", "V", "bVI", "vi", "bVII", "vii°"];
+/* A root's degree in the key (0-6), or -1 outside it. */
+const CHORD_ROOT_SCALE_DEGREE = [0, -1, 1, -1, 2, 3, -1, 4, -1, 5, -1, 6];
+const FLAT_NOTE_NAMES = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"];
+
+/* The note name of root `r` (semitones above `key`): the key's own notes as
+ * the key's chords name them, the flat degrees with flats. */
+export function chordRootName(key, r) {
+    const keyPc = noteSemitone(key);
+    const pc = ((keyPc < 0 ? 0 : keyPc) + r) % 12;
+    const d = CHORD_ROOT_SCALE_DEGREE[r];
+    if (d >= 0) return diatonicChord(key, d).root;
+    return CHORD_ROOT_DEGREES[r].startsWith("b") ? FLAT_NOTE_NAMES[pc] : NOTE_NAMES[pc];
+}
+
+/* A root's default type: the key's own chord's, else major. */
+function chordRootDefaultQuality(r) {
+    const d = CHORD_ROOT_SCALE_DEGREE[r];
+    return d >= 0 ? DIATONIC_QUALITY[d] : "maj";
+}
 
 /* Default key for a new song. */
 const DEFAULT_KEY = "C";
@@ -2231,7 +2254,7 @@ let chordCursorBar = 0;
 let chordCursorIdx = 0;
 /* Chord picker state: which bar is being edited, and the current selection. */
 let chordPickBar = -1;
-let chordPickDegree = 0;      /* 0-based scale degree (0..6) */
+let chordPickRoot = 0;        /* semitones above the key's root (0-11), or CHORD_ROOT_NONE */
 let chordPickQuality = 0;     /* index into CHORD_QUALITIES */
 let chordPickBass = -1;       /* index into bassNotesForKey(key), -1 = no slash bass */
 let chordPickFocus = 0;       /* row index into chordPickItems() */
@@ -3268,10 +3291,11 @@ export function instrumentVelocity(inst) {
  *   vel_follow  a drum-following attack is as loud as its hit (x velocity/100).
  *   arp_rate    Arp with Follow Note Off: steps per beat, ARP_RATES. */
 export const VOICINGS = ["bass", "chord", "arp"];
-/* Bass: 1 = root, 3/5 = the chord's third/fifth above it, O = its octave;
- * Country alternates the root with the fifth BELOW; Boogie walks
- * 1 3 5 6 b7 6 5 3. */
-const BASS_PATTERN_LABELS = ["Root", "Root/5th", "Root/Oct", "R-5-O-5", "Country", "1-3-5-3", "1-3-5-8", "Boogie"];
+/* Bass, named by the notes they walk -- 1 the root, 3 and 5 the chord's
+ * third and fifth above it, 8 its octave, as the arp's 1-5-8-10 is: 1 (the
+ * root alone), 1-5, 1-8, 1-5-8-5, 1-5 Low (the fifth BELOW, country style),
+ * 1-3-5-3, 1-3-5-8, and 1-3-5-6-b7 (boogie: 1 3 5 6 b7 6 5 3). */
+const BASS_PATTERN_LABELS = ["1", "1-5", "1-8", "1-5-8-5", "1-5 Low", "1-3-5-3", "1-3-5-8", "1-3-5-6-b7"];
 /* Arp: Random / Rnd Walk (a step up or down) / Shuffle (every tone once a
  * round) start each chord on the base; Alberti low-high-mid-high; Pedal the
  * base between each other tone; Converge outside in; 1-5-8-10 the root's
@@ -8067,7 +8091,7 @@ function loadPickFields(chord) {
     chordPickAdv = !!(chord && chord.adv);
     chordPickDirty = false;
     if (chord && chord.none) {
-        chordPickDegree = NO_CHORD_DEGREE;
+        chordPickRoot = CHORD_ROOT_NONE;
         chordPickQuality = 0;
         chordPickBass = -1;
         return;
@@ -8075,31 +8099,25 @@ function loadPickFields(chord) {
     if (chord && chord.root) {
         const keyPc = noteSemitone(key);
         const rootPc = noteSemitone(chord.root);
-        const scaleSteps = [0, 2, 4, 5, 7, 9, 11];
-        let degree = 0;
-        if (keyPc >= 0 && rootPc >= 0) {
-            const rel = ((rootPc - keyPc) % 12 + 12) % 12;
-            const d = scaleSteps.indexOf(rel);
-            if (d >= 0) degree = d;
-        }
-        chordPickDegree = degree;
+        chordPickRoot = keyPc >= 0 && rootPc >= 0 ? ((rootPc - keyPc) % 12 + 12) % 12 : 0;
         const qIdx = CHORD_QUALITIES.indexOf(chord.quality);
         chordPickQuality = qIdx >= 0 ? qIdx : 0;
-        chordPickBass = chord.bass ? bassNotesForKey(key).indexOf(chord.bass) : -1;
+        /* By pitch, so a bass spelled with a flat (Bb) is found too. */
+        const bassPc = chord.bass ? noteSemitone(chord.bass) : -1;
+        chordPickBass = bassPc >= 0 && keyPc >= 0 ? ((bassPc - keyPc) % 12 + 12) % 12 : -1;
     } else {
         /* Default to the key's base note (the "I" chord/tonic). */
-        chordPickDegree = 0;
-        chordPickQuality = CHORD_QUALITIES.indexOf(DIATONIC_QUALITY[chordPickDegree]);
+        chordPickRoot = 0;
+        chordPickQuality = CHORD_QUALITIES.indexOf(chordRootDefaultQuality(0));
         chordPickBass = -1;
     }
 }
 
 /* The chord currently selected in the picker (without its position). */
 function chordPickChord() {
-    if (chordPickDegree === NO_CHORD_DEGREE) return { none: true };
+    if (chordPickRoot === CHORD_ROOT_NONE) return { none: true };
     const key = currentSong ? (currentSong.key || DEFAULT_KEY) : DEFAULT_KEY;
-    const d = diatonicChord(key, chordPickDegree);
-    const chord = { root: d.root, quality: CHORD_QUALITIES[chordPickQuality] };
+    const chord = { root: chordRootName(key, chordPickRoot), quality: CHORD_QUALITIES[chordPickQuality] };
     if (chordPickBass >= 0) chord.bass = bassNotesForKey(key)[chordPickBass];
     return chord;
 }
@@ -8220,11 +8238,10 @@ function formatBeat(b) {
 
 function chordPickItems() {
     const key = currentSong ? (currentSong.key || DEFAULT_KEY) : DEFAULT_KEY;
-    const degreeNames = ["I", "ii", "iii", "IV", "V", "vi", "vii°"];
-    const noChord = chordPickDegree === NO_CHORD_DEGREE;
+    const noChord = chordPickRoot === CHORD_ROOT_NONE;
     return [
         { key: "root", label: "Root", value: noChord ? "No Chord"
-            : degreeNames[chordPickDegree] + " (" + diatonicChord(key, chordPickDegree).root + ")" },
+            : CHORD_ROOT_DEGREES[chordPickRoot] + " (" + chordRootName(key, chordPickRoot) + ")" },
         { key: "type", label: "Type", value: noChord ? "—" : (CHORD_TYPE_LABEL[CHORD_QUALITIES[chordPickQuality]] || "Major") },
         { key: "bass", label: "Bass", value: !noChord && chordPickBass >= 0 ? bassNotesForKey(key)[chordPickBass] : "—" },
         { key: "bar", label: "Bar", value: String(chordPickBar + 1) },
@@ -8262,14 +8279,14 @@ function handleChordPickInput(cc, value) {
     if (cc === MoveMainKnob) {
         const delta = decodeDelta(value);
         if (chordPickEditing && sec) {
-            const noChord = chordPickDegree === NO_CHORD_DEGREE;
+            const noChord = chordPickRoot === CHORD_ROOT_NONE;
             if (item.key === "root") {
-                /* Seven degrees, then No Chord. Changing the root re-picks
-                 * the diatonic default type for its place in the key and
-                 * drops any slash bass. */
-                chordPickDegree = ((chordPickDegree + delta) % 8 + 8) % 8;
-                chordPickQuality = chordPickDegree === NO_CHORD_DEGREE ? 0
-                    : CHORD_QUALITIES.indexOf(DIATONIC_QUALITY[chordPickDegree]);
+                /* Every root by semitone, then No Chord. Changing the root
+                 * re-picks the default type for it (the key's own chord's,
+                 * else major) and drops any slash bass. */
+                chordPickRoot = ((chordPickRoot + delta) % 13 + 13) % 13;
+                chordPickQuality = chordPickRoot === CHORD_ROOT_NONE ? 0
+                    : CHORD_QUALITIES.indexOf(chordRootDefaultQuality(chordPickRoot));
                 chordPickBass = -1;
                 chordPickDirty = true;
             } else if (noChord && (item.key === "type" || item.key === "bass")) {

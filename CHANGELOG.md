@@ -31,6 +31,9 @@
   - Bass **Pattern**: Root/5th, Root/Oct, root-fifth-octave-fifth,
     Country (the fifth below), 1-3-5-3, 1-3-5-8 or Boogie on successive
     attacks, starting again on each new chord.
+  - Bass patterns are named by the notes they walk: 1, 1-5, 1-8,
+    1-5-8-5, 1-5 Low, 1-3-5-3, 1-3-5-8, 1-3-5-6-b7 (were Root, Root/5th,
+    Root/Oct, R-5-O-5, Country, ..., Boogie).
   - More Arp patterns: Rnd Walk, Shuffle, Alberti, Pedal, Converge and
     1-5-8-10; **Range** (1-3 octaves); **Vel Range** plays the notes other
     than the base quieter by a random amount. The base note always plays
@@ -94,6 +97,13 @@
   the root is the song's key (Jam's in Jam).
 - Options lists Drums, Inst 1, Inst 2, Pads, Click, Keys, Chains, ...; the
   web settings page has Pads and Keys too.
+
+### Chords outside the key
+- The chord page's Root takes any root: a semitone at a time from the key
+  (I, bII, ii, bIII, iii, IV, #IV, V, bVI, vi, bVII, vii°), then No Chord.
+  Out-of-key roots default to major and are named with flats where usual
+  (bVII in C is Bb). A chord outside the key now opens showing its own
+  root; it showed as I.
 
 ### Instrument settings while playing
 - Play now works from Instrument Settings and the item pages of Inst 1/2 and
