@@ -376,6 +376,40 @@ int main(int argc, char **argv) {
     CHECK(boo_ok, "Boogie bass on the kicks: 1 3 5 6 b7 6 5 3");
     CHECK(all_released(1) && all_released(2), "runs 7-8: every note released");
 
+    /* ---- Run 9: the bass counts its octave from the key's root ----
+     * Key Bb (as the UI sends it, each chord carrying "key"), Octave 3:
+     * Bb Bb F Eb bars -> Bb2 (46), F3 (53), Eb3 (51) -- the tonic lowest, not
+     * Bb3 at the top of a C-based octave. Inst 2: key D, a C chord's bass
+     * goes ABOVE the tonic, to C4 (60), and D is D3 (50). */
+    snprintf(json, sizeof(json),
+        "{\"source_folder\":\"%s\",\"name\":\"T\",\"tempo_bpm\":120,"
+        "\"time_sig_num\":4,\"time_sig_den\":4,\"sections\":["
+        "{\"name\":\"A\",\"clips\":[" CLIP "],"
+        "\"chords\":[{\"root\":\"Bb\",\"quality\":\"maj\",\"key\":\"A#\",\"degree\":0},null,"
+        "{\"root\":\"F\",\"quality\":\"maj\",\"key\":\"A#\",\"degree\":4},"
+        "{\"root\":\"D#\",\"quality\":\"maj\",\"key\":\"A#\",\"degree\":3}]}"
+        "],\"instruments\":["
+        "{\"enabled\":true,\"output\":\"schwung\",\"channel\":2,\"octave\":3,\"follow_note\":0,"
+        "\"voicing\":\"bass\",\"note_gap\":0.125}]}", folder);
+    CHECK(play_song(api, inst, json, 3000), "run 9 published");
+    na = note_ons(1, an, NULL, NULL, 256);
+    printf("info: Bb key bass:");
+    for (int i = 0; i < na; i++) printf(" %d", an[i]);
+    printf("\n");
+    CHECK(na == 3 && an[0] == 46 && an[1] == 53 && an[2] == 51, "key Bb, Octave 3: Bb2 F3 Eb3 -- the tonic lowest");
+    snprintf(json, sizeof(json),
+        "{\"source_folder\":\"%s\",\"name\":\"T\",\"tempo_bpm\":120,"
+        "\"time_sig_num\":4,\"time_sig_den\":4,\"sections\":["
+        "{\"name\":\"A\",\"clips\":[" CLIP "],"
+        "\"chords\":[{\"root\":\"D\",\"quality\":\"maj\",\"key\":\"D\",\"degree\":0},"
+        "{\"root\":\"C\",\"quality\":\"maj\",\"key\":\"D\",\"degree\":-1}]}"
+        "],\"instruments\":["
+        "{\"enabled\":true,\"output\":\"schwung\",\"channel\":2,\"octave\":3,\"follow_note\":0,"
+        "\"voicing\":\"bass\",\"note_gap\":0.125}]}", folder);
+    CHECK(play_song(api, inst, json, 3000), "run 9b published");
+    na = note_ons(1, an, NULL, NULL, 256);
+    CHECK(na == 2 && an[0] == 50 && an[1] == 60, "key D, Octave 3: D3, and the C chord above it at C4");
+
     api->destroy_instance(inst);
     if (g_failures == 0) printf("\nALL TESTS PASSED\n");
     else printf("\n%d TEST(S) FAILED\n", g_failures);

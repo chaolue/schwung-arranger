@@ -98,6 +98,14 @@
 - Options lists Drums, Inst 1, Inst 2, Pads, Click, Keys, Chains, ...; the
   web settings page has Pads and Keys too.
 
+### Bass register
+- The bass's Octave counts from the song key's root, so the tonic is the
+  lowest, home note. It counted from C, which put a Bb song's tonic at the
+  top of the octave (Bb3, with F3 and Eb3 below): a section on the tonic --
+  Yes He Lives' Intro -- played an octave above the rest. Songs in C are
+  unchanged; in other keys, roots on the far side of the tonic move an
+  octave. Jam's bass follows its key the same way.
+
 ### Track buttons
 - Song Builder: Track 4 shows the **Pads** (press again for the Click
   track); Track 1 is Drum <-> Chord again. The track buttons only choose

@@ -2638,7 +2638,23 @@ static int chord_voiced_notes(const inst_voice_t *inst, const chord_t *ch, int *
         const char *bass = (ch->bass[0]) ? ch->bass : ch->root;
         int bass_pc = note_name_semitone(bass);
         if (bass_pc < 0) bass_pc = root_pc;
-        notes[0] = base + bass_pc;
+        if (ch->key_pc >= 0) {
+            /* Key-relative: the octave runs up from the key's root, so the
+             * tonic is the bass's lowest, home note and the other roots sit
+             * above it. Counting from C instead put a Bb key's tonic at the
+             * TOP of the octave (Bb3, with F3 and Eb3 below it): a section
+             * on the tonic played an octave above the rest. The key's root
+             * is kept near the octave's C -- C to F on or above it, F# to B
+             * just below -- so the register stays where the Octave says.
+             * Jam's octave_shift (which lifts pads that wrap past C, for the
+             * C-based count) does not apply: from the key's root they already
+             * climb. Only the octave-root pad (degree 7) is an octave up, as
+             * the Auto chord voicing does it. */
+            int start = (inst->octave + 1) * 12 + ch->key_pc - (ch->key_pc >= 6 ? 12 : 0) + (ch->degree == 7 ? 12 : 0);
+            notes[0] = start + ((bass_pc - ch->key_pc) % 12 + 12) % 12;
+        } else {
+            notes[0] = base + bass_pc;
+        }
         n = 1;
     }
     for (int i = 0; i < n; i++) {
