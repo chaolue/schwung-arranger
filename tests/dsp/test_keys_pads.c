@@ -268,6 +268,52 @@ int main(int argc, char **argv) {
             if (g_captured[i].channel == 6 && g_captured[i].status == 0x90 && g_captured[i].vel > 0 && g_captured[i].note == want[w]) { got++; break; }
     CHECK(got == 5, "D m7(4) plays all five notes: D F G A C");
     stop_and_ring_out(api, inst);
+
+    /* ---- Jam's Pads (jam_inst3): a chord held across bars ----
+     * Over a 4-bar groove with no song instruments: D for the first bars --
+     * struck once, not every bar -- then G picked, which takes over at the
+     * next bar: D released, G struck. Octave 4, root position, channel 7. */
+    snprintf(json, sizeof(json),
+        "{\"source_folder\":\"%s\",\"name\":\"T\",\"tempo_bpm\":120,"
+        "\"time_sig_num\":4,\"time_sig_den\":4,\"sections\":["
+        "{\"name\":\"A\",\"clips\":[{\"source\":\"Grooves/120 Verse Half-Time.mid\",\"start_bar\":0,\"end_bar\":4,\"guard_fraction\":0}]}"
+        "],\"instruments\":[]}", folder);
+    base = state_u32(api, inst, "primary_published_gen");
+    api->set_param(inst, "song_json", json);
+    CHECK(wait_field_change(api, inst, "primary_published_gen", base, 3000), "Jam Pads: groove published");
+    api->set_param(inst, "jam_inst3_output", "schwung");
+    api->set_param(inst, "jam_inst3_channel", "6");
+    api->set_param(inst, "jam_inst3_octave", "4");
+    api->set_param(inst, "jam_inst3_voicing", "chord");
+    api->set_param(inst, "jam_inst3_inversion", "0");
+    api->set_param(inst, "jam_inst3_follow_note", "0");
+    api->set_param(inst, "jam_inst3_enabled", "1");
+    api->set_param(inst, "jam_chord", "D:maj:0");
+    g_captured_count = 0;
+    api->set_param(inst, "play", "1");
+    /* Into bar 3: two bar lines (2 s and 4 s at 120 BPM) passed with D held. */
+    for (int b = 0; b < 1450; b++) api->render_block(inst, audio, MOVE_FRAMES_PER_BLOCK);
+    int d_on = 0, d_off = 0;
+    for (int i = 0; i < g_captured_count; i++) {
+        if (g_captured[i].channel != 6) continue;
+        int on = g_captured[i].status == 0x90 && g_captured[i].vel > 0;
+        if (g_captured[i].note == 62 || g_captured[i].note == 66 || g_captured[i].note == 69) { if (on) d_on++; else d_off++; }
+    }
+    CHECK(d_on == 3 && d_off == 0, "D held across bars: struck once (3 notes), never released");
+    g_captured_count = 0;
+    api->set_param(inst, "jam_chord", "G:maj:0");
+    /* Past the next bar line (6 s, ~2070 blocks), before the song ends (8 s). */
+    for (int b = 0; b < 900; b++) api->render_block(inst, audio, MOVE_FRAMES_PER_BLOCK);
+    int g_on = 0; d_off = 0;
+    for (int i = 0; i < g_captured_count; i++) {
+        if (g_captured[i].channel != 6) continue;
+        int on = g_captured[i].status == 0x90 && g_captured[i].vel > 0;
+        if (on && (g_captured[i].note == 67 || g_captured[i].note == 71 || g_captured[i].note == 74)) g_on++;
+        if (!on && (g_captured[i].note == 62 || g_captured[i].note == 66 || g_captured[i].note == 69)) d_off++;
+    }
+    CHECK(g_on == 3 && d_off == 3, "G picked: at the next bar D is released and G struck");
+    api->set_param(inst, "jam_inst3_enabled", "0");
+    stop_and_ring_out(api, inst);
     api->destroy_instance(inst);
     if (g_failures == 0) printf("\nALL TESTS PASSED\n");
     else printf("\n%d TEST(S) FAILED\n", g_failures);

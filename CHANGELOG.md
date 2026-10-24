@@ -98,6 +98,17 @@
 - Options lists Drums, Inst 1, Inst 2, Pads, Click, Keys, Chains, ...; the
   web settings page has Pads and Keys too.
 
+### Track buttons
+- Song Builder: Track 4 shows the **Pads** (press again for the Click
+  track); Track 1 is Drum <-> Chord again. The track buttons only choose
+  the track: Inst 1/2 and the Pads are turned on or off with Enabled in
+  their settings (Menu), the click with the new **Click** row in Song
+  Settings.
+- Jam: Track 4 is the **Pads** instead of the click -- the chord pads'
+  chord as a full chord on Options > Pads, held from bar to bar until
+  another is picked; Shift + Track 4 opens their settings (Octave,
+  Inversion, Note Gap).
+
 ### Chords outside the key
 - The chord page's Root takes any root: a semitone at a time from the key
   (I, bII, ii, bIII, iii, IV, #IV, V, bVI, vi, bVII, vii°), then No Chord.

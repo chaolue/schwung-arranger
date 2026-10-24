@@ -156,6 +156,8 @@ static void *arranger_worker_thread(void *arg);
 #define MAX_JSON_LEN       8192
 #define MAX_SECTION_BARS   256   /* max bars per section for chord/instrument arrays */
 #define MAX_INSTRUMENTS    3     /* Inst 1, Inst 2 and Pads (chord-following) */
+#define JAM_INSTRUMENTS    3     /* Jam's: Inst 1, Inst 2, Pads */
+#define JAM_PADS           2     /* the Pads: held until the chord changes */
 #define MAX_CHORD_TONES    6     /* the most notes a chord quality has (11ths, 13ths) */
 
 /* Cap on the ASSEMBLED, multi-clip timeline built by the async primary/staging
@@ -1042,7 +1044,7 @@ typedef struct engine {
     /* Pattern position, strum direction and approach state, per instrument
      * (inst_play) and per Jam instrument (jam_play) -- see instrument_attack. */
     inst_play_t inst_play[MAX_INSTRUMENTS];
-    inst_play_t jam_play[2];
+    inst_play_t jam_play[JAM_INSTRUMENTS];
     /* Chance and Random arp: xorshift32, seeded at create (rng_seed sets it). */
     uint32_t rng;
 
@@ -1056,7 +1058,7 @@ typedef struct engine {
      * are enabled, since only one 8-pad chord area exists physically. The
      * instrument_t type is reused purely as a convenient value holder --
      * bars/overrides/override_count on these two entries are never read. */
-    instrument_t jam_inst[2];
+    instrument_t jam_inst[JAM_INSTRUMENTS];
     /* The chord Jam's live instruments are currently sounding, and the one
      * queued to replace it at the next bar boundary (see
      * apply_pending_jam_chord, called from update_bar_counter). Shared
@@ -1070,12 +1072,12 @@ typedef struct engine {
      * fire_pending_instrument_notes_off/emit_instruments_all_off iterate
      * bounded by live_slot.song.instrument_count, which Jam instruments
      * are never part of. */
-    chord_t jam_last_chord[2];
-    uint8_t jam_last_chord_set[2];
-    inst_voice_t jam_last_resolved[2];
-    uint32_t jam_last_follow_tick[2];
-    uint32_t jam_pending_off_tick[2];
-    uint8_t jam_pending_off_set[2];
+    chord_t jam_last_chord[JAM_INSTRUMENTS];
+    uint8_t jam_last_chord_set[JAM_INSTRUMENTS];
+    inst_voice_t jam_last_resolved[JAM_INSTRUMENTS];
+    uint32_t jam_last_follow_tick[JAM_INSTRUMENTS];
+    uint32_t jam_pending_off_tick[JAM_INSTRUMENTS];
+    uint8_t jam_pending_off_set[JAM_INSTRUMENTS];
 
     /* Folder/song scan caches as fixed double-buffers. The worker scans into
      * slot [1 - active] and flips active when done; the audio thread only
@@ -2930,7 +2932,7 @@ static void service_strum(engine_t *e, inst_voice_t *v, uint32_t tick) {
 static void service_instrument_strums(engine_t *e, uint32_t tick) {
     for (int i = 0; i < inst_count(e) && i < MAX_INSTRUMENTS; i++)
         if (e->last_inst_chord_set[i]) service_strum(e, &e->last_inst_resolved[i], tick);
-    for (int i = 0; i < 2; i++)
+    for (int i = 0; i < JAM_INSTRUMENTS; i++)
         if (e->jam_last_chord_set[i]) service_strum(e, &e->jam_last_resolved[i], tick);
 }
 
@@ -3606,7 +3608,7 @@ static void emit_jam_instruments_follow(engine_t *e, uint8_t note, uint8_t hit_v
             ch = &e->jam_chord_pending;
         }
     }
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < JAM_INSTRUMENTS; i++) {
         instrument_t *inst = &e->jam_inst[i];
         if (!inst->enabled) continue;
         if (inst->follow_note == 0 || inst->follow_note != note) continue;
@@ -3655,7 +3657,7 @@ static void emit_jam_instruments_follow(engine_t *e, uint8_t note, uint8_t hit_v
  * own pending-off tracking. Called from advance_playhead alongside it. */
 static void fire_pending_jam_instrument_notes_off(engine_t *e, uint32_t tick) {
     if (!e) return;
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < JAM_INSTRUMENTS; i++) {
         if (!e->jam_pending_off_set[i]) continue;
         if (e->jam_pending_off_tick[i] > tick) continue;
         if (e->jam_last_chord_set[i]) {
@@ -3670,7 +3672,7 @@ static void fire_pending_jam_instrument_notes_off(engine_t *e, uint32_t tick) {
  * bar-boundary wait) -- used on stop and on disabling a Jam instrument. */
 static void emit_jam_instruments_all_off(engine_t *e) {
     if (!e) return;
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < JAM_INSTRUMENTS; i++) {
         if (e->jam_last_chord_set[i]) {
             emit_instrument_chord_off(e, &e->jam_last_resolved[i], &e->jam_last_chord[i]);
             e->jam_last_chord_set[i] = 0;
@@ -3703,9 +3705,12 @@ static void apply_pending_jam_chord(engine_t *e) {
 static void emit_jam_instruments_at_tick(engine_t *e, uint32_t tick) {
     if (!e->jam_chord_live.set || e->ticks_per_bar == 0) return;
     const chord_t *ch = &e->jam_chord_live;
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < JAM_INSTRUMENTS; i++) {
         instrument_t *inst = &e->jam_inst[i];
         if (!inst->enabled || inst->follow_note != 0) continue;
+        /* The Pads sustain: still sounding the chord now live, they hold it
+         * into this bar rather than re-striking every bar. */
+        if (i == JAM_PADS && e->jam_last_chord_set[i] && chord_equal(&e->jam_last_chord[i], ch)) continue;
         if (e->jam_last_chord_set[i]) {
             emit_instrument_chord_off(e, &e->jam_last_resolved[i], &e->jam_last_chord[i]);
             e->jam_last_chord_set[i] = 0;
@@ -3721,10 +3726,11 @@ static void emit_jam_instruments_at_tick(engine_t *e, uint32_t tick) {
          * (emit_instruments_at_tick). */
         uint32_t gap = (uint32_t)(resolved.note_gap * e->ticks_per_beat);
         uint32_t off_tick = tick + e->ticks_per_bar - gap;
-        if (off_tick > tick) {
+        if (i != JAM_PADS && off_tick > tick) {
             e->jam_pending_off_tick[i] = off_tick;
             e->jam_pending_off_set[i] = 1;
         } else {
+            /* The Pads end when the chord changes (above), or on stop. */
             e->jam_pending_off_set[i] = 0;
         }
     }
@@ -6990,53 +6996,38 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
         }
         return;
     }
-    if (strcmp(key, "jam_inst1_enabled") == 0 || strcmp(key, "jam_inst2_enabled") == 0) {
-        int idx = (key[8] == '1') ? 0 : 1;
-        e->jam_inst[idx].enabled = atoi(val) ? 1 : 0;
-        if (!e->jam_inst[idx].enabled && e->jam_last_chord_set[idx]) {
-            emit_instrument_chord_off(e, &e->jam_last_resolved[idx], &e->jam_last_chord[idx]);
-            e->jam_last_chord_set[idx] = 0;
-            e->jam_pending_off_set[idx] = 0;
+    if (strncmp(key, "jam_inst", 8) == 0 && key[8] >= '1' && key[8] < '1' + JAM_INSTRUMENTS && key[9] == '_') {
+        /* Jam's instruments: jam_inst1_ / 2_ (Inst 1/2) / 3_ (Pads). */
+        int idx = key[8] - '1';
+        const char *k = key + 10;
+        instrument_t *ji = &e->jam_inst[idx];
+        if (strcmp(k, "enabled") == 0) {
+            ji->enabled = atoi(val) ? 1 : 0;
+            if (!ji->enabled && e->jam_last_chord_set[idx]) {
+                emit_instrument_chord_off(e, &e->jam_last_resolved[idx], &e->jam_last_chord[idx]);
+                e->jam_last_chord_set[idx] = 0;
+                e->jam_pending_off_set[idx] = 0;
+            }
+        } else if (strcmp(k, "octave") == 0) {
+            ji->octave = atoi(val);
+        } else if (strcmp(k, "voicing") == 0) {
+            ji->voicing = voicing_from_name(val);
+        } else if (strcmp(k, "inversion") == 0) {
+            int v = atoi(val);
+            ji->inversion = (uint8_t)(v < 0 ? 0 : v);
+        } else if (strcmp(k, "note_gap") == 0) {
+            ji->note_gap = atof(val);
+        } else if (strcmp(k, "follow_note") == 0) {
+            int v = atoi(val);
+            ji->follow_note = (uint8_t)(v < 0 ? 0 : (v > 127 ? 127 : v));
+        } else if (strcmp(k, "channel") == 0) {
+            ji->channel = atoi(val) & 0x0F;
+        } else if (strcmp(k, "output") == 0) {
+            ji->output_target = strcmp(val, "move") == 0 ? OUTPUT_TARGET_MOVE
+                              : strcmp(val, "schwung") == 0 ? OUTPUT_TARGET_SCHWUNG : OUTPUT_TARGET_EXTERNAL;
+        } else if (strcmp(k, "velocity") == 0) {
+            ji->velocity = (uint8_t)clampi(atoi(val), 1, 127);
         }
-        return;
-    }
-    if (strcmp(key, "jam_inst1_octave") == 0 || strcmp(key, "jam_inst2_octave") == 0) {
-        int idx = (key[8] == '1') ? 0 : 1;
-        e->jam_inst[idx].octave = atoi(val);
-        return;
-    }
-    if (strcmp(key, "jam_inst1_voicing") == 0 || strcmp(key, "jam_inst2_voicing") == 0) {
-        int idx = (key[8] == '1') ? 0 : 1;
-        e->jam_inst[idx].voicing = (strcmp(val, "chord") == 0) ? 1 : 0;
-        return;
-    }
-    if (strcmp(key, "jam_inst1_inversion") == 0 || strcmp(key, "jam_inst2_inversion") == 0) {
-        int idx = (key[8] == '1') ? 0 : 1;
-        int v = atoi(val);
-        e->jam_inst[idx].inversion = (uint8_t)(v < 0 ? 0 : v);
-        return;
-    }
-    if (strcmp(key, "jam_inst1_note_gap") == 0 || strcmp(key, "jam_inst2_note_gap") == 0) {
-        int idx = (key[8] == '1') ? 0 : 1;
-        e->jam_inst[idx].note_gap = atof(val);
-        return;
-    }
-    if (strcmp(key, "jam_inst1_follow_note") == 0 || strcmp(key, "jam_inst2_follow_note") == 0) {
-        int idx = (key[8] == '1') ? 0 : 1;
-        int v = atoi(val);
-        e->jam_inst[idx].follow_note = (uint8_t)(v < 0 ? 0 : (v > 127 ? 127 : v));
-        return;
-    }
-    if (strcmp(key, "jam_inst1_channel") == 0 || strcmp(key, "jam_inst2_channel") == 0) {
-        int idx = (key[8] == '1') ? 0 : 1;
-        e->jam_inst[idx].channel = atoi(val) & 0x0F;
-        return;
-    }
-    if (strcmp(key, "jam_inst1_output") == 0 || strcmp(key, "jam_inst2_output") == 0) {
-        int idx = (key[8] == '1') ? 0 : 1;
-        if (strcmp(val, "move") == 0) e->jam_inst[idx].output_target = OUTPUT_TARGET_MOVE;
-        else if (strcmp(val, "schwung") == 0) e->jam_inst[idx].output_target = OUTPUT_TARGET_SCHWUNG;
-        else e->jam_inst[idx].output_target = OUTPUT_TARGET_EXTERNAL;
         return;
     }
     if (strcmp(key, "jam_chord") == 0) {

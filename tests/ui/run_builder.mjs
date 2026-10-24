@@ -82,16 +82,20 @@ check(H.printed.includes("(add chords first)") && !H.printed.includes("+ Add"),
 check(clk() === null && has(["MENU", "SET"]), "...and its footer offers Menu, not the click: " + hints());
 click();
 check(!H.printed.includes("Bar"), "the click opens no item page: " + JSON.stringify(H.printed));
-press(C.MoveRow4);           /* Click track */
-check(H.printed.includes("(add chords first)"), "the Click track's + Add too");
+press(C.MoveRow4);           /* Track 4: the Pads track first */
+check(has(["T4", "CLICK"]) && H.printed.includes("(add chords first)"), "Track 4 shows the Pads (T4 CLICK next), + Add needs chords: " + hints());
+press(C.MoveRow4);           /* again: the Click track */
+check(has(["T4", "PADS"]) && H.printed.includes("(add chords first)"), "pressed again, the Click track (T4 PADS back): " + hints());
+press(C.MoveRow4);
+check(has(["T4", "CLICK"]), "and again the Pads");
 
-/* Track 2 on Inst 1 turns it on and off. */
+/* Track 2 only shows Inst 1: pressed again, nothing is turned on or off. */
 press(C.MoveRow2);
-check(has(["T2", "ON"]), "Inst 1 is off: T2 ON: " + hints());
 press(C.MoveRow2);
-check(has(["T2", "OFF"]), "Track 2 on its own track turns Inst 1 on: " + hints());
+check(!M.footerHints().some(p => p[0] === "T2"), "no Track 2 on/off on the Inst 1 track: " + hints());
 back();                       /* saves */
-check(JSON.parse(H.files.get(SONGS + "/plain.json")).instruments[0].enabled === true, "...saved in the song");
+const plain = JSON.parse(H.files.get(SONGS + "/plain.json"));
+check(!(plain.instruments && plain.instruments[0] && plain.instruments[0].enabled), "Inst 1 still off: " + JSON.stringify(plain.instruments));
 
 /* ---- a locked song ---- */
 jog(-1); click();             /* Locked */

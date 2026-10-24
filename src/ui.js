@@ -179,11 +179,10 @@ const TRACK_INSTRUMENT_2 = 3;
  * click on/off in every mode -- see toggleClick. */
 const TRACK_CLICK = 4;
 /* Pads: a third instrument that only follows the chords (chord voicing on
- * the chord grid -- no Follow Note, no patterns). Reached from Track 1,
- * which steps Drum -> Chord -> Pads, since it plays the Chord track; Shift +
- * Track 1 on it turns it on or off. */
+ * the chord grid -- no Follow Note, no patterns). On Track 4, which steps
+ * Pads -> Click; turned on and off in its settings (Menu > Enabled). */
 const TRACK_PADS = 5;
-const TRACK_ROW_CC = [MoveRow1, MoveRow1, MoveRow2, MoveRow3, MoveRow4, MoveRow1];
+const TRACK_ROW_CC = [MoveRow1, MoveRow1, MoveRow2, MoveRow3, MoveRow4, MoveRow4];
 const TRACK_ROW_COLOUR = [White, AzureBlue, BrightYellow, Purple, 3 /* Bright Orange, CLICK_ROW_COLOUR */,
     12 /* Teal Green */];
 /* The song's instruments, in order: song.instruments[i] / sec.inst[i]. */
@@ -2506,6 +2505,7 @@ let perfSetTotalKeyCached = "";     /* cache key for perfSetTotalSec */
 let jamDrumEnabled = true;
 let jamInst1Enabled = true;
 let jamInst2Enabled = true;
+let jamPadsEnabled = false;   /* Track 4 in Jam: the Pads (Jam instrument 3) */
 
 /* Jam chord performance: the key the 8 chord pads are built from (reuses
  * diatonicChord, ui.js:1123), and JS's own mirror of the DSP's pending/live
@@ -2541,14 +2541,20 @@ let jamLastSwapCounterForChord = -1; /* last-seen swap_counter -- a groove/fill 
  * "trigger once per bar" fallback (emit_jam_instruments_at_tick), giving a
  * sustained chordal pad by default rather than a second beat-driven bass.
  * Not persisted -- resets to these defaults each session. */
-let jamInstConfig = [
-    { octave: 3, voicing: "bass", inversion: INVERSION_AUTO, note_gap: 0.25, follow_note: 36 },
-    { octave: 3, voicing: "chord", inversion: INVERSION_AUTO, note_gap: 0.25, follow_note: 0 }
-];
-let jamInstrumentEditIndex = 0;  /* 0 = Inst 1, 1 = Inst 2 -- which jamInstConfig entry the menu edits */
+let jamInstConfig = jamInstDefaults();
+/* Jam's instruments as they start: Inst 1 a bass on the kick, Inst 2 a chord
+ * each bar, the Pads (3) a chord held until it changes, an octave up. */
+function jamInstDefaults() {
+    return [
+        { octave: 3, voicing: "bass", inversion: INVERSION_AUTO, note_gap: 0.25, follow_note: 36 },
+        { octave: 3, voicing: "chord", inversion: INVERSION_AUTO, note_gap: 0.25, follow_note: 0 },
+        { octave: 4, voicing: "chord", inversion: INVERSION_AUTO, note_gap: 0.125, follow_note: 0 }
+    ];
+}
+let jamInstrumentEditIndex = 0;  /* 0 Inst 1, 1 Inst 2, 2 Pads -- which jamInstConfig entry the menu edits */
 let jamInstrumentFocus = 0;
 let jamInstrumentEditing = false;
-let jamInstRoutingPushed = [false, false]; /* has jam_inst<N>_channel/_output been sent yet (see pushJamInstrumentRouting) */
+let jamInstRoutingPushed = [false, false, false]; /* has jam_inst<N>_channel/_output been sent yet (see pushJamInstrumentRouting) */
 
 let jamGrooves = [];                /* grooves for the selected folder: { path, name, type, bars } */
 let jamFills = [];                  /* fills for the selected folder */
@@ -4812,12 +4818,12 @@ function deleteSetlist(setlist) {
  * it looked like Perform's Inst 2 mute not working. */
 function pushLiveMutesToDsp(set, t) {
     let drums = true, inst1 = true, inst2 = true, inst3 = true;
-    let jamInst1 = false, jamInst2 = false;
+    let jamInst1 = false, jamInst2 = false, jamPads = false;
     if (currentMode === MODE_PERFORMANCE) {
         drums = perfDrumEnabled; inst1 = perfInst1Enabled; inst2 = perfInst2Enabled; inst3 = perfInst3Enabled;
     } else if (currentMode === MODE_JAM) {
         drums = jamDrumEnabled;
-        jamInst1 = jamInst1Enabled; jamInst2 = jamInst2Enabled;
+        jamInst1 = jamInst1Enabled; jamInst2 = jamInst2Enabled; jamPads = jamPadsEnabled;
     }
     set("drum_enabled", drums ? "1" : "0", t);
     set("inst1_enabled", inst1 ? "1" : "0", t);
@@ -4825,6 +4831,7 @@ function pushLiveMutesToDsp(set, t) {
     set("inst3_enabled", inst3 ? "1" : "0", t);
     set("jam_inst1_enabled", jamInst1 ? "1" : "0", t);
     set("jam_inst2_enabled", jamInst2 ? "1" : "0", t);
+    set("jam_inst3_enabled", jamPads ? "1" : "0", t);
 }
 
 /* Build the current song's timeline in the DSP WITHOUT starting playback.
@@ -5815,21 +5822,19 @@ function updateButtonLEDs() {
                 active.set(MoveRow1, DarkGrey);
                 active.set(MoveRow2, DarkGrey);
                 active.set(MoveRow3, DarkGrey);
+                active.set(MoveRow4, DarkGrey);
                 {
+                    /* An instrument that is off shows its very-dark partner;
+                     * so does the Click track while the click is off. */
                     const t = builderTrack;
                     let rowColour = TRACK_ROW_COLOUR[t];
                     if (isInstTrack(t)) {
                         const trackInst = instrumentForTrack(t);
                         if (trackInst && !trackInst.enabled) rowColour = veryDarkPartner(rowColour);
+                    } else if (t === TRACK_CLICK && !clickOn) {
+                        rowColour = veryDarkPartner(CLICK_ROW_COLOUR);
                     }
-                    if (t !== TRACK_CLICK) active.set(TRACK_ROW_CC[t], rowColour);
-                }
-                /* Track 4 (the Click track): bright when selected, dim when
-                 * not; its very-dark partner while the click is off. */
-                if (builderTrack === TRACK_CLICK) {
-                    active.set(MoveRow4, clickOn ? CLICK_ROW_COLOUR : veryDarkPartner(CLICK_ROW_COLOUR));
-                } else {
-                    active.set(MoveRow4, clickOn ? veryDarkPartner(CLICK_ROW_COLOUR) : DarkGrey);
+                    active.set(TRACK_ROW_CC[t], rowColour);
                 }
                 if (ledHasLeftSection) active.set(MoveLeft, WhiteLedFull);
                 if (ledHasRightSection) active.set(MoveRight, WhiteLedFull);
@@ -6084,7 +6089,7 @@ function updateButtonLEDs() {
                 active.set(MoveRow1, jamDrumEnabled ? TRACK_ROW_COLOUR[TRACK_DRUM] : Black);
                 active.set(MoveRow2, jamInst1Enabled ? TRACK_ROW_COLOUR[TRACK_INSTRUMENT_1] : Black);
                 active.set(MoveRow3, jamInst2Enabled ? TRACK_ROW_COLOUR[TRACK_INSTRUMENT_2] : Black);
-                active.set(MoveRow4, clickOn ? CLICK_ROW_COLOUR : Black);
+                active.set(MoveRow4, jamPadsEnabled ? TRACK_ROW_COLOUR[TRACK_PADS] : Black);
                 break;
         }
         /* Perform and Jam: Capture is Keys (lit, bright while on), Up/Down
@@ -6929,7 +6934,7 @@ function jamImminentNext() {
  * Grooves/Fills grid -- i.e. at least one Jam instrument is enabled via its
  * track button (Row3/Row4). See drawJamLEDs/handleJamPad/jamGrooveCols. */
 function jamChordModeActive() {
-    return jamInst1Enabled || jamInst2Enabled;
+    return jamInst1Enabled || jamInst2Enabled || jamPadsEnabled;
 }
 
 /* Grooves/Fills column counts and the chord block's own column count,
@@ -9118,8 +9123,9 @@ function pushJamInstrumentRouting(idx) {
     const block = typeof host_module_set_param_blocking === "function";
     const set = block ? host_module_set_param_blocking : host_module_set_param;
     const t = block ? 100 : undefined;
-    const output = idx === 0 ? inst1Output : inst2Output;
-    const channel = idx === 0 ? inst1Channel : inst2Channel;
+    /* Each takes Options' route for its namesake: Inst 1, Inst 2, Pads. */
+    const output = instOutputOf(idx + 1);
+    const channel = instChannelOf(idx + 1);
     const key = "jam_inst" + (idx + 1) + "_";
     set(key + "output", output, t);
     /* channel-1: inst1Channel/inst2Channel are the 1-based UI value; the
@@ -9147,20 +9153,27 @@ function openJamInstrumentMenu(idx) {
     jamInstrumentFocus = 0;
     jamInstrumentEditing = false;
     currentView = VIEW_JAM_INSTRUMENT;
-    menuStack.push({ title: (idx === 0 ? "Inst 1" : "Inst 2") + " (Jam)", selectedIndex: 0 });
+    menuStack.push({ title: INST_TRACK_NAMES[idx] + " (Jam)", selectedIndex: 0 });
     needsRedraw = true;
 }
 
-function drawJamInstrumentMenu() {
-    const cfg = jamInstConfig[jamInstrumentEditIndex];
-    drawMenuHeader((jamInstrumentEditIndex === 0 ? "Inst 1" : "Inst 2") + " (Jam)", "");
-    const items = [
+/* A Jam instrument's live settings. The Pads are always a chord held from
+ * bar to bar, so they have no Follow Note or Voicing. */
+function jamInstrumentRows(idx) {
+    const cfg = jamInstConfig[idx];
+    const rows = [
         { key: "octave", label: "Octave", value: String(cfg.octave) },
         { key: "follow", label: "Follow Note", value: cfg.follow_note > 0 ? String(cfg.follow_note) : "Off" },
         { key: "voicing", label: "Voicing", value: cfg.voicing === "chord" ? "Chord" : "Bass" },
         { key: "inversion", label: "Inversion", value: inversionLabel(cfg.inversion) },
         { key: "gap", label: "Note Gap", value: noteGapLabel(cfg.note_gap) }
     ];
+    return idx === 2 ? rows.filter(r => r.key !== "follow" && r.key !== "voicing") : rows;
+}
+
+function drawJamInstrumentMenu() {
+    drawMenuHeader(INST_TRACK_NAMES[jamInstrumentEditIndex] + " (Jam)", "");
+    const items = jamInstrumentRows(jamInstrumentEditIndex);
     drawMenuList({
         ...LIST_ROW_FIT,
         labelX: 3,
@@ -9181,22 +9194,24 @@ function handleJamInstrumentMenuInput(cc, value) {
     const idx = jamInstrumentEditIndex;
     const cfg = jamInstConfig[idx];
     const key = "jam_inst" + (idx + 1) + "_";
+    const rows = jamInstrumentRows(idx);
+    const rowKey = (rows[jamInstrumentFocus] || rows[0]).key;
     if (cc === MoveMainKnob) {
         const delta = decodeDelta(value);
         if (jamInstrumentEditing) {
-            if (jamInstrumentFocus === 0) {
+            if (rowKey === "octave") {
                 cfg.octave = Math.max(-1, Math.min(8, cfg.octave + delta));
                 if (typeof host_module_set_param === "function") host_module_set_param(key + "octave", String(cfg.octave));
-            } else if (jamInstrumentFocus === 1) {
+            } else if (rowKey === "follow") {
                 cfg.follow_note = stepFollowNote(cfg.follow_note, delta, cfg.voicing !== "chord");
                 if (typeof host_module_set_param === "function") host_module_set_param(key + "follow_note", String(cfg.follow_note));
-            } else if (jamInstrumentFocus === 2) {
+            } else if (rowKey === "voicing") {
                 cfg.voicing = (cfg.voicing === "chord") ? "bass" : "chord";
                 if (typeof host_module_set_param === "function") host_module_set_param(key + "voicing", cfg.voicing);
-            } else if (jamInstrumentFocus === 3) {
+            } else if (rowKey === "inversion") {
                 cfg.inversion = Math.max(0, Math.min(INVERSION_AUTO, cfg.inversion + delta));
                 if (typeof host_module_set_param === "function") host_module_set_param(key + "inversion", String(cfg.inversion));
-            } else if (jamInstrumentFocus === 4) {
+            } else if (rowKey === "gap") {
                 /* Note gap: 0 = none, then 1/16, 1/8, 1/4, 1/2, 1 beat. */
                 const steps = [0, 0.0625, 0.125, 0.25, 0.5, 1.0];
                 const i = steps.indexOf(cfg.note_gap);
@@ -9205,7 +9220,7 @@ function handleJamInstrumentMenuInput(cc, value) {
                 if (typeof host_module_set_param === "function") host_module_set_param(key + "note_gap", String(cfg.note_gap));
             }
         } else {
-            jamInstrumentFocus = Math.max(0, Math.min(4, jamInstrumentFocus + delta));
+            jamInstrumentFocus = Math.max(0, Math.min(rows.length - 1, jamInstrumentFocus + delta));
         }
         needsRedraw = true;
     } else if (cc === MoveMainButton && value > 0) {
@@ -9611,7 +9626,8 @@ function drawSongSettings() {
         { key: "num", label: "Time Signature", value: songSettingsPendingNum + "/" + songSettingsPendingDen },
         { key: "key", label: "Key", value: keyLabel(songSettingsPendingKey) },
         { key: "lock", label: "Lock Song", value: songIsLocked() ? "On" : "Off" },
-        { key: "restore", label: "Restore Backup", value: String(songSettingsBackupCount) }
+        { key: "restore", label: "Restore Backup", value: String(songSettingsBackupCount) },
+        { key: "click", label: "Click", value: clickOn ? "On" : "Off" }
     ];
     drawMenuList({
         ...LIST_ROW_FIT,
@@ -9690,10 +9706,16 @@ function handleSongSettingsInput(cc, value) {
                 songSettingsPendingKey = KEYS[next];
             }
         } else {
-            songSettingsFocus = Math.max(0, Math.min(SONG_SETTINGS_RESTORE_ROW, songSettingsFocus + delta));
+            songSettingsFocus = Math.max(0, Math.min(SONG_SETTINGS_CLICK_ROW, songSettingsFocus + delta));
         }
         needsRedraw = true;
     } else if (cc === MoveMainButton && value > 0) {
+        if (songSettingsFocus === SONG_SETTINGS_CLICK_ROW) {
+            /* The click on or off (it was Track 4 on the Click track). Not
+             * part of the song, so a locked song allows it too. */
+            toggleClick();
+            return;
+        }
         if (songSettingsFocus === SONG_SETTINGS_RESTORE_ROW) {
             /* A locked song cannot be edited, and a restore replaces it. */
             if (!locked) openSongBackups();
@@ -9745,6 +9767,7 @@ function handleSongSettingsInput(cc, value) {
 /* ── Song Settings > Restore Backup ────────────────────────────────────── */
 
 const SONG_SETTINGS_RESTORE_ROW = 5;
+const SONG_SETTINGS_CLICK_ROW = 6;
 let songSettingsBackupCount = 0;
 let songBackupList = [];      /* [{ file, path, label, sections }] newest first */
 let songBackupSelected = 0;
@@ -10974,45 +10997,25 @@ function handleFolderListInput(cc, value) {
 
 function handleBuilderInput(cc, value) {
     const locked = songIsLocked();
-    /* Track buttons: Track 1 toggles between the Drum and Chord tracks
-     * (from an instrument track it goes to Drum first), Track 2/3 select
-     * Inst 1/Inst 2, Track 4 toggles the click. */
-    if ((cc === MoveRow1 || cc === MoveRow2 || cc === MoveRow3) && value > 0) {
+    /* Track buttons only choose the track shown: Track 1 Drum <-> Chord
+     * (from another track, Drum), Track 2/3 Inst 1/Inst 2, Track 4 Pads <->
+     * Click (from another track, Pads). None turns anything on or off: an
+     * instrument's Enabled is in its settings (Menu), the click's in Song
+     * Settings. */
+    if ((cc === MoveRow1 || cc === MoveRow2 || cc === MoveRow3 || cc === MoveRow4) && value > 0) {
         if (cc === MoveRow1) {
-            /* Shift + Track 1 on the Pads track turns them on or off. */
-            if (shiftHeld && builderTrack === TRACK_PADS) { toggleBuilderInstrument(TRACK_PADS); return; }
-            /* Drum -> Chord -> Pads -> Drum; from Inst 1/2 or Click, Drum. */
-            builderTrack = builderTrack === TRACK_DRUM ? TRACK_CHORD
-                         : builderTrack === TRACK_CHORD ? TRACK_PADS : TRACK_DRUM;
+            builderTrack = builderTrack === TRACK_DRUM ? TRACK_CHORD : TRACK_DRUM;
             if (builderTrack === TRACK_CHORD) { chordCursorBar = 0; chordCursorIdx = 0; chordListCursor = 0; }
-            if (builderTrack === TRACK_PADS) { itemListCursor = 0; chordCursorBar = -1; }
         } else {
-            const track = (cc === MoveRow2) ? TRACK_INSTRUMENT_1 : TRACK_INSTRUMENT_2;
-            /* Pressed again on its own track, it turns the instrument on or
-             * off, as Track 4 does the click. */
-            if (builderTrack === track) { toggleBuilderInstrument(track); return; }
-            builderTrack = track;
+            builderTrack = cc === MoveRow2 ? TRACK_INSTRUMENT_1
+                         : cc === MoveRow3 ? TRACK_INSTRUMENT_2
+                         : builderTrack === TRACK_PADS ? TRACK_CLICK : TRACK_PADS;
             itemListCursor = 0;
             chordCursorBar = -1;
         }
         stepLedsDirty = true;
         ledDirtyAll = true;
         needsRedraw = true;
-        return;
-    }
-    if (cc === MoveRow4 && value > 0) {
-        /* Track 4 selects the Click track; pressed again there, it turns the
-         * click on or off. */
-        if (builderTrack === TRACK_CLICK) {
-            toggleClick();
-        } else {
-            builderTrack = TRACK_CLICK;
-            itemListCursor = 0;
-            chordCursorBar = -1;
-            stepLedsDirty = true;
-            ledDirtyAll = true;
-            needsRedraw = true;
-        }
         return;
     }
     /* The Chord, Inst and Click tracks don't use the Drum track's other
@@ -11219,26 +11222,6 @@ function handleBuilderInput(cc, value) {
         }
         needsRedraw = true;
     }
-}
-
-/* Song Builder, Track 2/3 on the Inst 1/2 track: turn the instrument on or
- * off -- the song's Enabled setting (Menu > Enabled). While playing, the
- * change is heard at once through the engine's live mute; switching on an
- * instrument that was off when playback started sounds from the next Play,
- * since the song the engine is playing has it off. */
-function toggleBuilderInstrument(track) {
-    const inst = instrumentForTrack(track);
-    if (!inst) return;
-    inst.enabled = !inst.enabled;
-    unsavedChanges = true;
-    if (playbackState === "playing" && typeof host_module_set_param === "function") {
-        host_module_set_param("inst" + (instIndex(track) + 1) + "_enabled", inst.enabled ? "1" : "0");
-    }
-    /* An instrument the playing song didn't have on (or at all) starts now. */
-    markInstrumentLive(track);
-    showPopup(itemTrackName(track), inst.enabled ? "On" : "Off", 2000);
-    needsRedraw = true;
-    ledDirtyAll = true;
 }
 
 /* Play in Song Builder: stop while playing; Shift + Play plays the song from
@@ -12450,6 +12433,7 @@ function handleJamFolderInput(cc, value) {
         jamDrumEnabled = true;
         jamInst1Enabled = false;
         jamInst2Enabled = false;
+        jamPadsEnabled = false;
         jamChordPendingDegree = -1;
         jamChordLiveDegree = -1;
         jamLastBarCounterForChord = -1;
@@ -12457,11 +12441,8 @@ function handleJamFolderInput(cc, value) {
         jamChordHoldDegree = -1;
         jamChordHoldShown = false;
         jamKeyChangePending = false;
-        jamInstConfig = [
-            { octave: 3, voicing: "bass", inversion: INVERSION_AUTO, note_gap: 0.25, follow_note: 36 },
-            { octave: 3, voicing: "chord", inversion: INVERSION_AUTO, note_gap: 0.25, follow_note: 0 }
-        ];
-        jamInstRoutingPushed = [false, false];
+        jamInstConfig = jamInstDefaults();
+        jamInstRoutingPushed = [false, false, false];
         /* Three different keys back to back -- use the blocking variant so
          * none of them can be clobbered by the next before the DSP
          * consumes it (see pushJamInstrumentRouting's comment). */
@@ -12473,6 +12454,7 @@ function handleJamFolderInput(cc, value) {
             set("drum_enabled", "1", t);
             set("jam_inst1_enabled", "0", t);
             set("jam_inst2_enabled", "0", t);
+            set("jam_inst3_enabled", "0", t);
             /* Clear the DSP's own jam_chord_live/pending too -- they're
              * engine-level state that outlives a song_json reload (see the
              * comment above), so without this a chord selected in a
@@ -13397,13 +13379,21 @@ function handleJamInput(cc, value) {
             stepLedsDirty = true;
             ledDirtyAll = true;
         }
-    } else if (shiftHeld && (cc === MoveRow2 || cc === MoveRow3) && value > 0) {
-        /* Shift+Track 2/3: open the live Octave/Follow Note/Voicing/
-         * Inversion/Note Gap menu for that Jam instrument, instead of
-         * toggling it. */
-        openJamInstrumentMenu(cc === MoveRow2 ? 0 : 1);
+    } else if (shiftHeld && (cc === MoveRow2 || cc === MoveRow3 || cc === MoveRow4) && value > 0) {
+        /* Shift+Track 2/3/4: open the live settings of that Jam instrument
+         * (Inst 1, Inst 2, the Pads), instead of toggling it. */
+        openJamInstrumentMenu(cc === MoveRow2 ? 0 : cc === MoveRow3 ? 1 : 2);
     } else if (cc === MoveRow4 && value > 0) {
-        toggleClick();
+        /* Track 4: the Pads -- a chord held under the groove, from the chord
+         * pads -- on or off. */
+        jamPadsEnabled = !jamPadsEnabled;
+        showPopup("Pads", jamPadsEnabled ? "On" : "Off", 2000);
+        if (jamPadsEnabled) pushJamInstrumentRouting(2);
+        if (typeof host_module_set_param === "function") {
+            host_module_set_param("jam_inst3_enabled", jamPadsEnabled ? "1" : "0");
+        }
+        needsRedraw = true;
+        ledDirtyAll = true;
     } else if ((cc === MoveRow1 || cc === MoveRow2 || cc === MoveRow3) && value > 0) {
         /* Drums/Inst 1/Inst 2 on/off (Track 1/2/3, same as Song Builder's
          * track buttons). Toggling an instrument also flips the chord-pad
@@ -16166,11 +16156,11 @@ function builderFooterHints() {
         const cursor = builderTrack === TRACK_CHORD ? chordListCursor : itemListCursor;
         return !locked && cursor >= 0 && cursor < n ? [["JOG", "MOVE"], ["PLAY", "SONG"]] : [["PLAY", "SONG"], ["BACK", "OUT"]];
     }
-    if (builderTrack === TRACK_CLICK) return [first, ["T4", clickOn ? "OFF" : "ON"], ["T1", "DRUM"]];
-    if (builderTrack === TRACK_CHORD) return [first, ["T1", "PADS"], clk ? ["MENU", "SET"] : ["BACK", "OUT"]];
-    const inst = instrumentForTrack(builderTrack);
-    if (builderTrack === TRACK_PADS) return [first, ["S+T1", inst && inst.enabled ? "OFF" : "ON"], ["T1", "DRUM"]];
-    return [first, [builderTrack === TRACK_INSTRUMENT_1 ? "T2" : "T3", inst && inst.enabled ? "OFF" : "ON"], ["T1", "DRUM"]];
+    const setOrOut = clk ? ["MENU", "SET"] : ["BACK", "OUT"];
+    if (builderTrack === TRACK_CLICK) return [first, ["T4", "PADS"], setOrOut];
+    if (builderTrack === TRACK_PADS) return [first, ["T4", "CLICK"], setOrOut];
+    if (builderTrack === TRACK_CHORD) return [first, ["T1", "DRUM"], setOrOut];
+    return [first, ["T1", "DRUM"], setOrOut];
 }
 
 function drawFooterHints() {

@@ -55,20 +55,21 @@ jog(-8); click();              /* Song Bank */
 jog(1); click();               /* P */
 check(has(["T1", "CHORD"]), "Drum track: Track 1 goes to Chord");
 press(C.MoveRow1);
-check(has(["T1", "PADS"]), "Chord track: Track 1 goes on to Pads");
-press(C.MoveRow1);
-check(has(["T1", "DRUM"]) && has(["S+T1", "ON"]), "Pads track: Shift + Track 1 turns them on, Track 1 back to Drum: " +
-      JSON.stringify(M.footerHints()));
-check(H.buttonLeds.get(C.MoveRow1) !== undefined, "Track 1 lit for Pads");
-cc(C.MoveShift, 127); press(C.MoveRow1); cc(C.MoveShift, 0); tick();
-check(has(["S+T1", "OFF"]), "Shift + Track 1: Pads on");
-press(C.MoveMenu);             /* Pads settings */
+check(has(["T1", "DRUM"]), "Chord track: Track 1 back to Drum (Pads are not on Track 1)");
+press(C.MoveRow4);
+check(has(["T4", "CLICK"]), "Track 4: the Pads track, Click next: " + JSON.stringify(M.footerHints()));
+tick(12);
+check(H.buttonLeds.get(C.MoveRow4) === 88, "Track 4 very dark teal: Pads off (" + H.buttonLeds.get(C.MoveRow4) + ")");
+press(C.MoveMenu);             /* Pads settings: Enabled on (a click on its row) */
+click();
 let t = menuText();
 check(/Octave/.test(t) && /Inversion/.test(t) && /Strum/.test(t) && /Velocity/.test(t) && /Chance/.test(t),
       "Pads settings: Octave, Inversion, Strum, Velocity, Chance: " + t);
 check(!/Voicing/.test(t) && !/Follow Note/.test(t) && !/Pattern/.test(t) && !/Approach/.test(t) && !/Vel Follow/.test(t),
       "...and nothing a chord on the chord grid doesn't use");
 back();
+tick(12);
+check(H.buttonLeds.get(C.MoveRow4) === 12, "Pads on (Enabled in its settings): Track 4 teal (" + H.buttonLeds.get(C.MoveRow4) + ")");
 jog(5); click();               /* + Add: an item */
 t = menuText();
 check(/Sound/.test(t) && /Inversion/.test(t) && !/Voicing/.test(t) && !/Follow Note/.test(t),
@@ -84,6 +85,18 @@ const eng = JSON.parse(M.toEngineSongJson(Object.assign({ source_folder: "F" }, 
 const p3 = eng.instruments[2];
 check(p3 && p3.voicing === "chord" && p3.follow_note === 0 && p3.enabled === true && p3.output === "external" && p3.channel === 1,
       "the engine gets Pads as a third chord instrument on its route: " + JSON.stringify(p3));
+
+/* ---- the Click: on Track 4 again, on/off in Song Settings ---- */
+jog(1); click();               /* P again */
+press(C.MoveRow4); if (!has(["T4", "PADS"])) press(C.MoveRow4);
+check(has(["T4", "PADS"]), "the Click track on Track 4: " + JSON.stringify(M.footerHints()));
+press(C.MoveMenu);             /* Song Settings */
+t = menuText();
+check(/Click/.test(t) && /Off/.test(t), "Song Settings has Click, Off: " + t);
+jog(30); click();              /* the last row: Click */
+t = menuText();
+check(H.dspSets.some(x => x[0] === "click_enabled" && x[1] === "1"), "Click row: click on");
+back(); back();
 
 /* ---- Keys in Perform ---- */
 jog(-8); back();               /* Song Bank -> root */
@@ -127,6 +140,8 @@ cc(C.MoveShift, 127); press(C.MoveRow1); cc(C.MoveShift, 0); tick();
 check(lastSet("inst3_enabled") === "0" && lastSet("drum_enabled") === null, "Shift + Track 1 in Perform: Pads off, drums untouched");
 back();
 
+/* ---- Pads in Jam, on Track 4 (the click was there) ---- */
+H.files.set("/data/UserData/UserLibrary/Arranger/MidiLibrary/.placeholder", "");
 /* ---- the layouts match the engine's ---- */
 check(M.keysPadNote(0, 0, 2, 3, 0) === 50 && M.keysPadNote(0, 0, 2, 3, 8) === 55 && M.keysPadNote(0, 0, 2, 3, 16) === 61,
       "In Key 4ths in D: D3, G3 a row up, C#4 two up");

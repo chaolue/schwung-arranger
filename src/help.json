@@ -30,14 +30,15 @@
         {
           "title": "Tracks",
           "lines": [
-            "Track 1: Drum,",
-            "Chord, Pads (press",
-            "again). Shift+T1 on",
-            "Pads: on/off.",
+            "Track 1: Drum, or",
+            "Chord (press again).",
             "Track 2: Inst 1",
             "Track 3: Inst 2",
-            "Track 4: Click;",
-            "again: click on/off.",
+            "Track 4: Pads, or",
+            "Click (press again).",
+            "On/off: Menu >",
+            "Enabled; the click:",
+            "Song Settings.",
             "",
             "Every track lists",
             "the section's items:",
@@ -131,7 +132,9 @@
         {
           "title": "Click Track",
           "lines": [
-            "Track 4 shows it.",
+            "Track 4 twice shows",
+            "it. On/off: Song",
+            "Settings > Click.",
             "Items set the click",
             "volume from a bar/",
             "beat; 0% = silent.",
@@ -267,8 +270,10 @@
         {
           "title": "Chord Pads",
           "lines": [
-            "Track 2/3: turn",
-            "Inst 1/2 on or off.",
+            "Track 2/3/4: turn",
+            "Inst 1/2 or Pads on",
+            "or off. Pads hold",
+            "the chord.",
             "",
             "When on, the 2 left",
             "columns are chords",
@@ -289,9 +294,9 @@
         {
           "title": "Instruments",
           "lines": [
-            "Shift+Track 2/3",
-            "opens Inst 1/2",
-            "settings (live).",
+            "Shift+Track 2/3/4",
+            "opens Inst 1/2 or",
+            "Pads settings.",
             "",
             "Follow Note: drum",
             "note that plays",

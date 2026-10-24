@@ -85,10 +85,15 @@ buttons above the pads:
 
 | Track button | Track | LED colour |
 |---------------|-------|------------|
-| Track 1 | Drum, Chord or **Pads** — press again to step Drum → Chord → Pads → Drum. On the Pads track, **Shift + Track 1** turns the Pads on or off | White (Drum) / Azure Blue (Chord) / Teal (Pads) |
+| Track 1 | Drum, or Chord — press again to switch between them | White (Drum) / Azure Blue (Chord) |
 | Track 2 | Instrument 1 | Bright Yellow |
 | Track 3 | Instrument 2 | Purple |
-| Track 4 | Click track — press again to turn the click on/off | Bright Orange (dim while the click is off) |
+| Track 4 | **Pads**, or Click — press again to switch between them | Teal (Pads) / Bright Orange (Click) |
+
+The track buttons only choose the track shown — none turns anything on or off.
+An instrument (Inst 1, Inst 2, Pads) is switched on or off with **Enabled** in
+its settings (**Menu** on its track); the click with **Click** in Song Settings.
+A selected track that is off is lit very dark.
 
 The lit Track button shows which track is showing. Every track is edited the
 same way: the display lists the current section's items — clips on the Drum
@@ -208,17 +213,17 @@ change is kept exactly as it was, even one whose root is outside the key.
 ### Pads Track
 
 A third instrument that only follows the chords — piano pads under the song.
-Press **Track 1** until it shows Pads (Drum → Chord → Pads). It plays every
-chord of the Chord track as a full chord on the chord grid, on its own output
-(**Options > Pads**); **Shift + Track 1** on it turns it on or off. **Menu**
-opens its settings — Enabled, Octave, Inversion, Strum, Strum Dir, Note Gap,
+Press **Track 4** (Track 4 again shows the Click track). It plays every chord
+of the Chord track as a full chord on the chord grid, on its own output
+(**Options > Pads**). **Menu** opens its settings — **Enabled** turns it on or
+off — the settings — Enabled, Octave, Inversion, Strum, Strum Dir, Note Gap,
 Velocity and Chance (see Instrument Settings); there's no Voicing, Follow Note,
 Pattern or Approach, because the Pads are always a chord. Its items work as the
 Instrument Track's below: mute it, or change those settings, from any bar and
 beat of a section. A new song's Pads are off, an octave above Inst 2 (octave 4),
 voice-led (Auto inversion), at velocity 80.
 
-**Button LED hints:** Track 1 is teal on the Pads track (very dark while the
+**Button LED hints:** Track 4 is teal on the Pads track (very dark while the
 Pads are off).
 
 ---
@@ -227,8 +232,8 @@ Pads are off).
 
 Play a synth/bass part alongside the drums, following the Chord Track's harmony.
 There are two independent instrument tracks — press **Track 2** for Instrument 1
-and **Track 3** for Instrument 2, and press it again to turn that instrument on
-or off (its Enabled setting). Each plays with its track settings (Menu) by
+and **Track 3** for Instrument 2; **Enabled** in its settings (**Menu**) turns
+it on or off. Each plays with its track settings (Menu) by
 default; an **item** changes them from a bar and beat until the section's next
 item — mute it, or change any of its settings (octave, follow note, voicing,
 pattern, approach, strum, note gap, velocity, chance...).
@@ -242,7 +247,6 @@ Shift + jog, Delete, Copy, step buttons, Mute, Left/Right), plus:
 |---------|--------|
 | Jog click (on an item) | Open Item Settings for it |
 | Jog click (on + Add) | Add an item after the last one and open it |
-| Track 2 / 3 (on its own track) | Turn the instrument on or off — heard at once while playing (switching on an instrument that was off when playback started sounds from the next Play) |
 | Menu | Open Instrument Settings for this track |
 
 Items play against the chords, so while the song has no chords the Inst and
@@ -266,8 +270,9 @@ a muted bar dimmed, and the selected item's bar white.
 
 ### Click Track
 
-Set how loud the click is through the song. Press **Track 4** to show it, and
-again to turn the click on or off. Each section starts at the click volume set
+Set how loud the click is through the song. Press **Track 4** twice to show it
+(the first press shows the Pads). Turn the click on or off with **Click** in
+Song Settings (**Menu** on this track). Each section starts at the click volume set
 in **Options: Click**; a **click item** changes it from a bar and beat until the
 section's next item — louder in a chorus, **0%** for silence. Controls are the
 same as the Chord Track's; an item's fields are Bar, Beat, Advanced, **Volume**
@@ -383,6 +388,7 @@ key and the song lock, or restore an earlier version of the song.
 | Key | The song's key — changing it transposes every existing chord to the same relative harmony in the new key |
 | Lock Song | When On, the song cannot be renamed, deleted, or edited — clips, chords and items included. The footer then offers Menu (to reach this setting) in place of the click, and a click or pad that would edit shows **Song locked** |
 | Restore Backup | Opens the list of saved versions of this song (the value is how many there are) |
+| Click | The click on or off (jog click) — for every song, as in Perform; allowed on a locked song |
 
 #### Restore Backup
 
@@ -662,7 +668,7 @@ Choose which folder of clips to jam with. The folder's name (BPM / time signatur
 
 Layer a groove with fills on the fly. Left 4 columns of pads are grooves; right 4 columns are fills (filtered by the current groove's part type).
 
-Press Track 2 or Track 3 to turn on Inst 1 or Inst 2 and play chords over the groove. While either instrument is on, the two left columns become chord pads and the grooves and fills shrink to 3 columns each. See **Jam Chord Pads** below.
+Press Track 2, Track 3 or Track 4 to turn on Inst 1, Inst 2 or the Pads and play chords over the groove. The Pads play the chord as a full chord on the Pads output (Options > Pads), held from bar to bar until you pick another; their settings (Shift + Track 4) are Octave, Inversion and Note Gap. While any of them is on, the two left columns become chord pads and the grooves and fills shrink to 3 columns each. See **Jam Chord Pads** below.
 
 #### While stopped
 
@@ -678,8 +684,8 @@ Press Track 2 or Track 3 to turn on Inst 1 or Inst 2 and play chords over the gr
 | Shift + Jog wheel | Change the key of the chord pads |
 | Capture | **Keys** on / off (Up / Down then change octave) — see **Keys** below |
 | Track 1 / 2 / 3 | Turn Drums / Inst 1 / Inst 2 on or off |
-| Track 4 | Turn the click on or off (lit orange while on) |
-| Shift + Track 2 / 3 | Open the settings for Inst 1 / Inst 2 |
+| Track 4 | Turn the **Pads** on or off — the chord pads' chord, held under the groove until it changes (lit teal while on) |
+| Shift + Track 2 / 3 / 4 | Open the settings for Inst 1 / Inst 2 / the Pads |
 | Record | Start or stop recording the Schwung mix to a WAV file (see below) |
 | Play | Stop (if a preview is playing) |
 | Back | Return to the Jam Folder picker |
@@ -700,8 +706,8 @@ Press Track 2 or Track 3 to turn on Inst 1 or Inst 2 and play chords over the gr
 | Jog wheel | Change the BPM in realtime |
 | Shift + Jog wheel | Change the key of the chord pads |
 | Track 1 / 2 / 3 | Turn Drums / Inst 1 / Inst 2 on or off immediately |
-| Track 4 | Turn the click on or off (lit orange while on) |
-| Shift + Track 2 / 3 | Open the settings for Inst 1 / Inst 2 |
+| Track 4 | Turn the **Pads** on or off — the chord pads' chord, held under the groove until it changes (lit teal while on) |
+| Shift + Track 2 / 3 / 4 | Open the settings for Inst 1 / Inst 2 / the Pads |
 | Record | Start or stop recording the Schwung mix to a WAV file (see below) |
 | Play | Stop playback |
 | Back | Stop and return to the Jam Folder picker |
