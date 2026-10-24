@@ -208,20 +208,26 @@ const DIATONIC_QUALITY = ["maj", "min", "min", "maj", "maj", "min", "dim"];
 
 /* Chord qualities offered in the chord picker (beyond the diatonic default).
  * Each maps to a semitone offset for the third/fifth/seventh. */
-const CHORD_QUALITIES = ["maj", "min", "dim", "aug", "7", "m7", "maj7", "dim7", "sus2", "sus4"];
+/* The chord types, in the order the chord page's Type row steps through
+ * them: triads, sixths and sevenths, added-note chords (add9, add4 -- "(4)"),
+ * then the extended ones. The stored name is the key here; the engine has
+ * the same table (CHORD_QUALITY_TABLE in arranger_engine.c). */
+const CHORD_QUALITIES = ["maj", "min", "dim", "aug", "sus2", "sus4",
+    "6", "m6", "7", "maj7", "m7", "m7b5", "dim7", "mmaj7", "7sus4",
+    "add9", "madd9", "add4", "madd4", "7add4", "m7add4",
+    "69", "9", "maj9", "m9", "7b9", "7s9", "maj7s11", "11", "m11", "13"];
 
 /* Semitone intervals for each chord quality relative to the root. */
 const CHORD_INTERVALS = {
-    "maj":  [0, 4, 7],
-    "min":  [0, 3, 7],
-    "dim":  [0, 3, 6],
-    "aug":  [0, 4, 8],
-    "7":    [0, 4, 7, 10],
-    "m7":   [0, 3, 7, 10],
-    "maj7": [0, 4, 7, 11],
-    "dim7": [0, 3, 6, 9],
-    "sus2": [0, 2, 7],
-    "sus4": [0, 5, 7]
+    "maj": [0, 4, 7], "min": [0, 3, 7], "dim": [0, 3, 6], "aug": [0, 4, 8],
+    "sus2": [0, 2, 7], "sus4": [0, 5, 7],
+    "6": [0, 4, 7, 9], "m6": [0, 3, 7, 9], "7": [0, 4, 7, 10], "maj7": [0, 4, 7, 11],
+    "m7": [0, 3, 7, 10], "m7b5": [0, 3, 6, 10], "dim7": [0, 3, 6, 9], "mmaj7": [0, 3, 7, 11],
+    "7sus4": [0, 5, 7, 10], "add9": [0, 4, 7, 14], "madd9": [0, 3, 7, 14],
+    "add4": [0, 4, 5, 7], "madd4": [0, 3, 5, 7], "7add4": [0, 4, 5, 7, 10], "m7add4": [0, 3, 5, 7, 10],
+    "69": [0, 4, 7, 9, 14], "9": [0, 4, 7, 10, 14], "maj9": [0, 4, 7, 11, 14], "m9": [0, 3, 7, 10, 14],
+    "7b9": [0, 4, 7, 10, 13], "7s9": [0, 4, 7, 10, 15], "maj7s11": [0, 4, 7, 11, 18],
+    "11": [0, 4, 7, 10, 14, 17], "m11": [0, 3, 7, 10, 14, 17], "13": [0, 4, 7, 10, 14, 21]
 };
 
 /* Display label for a chord quality (used to render a compact chord name,
@@ -233,15 +239,23 @@ const CHORD_INTERVALS = {
 const INVERSION_AUTO = 4;
 
 const CHORD_QUALITY_LABEL = {
-    "maj": "", "min": "m", "dim": "dim", "aug": "aug", "7": "7",
-    "m7": "m7", "maj7": "maj7", "dim7": "dim7", "sus2": "sus2", "sus4": "sus4"
+    "maj": "", "min": "m", "dim": "dim", "aug": "aug", "sus2": "sus2", "sus4": "sus4",
+    "6": "6", "m6": "m6", "7": "7", "maj7": "maj7", "m7": "m7", "m7b5": "m7b5", "dim7": "dim7",
+    "mmaj7": "m(maj7)", "7sus4": "7sus4", "add9": "add9", "madd9": "m(add9)",
+    "add4": "(4)", "madd4": "m(4)", "7add4": "7(4)", "m7add4": "m7(4)",
+    "69": "6/9", "9": "9", "maj9": "maj9", "m9": "m9", "7b9": "7b9", "7s9": "7#9",
+    "maj7s11": "maj7#11", "11": "11", "m11": "m11", "13": "13"
 };
 
 /* Full-word label for the chord picker's Type row, where a blank ("maj") is
  * ambiguous rather than a compact chord-name shorthand. */
 const CHORD_TYPE_LABEL = {
-    "maj": "Major", "min": "Minor", "dim": "Dim", "aug": "Aug", "7": "7th",
-    "m7": "Min7", "maj7": "Maj7", "dim7": "Dim7", "sus2": "Sus2", "sus4": "Sus4"
+    "maj": "Major", "min": "Minor", "dim": "Dim", "aug": "Aug", "sus2": "Sus2", "sus4": "Sus4",
+    "6": "6th", "m6": "Min6", "7": "7th", "maj7": "Maj7", "m7": "Min7", "m7b5": "Min7b5", "dim7": "Dim7",
+    "mmaj7": "Min(Maj7)", "7sus4": "7Sus4", "add9": "Add9", "madd9": "Min Add9",
+    "add4": "Add4", "madd4": "Min Add4", "7add4": "7 Add4", "m7add4": "Min7 Add4",
+    "69": "6/9", "9": "9th", "maj9": "Maj9", "m9": "Min9", "7b9": "7b9", "7s9": "7#9",
+    "maj7s11": "Maj7#11", "11": "11th", "m11": "Min11", "13": "13th"
 };
 
 /* The 12 note names, used to render a chord's root/bass. */
@@ -251,10 +265,9 @@ const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", 
  * order the picker offers them: chromatically up from the song key's tonic,
  * so the first choice is the scale's base note rather than always C. */
 export function bassNotesForKey(key) {
-    const pc = noteSemitone(key);
-    const start = pc >= 0 ? pc : 0;
+    /* Spelt as the chord roots are: the key's notes its way, the rest by degree. */
     const out = [];
-    for (let i = 0; i < 12; i++) out.push(NOTE_NAMES[(start + i) % 12]);
+    for (let i = 0; i < 12; i++) out.push(chordRootName(noteSemitone(key) >= 0 ? key : "C", i));
     return out;
 }
 
@@ -268,14 +281,37 @@ const CHORD_ROOT_DEGREES = ["I", "bII", "ii", "bIII", "iii", "IV", "#IV", "V", "
 const CHORD_ROOT_SCALE_DEGREE = [0, -1, 1, -1, 2, 3, -1, 4, -1, 5, -1, 6];
 const FLAT_NOTE_NAMES = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"];
 
+/* Major keys written with flats (F, Bb, Eb, Ab, Db); the rest use sharps. */
+function keyUsesFlats(keyPc) {
+    return keyPc === 1 || keyPc === 3 || keyPc === 5 || keyPc === 8 || keyPc === 10;
+}
+
+/* Pitch class `pc` named as key `keyPc` writes its notes. */
+function spellInKey(pc, keyPc) {
+    return (keyUsesFlats(keyPc) ? FLAT_NOTE_NAMES : NOTE_NAMES)[((pc % 12) + 12) % 12];
+}
+
+/* A key as it is written: "A#" (stored) shows as Bb, "C#" as Db... */
+export function keyLabel(key) {
+    const pc = noteSemitone(key);
+    return pc < 0 ? String(key || "") : spellInKey(pc, pc);
+}
+
 /* The note name of root `r` (semitones above `key`): the key's own notes as
  * the key's chords name them, the flat degrees with flats. */
 export function chordRootName(key, r) {
     const keyPc = noteSemitone(key);
     const pc = ((keyPc < 0 ? 0 : keyPc) + r) % 12;
-    const d = CHORD_ROOT_SCALE_DEGREE[r];
+    const d = CHORD_ROOT_SCALE_DEGREE[((r % 12) + 12) % 12];
     if (d >= 0) return diatonicChord(key, d).root;
-    return CHORD_ROOT_DEGREES[r].startsWith("b") ? FLAT_NOTE_NAMES[pc] : NOTE_NAMES[pc];
+    return CHORD_ROOT_DEGREES[((r % 12) + 12) % 12].startsWith("b") ? FLAT_NOTE_NAMES[pc] : NOTE_NAMES[pc];
+}
+
+/* A note name re-spelt for `key` (a chord saved as A# in F reads Bb). */
+function spellNoteForKey(name, key) {
+    const pc = noteSemitone(name), keyPc = noteSemitone(key);
+    if (pc < 0 || keyPc < 0) return name;
+    return chordRootName(key, ((pc - keyPc) % 12 + 12) % 12);
 }
 
 /* A root's default type: the key's own chord's, else major. */
@@ -3195,17 +3231,19 @@ function diatonicChord(key, degree) {
     /* Major scale semitone steps from the tonic: 0,2,4,5,7,9,11. */
     const scaleSteps = [0, 2, 4, 5, 7, 9, 11];
     const rootPc = (keyPc + scaleSteps[d]) % 12;
-    return { root: NOTE_NAMES[rootPc], quality: DIATONIC_QUALITY[d] };
+    return { root: spellInKey(rootPc, keyPc), quality: DIATONIC_QUALITY[d] };
 }
 
 /* Render a chord object as a display string, e.g. "C", "Dm", "C/G", "Dm7". */
-export function chordLabel(chord) {
+export function chordLabel(chord, key) {
     if (!chord) return "";
     if (chord.none) return "N.C.";
-    const root = chord.root || "C";
+    /* With a key, the notes are spelt as that key writes them. */
+    const root = key ? spellNoteForKey(chord.root || "C", key) : (chord.root || "C");
+    const bass = chord.bass && key ? spellNoteForKey(chord.bass, key) : chord.bass;
     const q = CHORD_QUALITY_LABEL[chord.quality] || "";
     let s = root + q;
-    if (chord.bass && chord.bass !== root) s += "/" + chord.bass;
+    if (bass && bass !== root) s += "/" + bass;
     return s;
 }
 
@@ -6957,7 +6995,7 @@ function jamChordParam(chord, degree, key) {
  * drawJam's status line. */
 function jamChordDegreeLabel(degree, key) {
     if (degree < 0) return null;
-    return chordLabel(jamChordForDegree(degree, key)) + (degree === 7 ? "+8" : "");
+    return chordLabel(jamChordForDegree(degree, key), key) + (degree === 7 ? "+8" : "");
 }
 
 function drawJamLEDs() {
@@ -7853,7 +7891,7 @@ function drawChordTrack() {
     const secIndex = builderPlayingFromTemp ? viewSectionIndex() : chordDisplaySectionIndex();
     const sec = viewSong() ? viewSong().sections[secIndex] : null;
     const key = currentSong ? (currentSong.key || DEFAULT_KEY) : DEFAULT_KEY;
-    drawMenuHeader(fitHeader("Chords: " + (currentSong ? shortSongName(currentSong.name) : ""), key), key);
+    drawMenuHeader(fitHeader("Chords: " + (currentSong ? shortSongName(currentSong.name) : ""), keyLabel(key)), keyLabel(key));
     if (!sec) {
         print(2, LIST_TOP_Y, "No section.", 1);
         drawOverlay();
@@ -7871,7 +7909,7 @@ function drawChordTrack() {
         selectedIndex: chordListCursor + 1,
         getLabel: (item) => {
             if (item.type === "section") return sec.name || "Section";
-            if (item.type === "chord") return chordLabel(item.ev.chord);
+            if (item.type === "chord") return chordLabel(item.ev.chord, key);
             return "+ Add";
         },
         getValue: (item) => {
@@ -8253,7 +8291,7 @@ function chordPickItems() {
 
 function drawChordPick() {
     const key = currentSong ? (currentSong.key || DEFAULT_KEY) : DEFAULT_KEY;
-    drawMenuHeader("Chord", key);
+    drawMenuHeader("Chord", keyLabel(key));
     const items = chordPickItems();
     if (chordPickFocus >= items.length) chordPickFocus = items.length - 1;
     drawMenuList({
@@ -8269,7 +8307,7 @@ function drawChordPick() {
         prioritizeSelectedValue: true,
         listArea: { topY: LIST_TOP_Y, bottomY: LIST_INDICATOR_BOTTOM_Y }
     });
-    print(2, LIST_INDICATOR_BOTTOM_Y + 2, "= " + chordLabel(pickResult()) + " " + chordPosLabel(chordPickBar, chordPickBeat), 1);
+    print(2, LIST_INDICATOR_BOTTOM_Y + 2, "= " + chordLabel(pickResult(), key) + " " + chordPosLabel(chordPickBar, chordPickBeat), 1);
 }
 
 function handleChordPickInput(cc, value) {
@@ -9571,7 +9609,7 @@ function drawSongSettings() {
         { key: "name", label: "Name", value: currentSong ? shortSongName(currentSong.name) : "" },
         { key: "bpm", label: "Tempo", value: String(songSettingsPendingBpm) },
         { key: "num", label: "Time Signature", value: songSettingsPendingNum + "/" + songSettingsPendingDen },
-        { key: "key", label: "Key", value: songSettingsPendingKey },
+        { key: "key", label: "Key", value: keyLabel(songSettingsPendingKey) },
         { key: "lock", label: "Lock Song", value: songIsLocked() ? "On" : "Off" },
         { key: "restore", label: "Restore Backup", value: String(songSettingsBackupCount) }
     ];
@@ -10354,7 +10392,7 @@ function setlistSongRowValue(entry, key) {
     if (key === "bars") { const bars = entry ? (entry.click_bars || 0) : 0; return bars === 0 ? "Off" : String(bars); }
     if (key === "sound") return clickSoundOn(entry) ? "On" : "Off";
     if (key === "stop") return entry && entry.stop_after_finish ? "Yes" : "No";
-    if (key === "skey") return entry && entry.key ? entry.key : "Song (" + ((song && song.key) || DEFAULT_KEY) + ")";
+    if (key === "skey") return entry && entry.key ? keyLabel(entry.key) : "Song (" + keyLabel((song && song.key) || DEFAULT_KEY) + ")";
     if (key === "tempo") return entry && entry.tempo_bpm ? String(entry.tempo_bpm) : "Song (" + ((song && song.tempo_bpm) || 120) + ")";
     if (key === "sections") return entry && Array.isArray(entry.sections) ? setlistSectionIndices(song, entry).length + " set" : "Song";
     if (key === "knobs") return knobOverrideCount(entry) ? knobOverrideCount(entry) + " own" : "Setlist";
@@ -10743,7 +10781,7 @@ function drawJam() {
             chordText = jamChordDegreeLabel(jamQueuedChordDegree(),
                 jamChordPendingDegree >= 0 ? jamChordPendingKey : jamChordLiveKey) || "—";
         }
-        print(2, LIST_TOP_Y + 36, "Key: " + jamKey + "  Chord: " + chordText, 1);
+        print(2, LIST_TOP_Y + 36, "Key: " + keyLabel(jamKey) + "  Chord: " + chordText, 1);
     }
 }
 

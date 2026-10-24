@@ -139,8 +139,9 @@ function deepEqual(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
     const gShifts = [0, 1, 2, 3, 4, 5, 6, 7].map(d => jamChordForDegree(d, "G").shift).join(",");
     CHECK(gShifts === "0,0,0,1,1,1,1,1",
           "jamChordForDegree: in G, C/D/E/F# (degrees 3-6) and the octave root are shifted up (got " + gShifts + ")");
-    const PCS = { C: 0, "C#": 1, D: 2, "D#": 3, E: 4, F: 5, "F#": 6, G: 7, "G#": 8, A: 9, "A#": 10, B: 11 };
-    const badKeys = Object.keys(PCS).filter(k => {
+    const PCS = { C: 0, "C#": 1, D: 2, "D#": 3, E: 4, F: 5, "F#": 6, G: 7, "G#": 8, A: 9, "A#": 10, B: 11,
+                  Db: 1, Eb: 3, Gb: 6, Ab: 8, Bb: 10 };
+    const badKeys = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"].filter(k => {
         const pitches = [0, 1, 2, 3, 4, 5, 6, 7].map(d => {
             const c = jamChordForDegree(d, k);
             return PCS[c.root] + 12 * c.shift;

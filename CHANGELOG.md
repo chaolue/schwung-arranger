@@ -105,6 +105,14 @@
   (bVII in C is Bb). A chord outside the key now opens showing its own
   root; it showed as I.
 
+- More chord types: 6, m6, m7b5, m(maj7), 7sus4, add9, m(add9), add4 (4),
+  m(4), 7(4), m7(4), 6/9, 9, maj9, m9, 7b9, 7#9, maj7#11, 11, m11, 13 --
+  up to six notes, all played.
+- Notes are spelt as the key writes them: flats in F, Bb, Eb, Ab and Db
+  (and their chords, bass list and the key itself -- "A#" shows as Bb),
+  sharps in the others; a chord saved with the other spelling shows the
+  key's.
+
 ### Instrument settings while playing
 - Play now works from Instrument Settings and the item pages of Inst 1/2 and
   Pads (it sent the song but never started it: the build confirmation that
@@ -114,6 +122,9 @@
   takes the instrument live and re-strikes, without rebuilding the song.
 - A setting changed while playing from a section or the cursor is no longer
   lost on Stop (it went to the temporary copy being played).
+- Editing an item playback hasn't reached (later in the section, or in
+  another one) no longer re-strikes the note sounding now: the change is
+  heard when playback gets there.
 
 ### Schwung chains
 - While a chain, Send or Master FX editor is open over the Arranger, only

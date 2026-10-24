@@ -50,7 +50,15 @@ check(shown("bVII (Bb)") && shown("Major"), "ten steps up: bVII (Bb), Major: " +
 H.printed.length = 0;
 jog(-8); tick();
 check(shown("ii (D)") && shown("Minor"), "back eight: ii (D), the key's minor: " + JSON.stringify(H.printed.slice(0, 6)));
-jog(8); tick();
+/* Type (row 1) on ii: Minor up to Min7 Add4, m7(4). */
+back();                        /* out of Root's edit */
+jog(1); click();               /* Type, in edit */
+H.printed.length = 0;
+jog(19); tick();
+check(shown("Min7 Add4"), "the Type row reaches Min7 Add4: " + JSON.stringify(H.printed.slice(0, 6)));
+check(H.printed.some(p => p.includes("Dm7(4)")), "...shown as Dm7(4)");
+back(); jog(-1); click();      /* back to Root, in edit */
+jog(8); tick();                /* ii -> bVII (type resets to Major) */
 back(); back();                /* out of edit; save the chord */
 back();                        /* out of the song */
 const chords = JSON.parse(H.files.get(PATH)).sections[0].chords;

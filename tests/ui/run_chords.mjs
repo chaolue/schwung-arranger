@@ -23,8 +23,23 @@ check(chords[2] === null, "an empty bar stays null (it carries the No Chord)");
 check(chords[0] && chords[0].root === "D" && chords[3] && chords[3].root === "G", "real chords unchanged");
 
 /* Slash bass: the choices start at the key's tonic, not always C. */
-check(M.bassNotesForKey("A#")[0] === "A#", "bass choices in A# start at A#");
-check(M.bassNotesForKey("D").join(" ") === "D D# E F F# G G# A A# B C C#", "bass choices run chromatically up from the key");
+check(M.bassNotesForKey("A#")[0] === "Bb", "bass choices in A# (Bb major) start at Bb, as the key writes it");
+check(M.bassNotesForKey("D").join(" ") === "D Eb E F F# G G# A Bb B C C#",
+      "bass choices run chromatically up from the key, spelt by degree: " + M.bassNotesForKey("D").join(" "));
+check(M.bassNotesForKey("F").join(" ") === "F Gb G Ab A Bb B C Db D Eb E",
+      "in F: the key's notes with flats (Bb), the others by degree: " + M.bassNotesForKey("F").join(" "));
+
+/* Spelling for the key: a key's own chords its way, a saved sharp re-spelt. */
+check(M.keyLabel("A#") === "Bb" && M.keyLabel("C#") === "Db" && M.keyLabel("F#") === "F#" && M.keyLabel("G") === "G",
+      "keys as written: A# -> Bb, C# -> Db, F# stays");
+check(M.chordLabel({ root: "A#", quality: "maj" }, "F") === "Bb" && M.chordLabel({ root: "A#", quality: "min" }, "F#") === "A#m",
+      "a saved A# chord reads Bb in F, A#m in F#");
+check(M.chordLabel({ root: "D#", quality: "maj7", bass: "A#" }, "A#") === "Ebmaj7/Bb", "root and bass re-spelt: Ebmaj7/Bb in Bb");
+
+/* More chord types: compact names. */
+check(M.chordLabel({ root: "D", quality: "m7add4" }, "C") === "Dm7(4)" && M.chordLabel({ root: "G", quality: "7s9" }, "C") === "G7#9" &&
+      M.chordLabel({ root: "C", quality: "69" }, "C") === "C6/9" && M.chordLabel({ root: "A", quality: "mmaj7" }, "C") === "Am(maj7)",
+      "m7(4), 7#9, 6/9, m(maj7)");
 check(M.bassNotesForKey("C")[0] === "C", "bass choices in C start at C");
 
 

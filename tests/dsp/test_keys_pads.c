@@ -198,6 +198,76 @@ int main(int argc, char **argv) {
     }
     CHECK(d2_again == 1 && pads_again == 0, "a new song_json drops the live updates: the song's own D2, no Pads");
     stop_and_ring_out(api, inst);
+
+    /* ---- A live edit to an item playback has not reached waits for it ----
+     * Inst 1: bass, octave 2, D for 4 bars, an item at bar 3 (index 2)
+     * setting octave 5. While bar 1 plays, the item is edited to octave 6:
+     * D2 (38) keeps sounding -- no release, no re-strike -- and at bar 3 the
+     * edited octave plays (D6 = 86), not the old one (D5 = 74). */
+    snprintf(json, sizeof(json),
+        "{\"source_folder\":\"%s\",\"name\":\"T\",\"tempo_bpm\":120,"
+        "\"time_sig_num\":4,\"time_sig_den\":4,\"sections\":["
+        "{\"name\":\"A\",\"clips\":[{\"source\":\"Grooves/120 Verse Half-Time.mid\",\"start_bar\":0,\"end_bar\":4,\"guard_fraction\":0}],"
+        "\"chords\":[{\"root\":\"D\",\"quality\":\"maj\",\"bass\":\"\"}]}"
+        "],\"instruments\":["
+        "{\"enabled\":true,\"output\":\"schwung\",\"channel\":2,\"octave\":2,\"follow_note\":0,\"voicing\":\"bass\","
+        "\"note_gap\":0.125,\"items\":[{\"section\":0,\"bar\":2,\"octave\":5}]}"
+        "]}", folder);
+    base = state_u32(api, inst, "primary_published_gen");
+    api->set_param(inst, "song_json", json);
+    CHECK(wait_field_change(api, inst, "primary_published_gen", base, 3000), "later item: song published");
+    g_captured_count = 0;
+    api->set_param(inst, "play", "1");
+    for (int b = 0; b < 200; b++) api->render_block(inst, audio, MOVE_FRAMES_PER_BLOCK);
+    g_captured_count = 0;
+    api->set_param(inst, "inst1_live", "[{\"enabled\":true,\"output\":\"schwung\",\"channel\":2,\"octave\":2,"
+        "\"follow_note\":0,\"voicing\":\"bass\",\"note_gap\":0.125,\"items\":[{\"section\":0,\"bar\":2,\"octave\":6}]}]");
+    for (int b = 0; b < 5; b++) api->render_block(inst, audio, MOVE_FRAMES_PER_BLOCK);
+    int touched = 0;
+    for (int i = 0; i < g_captured_count; i++) if (g_captured[i].channel == 1) touched++;
+    CHECK(touched == 0, "editing an item at bar 3 while bar 1 plays leaves the sounding D2 alone");
+    /* Bar 3 starts 4 s in at 120 BPM (~1380 blocks); 205 have played. */
+    for (int b = 0; b < 1300; b++) api->render_block(inst, audio, MOVE_FRAMES_PER_BLOCK);
+    int d6 = 0, d5 = 0;
+    for (int i = 0; i < g_captured_count; i++) {
+        if (g_captured[i].channel != 1 || g_captured[i].status != 0x90 || g_captured[i].vel == 0) continue;
+        if (g_captured[i].note == 86) d6++;
+        if (g_captured[i].note == 74) d5++;
+    }
+    CHECK(d6 == 1 && d5 == 0, "at bar 3 the edited item plays (D6), not the old one (D5)");
+    /* A change to what plays NOW is still heard at once. */
+    g_captured_count = 0;
+    api->set_param(inst, "inst1_live", "[{\"enabled\":true,\"output\":\"schwung\",\"channel\":2,\"octave\":2,"
+        "\"follow_note\":0,\"voicing\":\"bass\",\"note_gap\":0.125,\"items\":[{\"section\":0,\"bar\":2,\"octave\":4}]}]");
+    for (int b = 0; b < 3; b++) api->render_block(inst, audio, MOVE_FRAMES_PER_BLOCK);
+    int d4 = 0;
+    for (int i = 0; i < g_captured_count; i++)
+        if (g_captured[i].channel == 1 && g_captured[i].status == 0x90 && g_captured[i].vel > 0 && g_captured[i].note == 62) d4++;
+    CHECK(d4 == 1, "editing the item now playing re-strikes at once (D4)");
+    stop_and_ring_out(api, inst);
+
+    /* ---- A five-note chord: m7(4) ----
+     * Pads, D m7add4 at octave 4, root position: D F G A C (62 65 67 69 72). */
+    snprintf(json, sizeof(json),
+        "{\"source_folder\":\"%s\",\"name\":\"T\",\"tempo_bpm\":120,"
+        "\"time_sig_num\":4,\"time_sig_den\":4,\"sections\":["
+        "{\"name\":\"A\",\"clips\":[{\"source\":\"Grooves/120 Verse Half-Time.mid\",\"start_bar\":0,\"end_bar\":4,\"guard_fraction\":0}],"
+        "\"chords\":[{\"root\":\"D\",\"quality\":\"m7add4\",\"bass\":\"\"}]}"
+        "],\"instruments\":[{\"enabled\":false},{\"enabled\":false},"
+        "{\"enabled\":true,\"output\":\"schwung\",\"channel\":7,\"octave\":4,\"follow_note\":0,\"voicing\":\"chord\","
+        "\"inversion\":0,\"note_gap\":0.125}]}", folder);
+    base = state_u32(api, inst, "primary_published_gen");
+    api->set_param(inst, "song_json", json);
+    CHECK(wait_field_change(api, inst, "primary_published_gen", base, 3000), "m7(4): song published");
+    g_captured_count = 0;
+    api->set_param(inst, "play", "1");
+    for (int b = 0; b < 100; b++) api->render_block(inst, audio, MOVE_FRAMES_PER_BLOCK);
+    int want[5] = { 62, 65, 67, 69, 72 }, got = 0;
+    for (int w = 0; w < 5; w++)
+        for (int i = 0; i < g_captured_count; i++)
+            if (g_captured[i].channel == 6 && g_captured[i].status == 0x90 && g_captured[i].vel > 0 && g_captured[i].note == want[w]) { got++; break; }
+    CHECK(got == 5, "D m7(4) plays all five notes: D F G A C");
+    stop_and_ring_out(api, inst);
     api->destroy_instance(inst);
     if (g_failures == 0) printf("\nALL TESTS PASSED\n");
     else printf("\n%d TEST(S) FAILED\n", g_failures);

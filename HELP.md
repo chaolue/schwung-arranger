@@ -185,8 +185,8 @@ Edit one chord, opened with the jog click on it in the Chord Track.
 
 | Field | Meaning |
 |-------|---------|
-| Root | Any root, a semitone at a time up from the song's key: **I, ♭II, ii, ♭III, iii, IV, ♯IV, V, ♭VI, vi, ♭VII, vii°** (shown with the note, e.g. ♭VII (Bb) in C) — the key's own chords and the ones outside it — then **No Chord**: a silent bar: the chord before stops there, and empty bars after it stay silent until the next chord. Changing the root picks its usual type: the key's own chords as the key has them (ii minor, vii° diminished…), the others major; Type then changes it |
-| Type | Chord quality (major, minor, 7th, etc.) |
+| Root | Any root, a semitone at a time up from the song's key: **I, ♭II, ii, ♭III, iii, IV, ♯IV, V, ♭VI, vi, ♭VII, vii°** (shown with the note, e.g. ♭VII (Bb) in C; notes are spelt as the key writes them — flats in F, B♭, E♭, A♭ and D♭, sharps in the others — and a chord saved with the other spelling shows the key's) — the key's own chords and the ones outside it — then **No Chord**: a silent bar: the chord before stops there, and empty bars after it stay silent until the next chord. Changing the root picks its usual type: the key's own chords as the key has them (ii minor, vii° diminished…), the others major; Type then changes it |
+| Type | Chord quality: Major, Minor, Dim, Aug, Sus2, Sus4; 6th, Min6, 7th, Maj7, Min7, Min7b5, Dim7, Min(Maj7), 7Sus4; Add9, Min Add9, Add4, Min Add4, 7 Add4, Min7 Add4 (m7(4)); 6/9, 9th, Maj9, Min9, 7b9, 7#9, Maj7#11, 11th, Min11, 13th. Chords of five or six notes play them all; the chord list shows the short name (Dm7(4), G7#9, C6/9) |
 | Bass | Optional slash-chord bass note, or **—** for none. The choices start at the song key's tonic |
 | Bar | The bar the chord starts in (only bars with a free beat) |
 | Beat | The beat it starts on, from the bar's free beats |
@@ -287,8 +287,11 @@ Instrument track (or the Pads track).
 stops), and **while playing, every change is heard at once** — the instrument
 re-strikes with the new setting — so you can try settings against the song.
 The same goes for an item's page (the item is saved as you change it) and for
-Delete, Copy and nudging items in the track's list. Changes made while playing
-are kept when you stop.
+Delete, Copy and nudging items in the track's list. A change is heard as soon
+as it applies: a track setting, or the item playing now, at once; an item
+further on (or in another section) when playback reaches it — editing it does
+not touch the note sounding now. Changes made while playing are kept when you
+stop.
 
 | Control | Action |
 |---------|--------|

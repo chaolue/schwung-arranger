@@ -156,6 +156,7 @@ static void *arranger_worker_thread(void *arg);
 #define MAX_JSON_LEN       8192
 #define MAX_SECTION_BARS   256   /* max bars per section for chord/instrument arrays */
 #define MAX_INSTRUMENTS    3     /* Inst 1, Inst 2 and Pads (chord-following) */
+#define MAX_CHORD_TONES    6     /* the most notes a chord quality has (11ths, 13ths) */
 
 /* Cap on the ASSEMBLED, multi-clip timeline built by the async primary/staging
  * channels (arranger_worker_iterate). Derived from MAX_CLIP_EVENTS (a per-clip
@@ -386,7 +387,7 @@ typedef struct {
     uint8_t played_n;
     uint8_t played_sent;
     uint8_t played_vel;
-    uint8_t played[4];
+    uint8_t played[MAX_CHORD_TONES];
     uint32_t strum_next_tick;
     uint32_t strum_interval;
 } inst_voice_t;
@@ -400,7 +401,7 @@ typedef struct {
     uint8_t strum_flip;      /* Alternating strum: which way the next one goes */
     uint32_t approach_end;   /* the change an approach note is leading into; 0 = none */
     uint32_t arp_next;       /* Arp on the chord grid: the next step's tick; 0 = not running */
-    uint8_t shuffle[12];     /* Shuffle arp: this round's order */
+    uint8_t shuffle[MAX_CHORD_TONES * 3];  /* Shuffle arp: this round's order */
     uint8_t shuffle_len;
 } inst_play_t;
 
@@ -2483,31 +2484,56 @@ static int note_name_semitone(const char *name) {
 
 /* Semitone intervals for each chord quality (relative to the root). Mirrors
  * CHORD_INTERVALS in ui.js. */
+/* Chord qualities: the name the UI stores and the intervals above the root,
+ * up to MAX_CHORD_TONES. Mirrors CHORD_INTERVALS in ui.js. An unknown name
+ * plays as major. */
+typedef struct { const char *name; int n; int8_t iv[MAX_CHORD_TONES]; } chord_quality_t;
+static const chord_quality_t CHORD_QUALITY_TABLE[] = {
+    { "maj", 3, { 0, 4, 7 } },          { "min", 3, { 0, 3, 7 } },
+    { "dim", 3, { 0, 3, 6 } },          { "aug", 3, { 0, 4, 8 } },
+    { "sus2", 3, { 0, 2, 7 } },         { "sus4", 3, { 0, 5, 7 } },
+    { "6", 4, { 0, 4, 7, 9 } },         { "m6", 4, { 0, 3, 7, 9 } },
+    { "7", 4, { 0, 4, 7, 10 } },        { "maj7", 4, { 0, 4, 7, 11 } },
+    { "m7", 4, { 0, 3, 7, 10 } },       { "m7b5", 4, { 0, 3, 6, 10 } },
+    { "dim7", 4, { 0, 3, 6, 9 } },      { "mmaj7", 4, { 0, 3, 7, 11 } },
+    { "7sus4", 4, { 0, 5, 7, 10 } },    { "add9", 4, { 0, 4, 7, 14 } },
+    { "madd9", 4, { 0, 3, 7, 14 } },    { "add4", 4, { 0, 4, 5, 7 } },
+    { "madd4", 4, { 0, 3, 5, 7 } },     { "7add4", 5, { 0, 4, 5, 7, 10 } },
+    { "m7add4", 5, { 0, 3, 5, 7, 10 } },{ "69", 5, { 0, 4, 7, 9, 14 } },
+    { "9", 5, { 0, 4, 7, 10, 14 } },    { "maj9", 5, { 0, 4, 7, 11, 14 } },
+    { "m9", 5, { 0, 3, 7, 10, 14 } },   { "7b9", 5, { 0, 4, 7, 10, 13 } },
+    { "7s9", 5, { 0, 4, 7, 10, 15 } },  { "maj7s11", 5, { 0, 4, 7, 11, 18 } },
+    { "11", 6, { 0, 4, 7, 10, 14, 17 } },{ "m11", 6, { 0, 3, 7, 10, 14, 17 } },
+    { "13", 6, { 0, 4, 7, 10, 14, 21 } },
+};
+
 static int chord_quality_intervals(const char *quality, int *out, int max) {
-    static const int maj[3]  = {0, 4, 7};
-    static const int min[3]  = {0, 3, 7};
-    static const int dim[3]  = {0, 3, 6};
-    static const int aug[3]  = {0, 4, 8};
-    static const int s7[4]   = {0, 4, 7, 10};
-    static const int m7[4]   = {0, 3, 7, 10};
-    static const int maj7[4] = {0, 4, 7, 11};
-    static const int dim7[4] = {0, 3, 6, 9};
-    static const int sus2[3] = {0, 2, 7};
-    static const int sus4[3] = {0, 5, 7};
-    const int *src = maj; int n = 3;
-    if (!quality) { src = maj; n = 3; }
-    else if (strcmp(quality, "min") == 0) { src = min; n = 3; }
-    else if (strcmp(quality, "dim") == 0) { src = dim; n = 3; }
-    else if (strcmp(quality, "aug") == 0) { src = aug; n = 3; }
-    else if (strcmp(quality, "7") == 0) { src = s7; n = 4; }
-    else if (strcmp(quality, "m7") == 0) { src = m7; n = 4; }
-    else if (strcmp(quality, "maj7") == 0) { src = maj7; n = 4; }
-    else if (strcmp(quality, "dim7") == 0) { src = dim7; n = 4; }
-    else if (strcmp(quality, "sus2") == 0) { src = sus2; n = 3; }
-    else if (strcmp(quality, "sus4") == 0) { src = sus4; n = 3; }
-    int count = n < max ? n : max;
-    for (int i = 0; i < count; i++) out[i] = src[i];
+    const chord_quality_t *q = &CHORD_QUALITY_TABLE[0];
+    if (quality) {
+        for (size_t i = 0; i < sizeof CHORD_QUALITY_TABLE / sizeof CHORD_QUALITY_TABLE[0]; i++)
+            if (strcmp(quality, CHORD_QUALITY_TABLE[i].name) == 0) { q = &CHORD_QUALITY_TABLE[i]; break; }
+    }
+    int count = q->n < max ? q->n : max;
+    for (int i = 0; i < count; i++) out[i] = q->iv[i];
     return count;
+}
+
+/* A chord's third and fifth as intervals above its root, found by size
+ * rather than position (an add4 chord's second tone is its third, its third
+ * a fourth): the third is a minor or major third (a sus chord's suspended
+ * tone stands in), the fifth a diminished, perfect or augmented fifth. */
+static int chord_third_interval(const char *quality) {
+    int raw[MAX_CHORD_TONES];
+    int n = chord_quality_intervals(quality, raw, MAX_CHORD_TONES);
+    for (int i = 1; i < n; i++) if (raw[i] == 3 || raw[i] == 4) return raw[i];
+    return n >= 2 ? raw[1] : 4;
+}
+
+static int chord_fifth_interval(const char *quality) {
+    int raw[MAX_CHORD_TONES];
+    int n = chord_quality_intervals(quality, raw, MAX_CHORD_TONES);
+    for (int i = 1; i < n; i++) if (raw[i] >= 6 && raw[i] <= 8) return raw[i];
+    return 7;
 }
 
 /* Same as chord_quality_intervals, but rotated into the given inversion:
@@ -2518,8 +2544,8 @@ static int chord_quality_intervals(const char *quality, int *out, int max) {
  * pitch order: the untouched, higher-indexed tones keep their original
  * position (now the lowest), followed by the rotated tones each +12. */
 static int chord_voiced_intervals(const char *quality, int inversion, int *out, int max) {
-    int raw[4];
-    int n = chord_quality_intervals(quality, raw, 4);
+    int raw[MAX_CHORD_TONES];
+    int n = chord_quality_intervals(quality, raw, MAX_CHORD_TONES);
     if (inversion < 0) inversion = 0;
     if (inversion > n - 1) inversion = n - 1;
     int count = n < max ? n : max;
@@ -2592,11 +2618,11 @@ static int chord_voiced_notes(const inst_voice_t *inst, const chord_t *ch, int *
     int base = (inst->octave + 1) * 12 + 12 * ch->octave_shift;
     int n;
     if (inst->voicing) {
-        int intervals[4];
+        int intervals[MAX_CHORD_TONES];
         int inv = inst->inversion;
         int is_auto = (inv == INVERSION_AUTO);
         if (is_auto) inv = (ch->degree >= 0 && ch->degree < 8) ? AUTO_INVERSION_BY_DEGREE[ch->degree] : 0;
-        n = chord_voiced_intervals(ch->quality, inv, intervals, 4);
+        n = chord_voiced_intervals(ch->quality, inv, intervals, MAX_CHORD_TONES);
         if (is_auto && ch->key_pc >= 0) {
             int low = root_pc + intervals[0];
             int d = ((low - ch->key_pc) % 12 + 12) % 12;
@@ -2636,6 +2662,34 @@ static int inst_count(const engine_t *e) {
     return n > MAX_INSTRUMENTS ? MAX_INSTRUMENTS : n;
 }
 
+static void resolve_instrument_at(const instrument_t *inst, int section, uint32_t bar, uint32_t off,
+                                  uint32_t ticks_per_beat, inst_voice_t *out, int *muted);
+static int tick_to_section_bar(const song_t *song, uint32_t tick, uint32_t ticks_per_bar, uint32_t *out_bar);
+static uint32_t bar_offset_at(const song_t *song, uint32_t tick, uint32_t ticks_per_bar);
+
+/* Instrument i's settings in force at `tick` (items applied), and whether
+ * it is muted there. Past the song's end: its track settings. */
+static void instrument_state_at(engine_t *e, int i, uint32_t tick, inst_voice_t *out, int *muted) {
+    const song_t *song = &e->live_slot.song;
+    uint32_t bar = 0;
+    int sec = e->ticks_per_bar ? tick_to_section_bar(song, tick, e->ticks_per_bar, &bar) : -1;
+    if (sec < 0) {
+        inst_voice_from(inst_at(e, i), out);
+        *muted = 0;
+        return;
+    }
+    resolve_instrument_at(inst_at(e, i), sec, bar, bar_offset_at(song, tick, e->ticks_per_bar),
+                          e->ticks_per_beat, out, muted);
+}
+
+/* Two voices that sound the same from here on: every setting an attack or
+ * its timing reads. */
+static int voice_same_now(const inst_voice_t *a, const inst_voice_t *b) {
+    return voice_equal(a, b) && a->follow_note == b->follow_note && a->note_gap == b->note_gap &&
+           a->approach == b->approach && a->chance == b->chance && a->vel_follow == b->vel_follow &&
+           a->arp_rate == b->arp_rate && a->arp_range == b->arp_range && a->arp_vel == b->arp_vel;
+}
+
 static int chord_equal(const chord_t *a, const chord_t *b);
 
 /* xorshift32: Chance and the Random arpeggio. */
@@ -2662,10 +2716,8 @@ static int tone_above(int b, const chord_t *ch, int iv) {
  * changed). Third and fifth are the chord's own (a minor chord's minor
  * third, a diminished fifth), placed above b. */
 static int bass_pattern_note(const chord_t *ch, int b, int pattern, uint32_t k) {
-    int raw[4];
-    int n = chord_quality_intervals(ch->quality, raw, 4);
-    int third_iv = n >= 2 ? raw[1] : 4, fifth_iv = n >= 3 ? raw[2] : 7;
-    int third = tone_above(b, ch, third_iv), fifth = tone_above(b, ch, fifth_iv);
+    int third = tone_above(b, ch, chord_third_interval(ch->quality));
+    int fifth = tone_above(b, ch, chord_fifth_interval(ch->quality));
     if (third == b) third += 12;
     if (fifth == b) fifth += 12;   /* a slash bass on the fifth: its octave */
     switch (pattern) {
@@ -2742,10 +2794,8 @@ static int arp_pattern_note(engine_t *e, inst_play_t *ps, const chord_t *ch, int
             break;
         }
         case 9: {                                                                    /* 1-5-8-10 */
-            int raw[4];
-            int m = chord_quality_intervals(ch->quality, raw, 4);
             int r = tone_above(notes[0] - 11, ch, 0);    /* the root, at or below the lowest note */
-            const int s4[4] = { r, r + (m >= 3 ? raw[2] : 7), r + 12, r + 12 + (m >= 2 ? raw[1] : 4) };
+            const int s4[4] = { r, r + chord_fifth_interval(ch->quality), r + 12, r + 12 + chord_third_interval(ch->quality) };
             return s4[k % 4];
         }
         default: idx = (int)(k % (uint32_t)nt); break;                               /* Up */
@@ -2760,7 +2810,7 @@ static int arp_pattern_note(engine_t *e, inst_play_t *ps, const chord_t *ch, int
  * note, or the Arp's lowest): it always plays, at full velocity. */
 static int attack_notes(engine_t *e, const inst_voice_t *v, inst_play_t *ps,
                         const chord_t *ch, int *out, int *is_base) {
-    int notes[4];
+    int notes[MAX_CHORD_TONES];
     int n = chord_voiced_notes(v, ch, notes);
     *is_base = 0;
     if (n <= 0) return 0;
@@ -2773,9 +2823,9 @@ static int attack_notes(engine_t *e, const inst_voice_t *v, inst_play_t *ps,
     }
     if (v->voicing == 2) {
         int range = v->arp_range >= 1 && v->arp_range <= 3 ? v->arp_range : 1;
-        int tones[12], nt = 0;
+        int tones[MAX_CHORD_TONES * 3], nt = 0;
         for (int o = 0; o < range; o++)
-            for (int i = 0; i < n && nt < 12; i++) tones[nt++] = notes[i] + 12 * o;
+            for (int i = 0; i < n && nt < MAX_CHORD_TONES * 3; i++) tones[nt++] = notes[i] + 12 * o;
         int pick = arp_pattern_note(e, ps, ch, v->pattern, k, tones, nt, notes, n);
         int base = v->pattern == 9 ? tone_above(notes[0] - 11, ch, 0) : tones[0];
         out[0] = clampi(pick, 0, 127);
@@ -2809,7 +2859,7 @@ static void instrument_attack(engine_t *e, inst_voice_t *v, inst_play_t *ps,
     }
     ps->last_chord = *ch;
     ps->has_last = 1;
-    int notes[4], is_base = 0;
+    int notes[MAX_CHORD_TONES], is_base = 0;
     int n = attack_notes(e, v, ps, ch, notes, &is_base);
     ps->step++;
     /* An Arp's base note always plays: Chance and Vel Range shape the rest. */
@@ -2854,14 +2904,14 @@ static void instrument_attack(engine_t *e, inst_voice_t *v, inst_play_t *ps,
 static void emit_instrument_chord_off(engine_t *e, inst_voice_t *inst,
                                       const chord_t *ch) {
     if (inst->played_valid) {
-        for (int i = 0; i < inst->played_sent && i < 4; i++)
+        for (int i = 0; i < inst->played_sent && i < MAX_CHORD_TONES; i++)
             emit_instrument_event(e, inst, 0x80, inst->played[i], 0);
         inst->played_n = 0;
         inst->played_sent = 0;
         return;
     }
     if (!ch || !ch->set) return;
-    int notes[4];
+    int notes[MAX_CHORD_TONES];
     int n = chord_voiced_notes(inst, ch, notes);
     for (int i = 0; i < n; i++) emit_instrument_event(e, inst, 0x80, (uint8_t)notes[i], 0);
 }
@@ -3485,7 +3535,7 @@ static void emit_instrument_approaches(engine_t *e, uint32_t tick) {
         if (muted || v.voicing != 0 || v.approach == 0) continue;
         uint32_t gap = (uint32_t)(v.note_gap * e->ticks_per_beat);
         if (gap >= half) continue;
-        int to_n[4], from_n[4];
+        int to_n[MAX_CHORD_TONES], from_n[MAX_CHORD_TONES];
         chord_voiced_notes(&v, to, to_n);
         chord_voiced_notes(&v, from, from_n);
         if (to_n[0] % 12 == from_n[0] % 12) continue;
@@ -6871,17 +6921,29 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
          * released first, so a change of octave or route never strands a
          * note; the next attack plays the new settings. */
         int idx = key[4] - '1';
+        /* What the instrument is playing NOW, before and after: an edit to
+         * an item later in the song (or another section) changes nothing
+         * here, and must not be heard until playback reaches it -- only a
+         * change to the settings in force at the playhead re-strikes. */
+        inst_voice_t before, after;
+        int muted_before = 1, muted_after = 1;
+        int had = idx < inst_count(e);
+        int on_before = had && inst_at(e, idx)->enabled;
+        if (had) instrument_state_at(e, idx, e->playhead_tick, &before, &muted_before);
+        if (!val || parse_instruments_array(val, &e->inst_live[idx], 1) < 1) return;
+        e->inst_live_set[idx] = 1;
+        int on_after = inst_at(e, idx)->enabled;
+        instrument_state_at(e, idx, e->playhead_tick, &after, &muted_after);
+        if (had && on_before == on_after && muted_before == muted_after && voice_same_now(&before, &after))
+            return;
         if (e->last_inst_chord_set[idx]) {
             emit_instrument_chord_off(e, &e->last_inst_resolved[idx], &e->last_inst_chord[idx]);
             e->last_inst_chord_set[idx] = 0;
         }
         e->pending_off_set[idx] = 0;
         e->inst_play[idx].arp_next = 0;
-        if (val && parse_instruments_array(val, &e->inst_live[idx], 1) >= 1) {
-            e->inst_live_set[idx] = 1;
-            /* The bar-boundary path attacks only on a change: have it re-attack. */
-            e->inst_bar_key = 0xFFFFFFFFu;
-        }
+        /* The bar-boundary path attacks only on a change: have it re-attack. */
+        e->inst_bar_key = 0xFFFFFFFFu;
         return;
     }
     if (strncmp(key, "keys_", 5) == 0) {
