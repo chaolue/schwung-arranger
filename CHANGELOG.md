@@ -86,8 +86,8 @@
 ### Pads and Keys
 - **Pads**: a third instrument that plays the chords as a full chord on the
   chord grid -- piano pads under the song. Track 1 now steps Drum -> Chord
-  -> Pads; Shift + Track 1 on the Pads track turns it on or off, and in
-  Perform too (live). Its settings (Octave, Inversion, Strum, Note Gap,
+  -> Pads; Shift + Track 1 on the Pads track turns it on or off.
+  (Since moved to Track 4: see Track buttons.) Its settings (Octave, Inversion, Strum, Note Gap,
   Velocity, Chance) and items work as Inst 1/2's; its output is Options >
   Pads. Off in new songs.
 - **Keys**: Capture in Perform or Jam turns the pads into a keyboard (and
@@ -116,6 +116,8 @@
   chord as a full chord on Options > Pads, held from bar to bar until
   another is picked; Shift + Track 4 opens their settings (Octave,
   Inversion, Note Gap).
+- Perform: Track 4 turns the **Pads** on or off (lit teal), as in Jam; the
+  click moved to Shift + Track 4 (lit orange while Shift is held).
 - Jam's instrument settings (Shift + Track 2/3/4) have everything Song
   Builder's do: Arp and its Pattern, Rate, Range and Vel Range; bass
   patterns and Approach (into a chord queued on the pads); Strum; Velocity;
@@ -161,6 +163,7 @@
 - A battery icon, filled to the charge, shows at the right of the header on
   the main menu, Perform and Jam (Move's own battery display is hidden while
   the Arranger is up). At 10% it blinks and a "Low battery" popup warns once.
+  On the charger (charging or full) a lightning bolt shows beside it.
   Needs a Schwung with `host_battery()`; on an older one nothing is shown.
 
 ### Options

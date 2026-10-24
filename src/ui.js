@@ -2456,7 +2456,7 @@ let lastSubFlashMs = 0;       /* wall-clock anchor of the current sub-beat flash
 let perfDrumEnabled = true;
 let perfInst1Enabled = true;
 let perfInst2Enabled = true;
-let perfInst3Enabled = true;   /* Pads: Shift + Track 1 */
+let perfInst3Enabled = true;   /* Pads: Track 4 */
 
 /* Performance / setlist playback state */
 let perfPlaying = false;            /* is the setlist advancing on its own */
@@ -6066,7 +6066,9 @@ function updateButtonLEDs() {
                 active.set(MoveRow1, perfDrumEnabled ? TRACK_ROW_COLOUR[TRACK_DRUM] : Black);
                 active.set(MoveRow2, perfInst1Enabled ? TRACK_ROW_COLOUR[TRACK_INSTRUMENT_1] : Black);
                 active.set(MoveRow3, perfInst2Enabled ? TRACK_ROW_COLOUR[TRACK_INSTRUMENT_2] : Black);
-                active.set(MoveRow4, clickOn ? CLICK_ROW_COLOUR : Black);
+                /* Track 4: the Pads; with Shift held, the click. */
+                active.set(MoveRow4, shiftHeld ? (clickOn ? CLICK_ROW_COLOUR : Black)
+                                               : (perfInst3Enabled ? TRACK_ROW_COLOUR[TRACK_PADS] : Black));
                 break;
             case VIEW_JAM_FOLDER:
                 active.set(MoveBack, WhiteLedFull);
@@ -6093,15 +6095,12 @@ function updateButtonLEDs() {
                 break;
         }
         /* Perform and Jam: Capture is Keys (lit, bright while on), Up/Down
-         * its octave while on; in Perform, Shift shows Track 1 as Pads. */
+         * its octave while on. */
         if (keysViewActive()) {
             active.set(MoveCapture, keysOn ? WhiteLedFull : WhiteLedDim);
             if (keysOn) {
                 active.set(MoveUp, keysOctave < 8 ? WhiteLedFull : Black);
                 active.set(MoveDown, keysOctave > -1 ? WhiteLedFull : Black);
-            }
-            if (currentView === VIEW_PERFORMANCE && shiftHeld) {
-                active.set(MoveRow1, perfInst3Enabled ? TRACK_ROW_COLOUR[TRACK_PADS] : Black);
             }
         }
         /* Song Builder's settings pages: Play works there as in Song Builder. */
@@ -12252,16 +12251,6 @@ function handlePerformanceInput(cc, value) {
      * 8 knobs drive the setlist's Schwung parameters (see KNOB_COUNT). */
     if (cc === MoveCapture) { if (value > 0) setKeys(!keysOn); return; }
     if (keysOn && (cc === MoveUp || cc === MoveDown)) { if (value > 0) shiftKeysOctave(cc === MoveUp ? 1 : -1); return; }
-    if (cc === MoveRow1 && shiftHeld) {
-        /* Shift + Track 1: the Pads track, live, as Track 1-3 mute the others. */
-        if (value > 0) {
-            perfInst3Enabled = !perfInst3Enabled;
-            showPopup("Pads", perfInst3Enabled ? "On" : "Off", 2000);
-            if (typeof host_module_set_param === "function") host_module_set_param("inst3_enabled", perfInst3Enabled ? "1" : "0");
-            needsRedraw = true;
-        }
-        return;
-    }
     if (cc >= 71 && cc <= 78) {
         turnPerfKnob(cc - 71, decodeDelta(value));
     } else if (cc === MoveUp && value > 0) {
@@ -12296,7 +12285,17 @@ function handlePerformanceInput(cc, value) {
             perfStart();
         }
     } else if (cc === MoveRow4 && value > 0) {
-        toggleClick();
+        /* Track 4: the Pads, live, as Track 1-3 mute the others -- as in
+         * Jam. The click moved to Shift + Track 4. */
+        if (shiftHeld) {
+            toggleClick();
+        } else {
+            perfInst3Enabled = !perfInst3Enabled;
+            showPopup("Pads", perfInst3Enabled ? "On" : "Off", 2000);
+            if (typeof host_module_set_param === "function") host_module_set_param("inst3_enabled", perfInst3Enabled ? "1" : "0");
+            needsRedraw = true;
+            ledDirtyAll = true;
+        }
     } else if ((cc === MoveRow1 || cc === MoveRow2 || cc === MoveRow3) && value > 0) {
         /* Live mute toggle for drums/Inst 1/Inst 2 (Track 1/2/3, same as
          * Song Builder's track buttons). */
@@ -15723,15 +15722,18 @@ globalThis.init = function() {
  * the level is drawn at the right of the header on the root, Perform and Jam
  * screens. At BATTERY_LOW_PCT it blinks, and a popup warns once -- re-armed
  * once it is back above it by a margin, so a reading wavering on the line
- * warns only once. Neither while Move's log says it is charging.
+ * warns only once. Neither while it is charging. On the charger -- charging,
+ * or full -- a lightning bolt shows to the left of the icon.
  * Older Schwung has no host_battery(): nothing is drawn. */
 const BATTERY_POLL_MS = 2000;
 const BATTERY_LOW_PCT = 10;
 const BATTERY_REARM_PCT = 12;
 const BATTERY_BLINK_MS = 500;
 const BATTERY_ICON_W = 10;   /* a 9x5 body and a 1x3 terminal */
+const BATTERY_BOLT_W = 4;    /* a 3x5 bolt and a 1-pixel gap */
 let batteryLevel = null;     /* 0..100, null = unknown */
-let batteryCharging = false; /* only ever known from Move's log line */
+let batteryCharging = false;
+let batteryOnPower = false;  /* charging, or full on the charger */
 let batteryPolledAt = -Infinity;
 let batteryLowWarned = false;
 let batteryBlinkOff = false; /* the off half of the low-battery blink */
@@ -15754,10 +15756,11 @@ function pollBattery() {
     let b = null;
     try { b = host_battery(); } catch (e) { b = null; }
     const level = (b && typeof b.level === "number" && b.level >= 0 && b.level <= 100) ? Math.round(b.level) : null;
-    const charging = !!(b && b.charging === true);
-    if (level !== batteryLevel || charging !== batteryCharging) {
+    const { charging, onPower } = batteryChargeState(b);
+    if (level !== batteryLevel || charging !== batteryCharging || onPower !== batteryOnPower) {
         batteryLevel = level;
         batteryCharging = charging;
+        batteryOnPower = onPower;
         needsRedraw = true;
     }
     if (level === null) return;
@@ -15765,17 +15768,36 @@ function pollBattery() {
         if (level >= BATTERY_REARM_PCT) batteryLowWarned = false;
         return;
     }
-    /* Only Move's log line says whether it is charging; when it says so, an
-     * already-plugged-in Move needs no warning. */
+    /* An already-plugged-in Move needs no warning. */
     if (!batteryLowWarned && !charging) {
         batteryLowWarned = true;
         showPopup("Low battery", level + "% left. Plug in the Move.", 5000);
     }
 }
 
-/* Pixels the battery takes: the icon alone. */
+/* host_battery()'s charge state: { charging, onPower }. From the controller's
+ * report, the low nibble of its flags byte is Move's own chargingState --
+ * 1 charging, 2 full on the charger (0x21 was captured while Move logged
+ * "charging", 0x22 while it logged "fullyCharged"). From Move's log line,
+ * `charging` as that line said. A Schwung that decodes it itself gives
+ * `charging` / `plugged`, used as given. */
+function batteryChargeState(b) {
+    if (!b) return { charging: false, onPower: false };
+    if (typeof b.charging === "boolean" || typeof b.plugged === "boolean") {
+        const charging = b.charging === true;
+        return { charging, onPower: charging || b.plugged === true };
+    }
+    if (b.source === "xmos" && typeof b.flags === "number") {
+        const state = b.flags & 0x0F;
+        return { charging: state === 1, onPower: state === 1 || state === 2 };
+    }
+    return { charging: false, onPower: false };
+}
+
+/* Pixels the battery takes: the icon, and the bolt while on the charger. */
 function batteryBadgeWidth() {
-    return batteryLevel === null ? 0 : BATTERY_ICON_W;
+    if (batteryLevel === null) return 0;
+    return BATTERY_ICON_W + (batteryOnPower ? BATTERY_BOLT_W : 0);
 }
 
 /* The icon with its last pixel at column `right`, top row `y` (the header's
@@ -15790,6 +15812,15 @@ function drawBatteryBadge(right, y) {
     fill_rect(x0 + 9, y + 1, 1, 3, 1);
     const fill = batteryLevel <= 0 ? 0 : Math.max(1, Math.round(batteryLevel * 7 / 100));
     if (fill) fill_rect(x0 + 1, y + 1, fill, 3, 1);
+    if (batteryOnPower) {
+        /* The bolt: ..X / .X. / XXX / .X. / X.. */
+        const bx = x0 - BATTERY_BOLT_W;
+        fill_rect(bx + 2, y, 1, 1, 1);
+        fill_rect(bx + 1, y + 1, 1, 1, 1);
+        fill_rect(bx, y + 2, 3, 1, 1);
+        fill_rect(bx + 1, y + 3, 1, 1, 1);
+        fill_rect(bx, y + 4, 1, 1, 1);
+    }
 }
 
 /* A Menu Header's right text with room kept for the battery at the right

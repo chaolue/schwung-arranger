@@ -1,6 +1,6 @@
 /* The battery: Schwung's host_battery() level drawn at the right of the
- * header on the root and Perform screens, and a popup once when it falls to
- * 10%. Pixels are read back from the fill_rect calls (the header and Perform
+ * header on the root and Perform screens, a lightning bolt beside it while on
+ * the charger, and a popup once when it falls to 10%. Pixels are read back from the fill_rect calls (the header and Perform
  * text are drawn through it too). */
 import * as H from './host_mock.mjs';
 
@@ -58,7 +58,7 @@ const noBatteryHeader = fb.slice(0, W * 7);
 
 /* ---- A level: the badge at the right of the root header ---- */
 g.host_battery = () => battery;
-battery = { level: 25, source: "xmos", flags: 0x21 };
+battery = { level: 25, source: "xmos", flags: 0 };
 tick(100);   /* past the 2 s poll */
 check(iconMatches(25, 1), "root header draws the battery icon at 25%");
 /* The icon alone -- no percentage -- with clear columns between the
@@ -69,9 +69,32 @@ check(litIn(110, 115, 1, 5) === 0, "no percentage: clear columns between the ver
 check(!popupShown("Low battery"), "no warning at 25%");
 
 /* A different level redraws the fill. */
-battery = { level: 100, source: "xmos", flags: 0x21 };
+battery = { level: 100, source: "xmos", flags: 0 };
 tick(100);
 check(iconMatches(100, 1), "a full battery fills the icon");
+
+/* ---- On the charger: the bolt, left of the icon ---- */
+/* ..X / .X. / XXX / .X. / X.. in columns 112-114, a gap at 115. */
+const BOLT = ["..X", ".X.", "XXX", ".X.", "X.."];
+const boltShown = (y) => BOLT.every((row, r) => [...row].every((c, i) => px(112 + i, y + r) === (c === "X" ? 1 : 0))) &&
+    litIn(115, 115, y, y + 4) === 0;
+check(!boltShown(1) && litIn(110, 115, 1, 5) === 0, "on battery (flags 0): no bolt");
+battery = { level: 25, source: "xmos", flags: 0x21 };
+tick(100);
+check(boltShown(1) && iconMatches(25, 1), "charging (flags 0x21): the bolt beside the icon");
+check(litIn(108, 111, 1, 5) === 0, "...with clear columns before the bolt");
+battery = { level: 100, source: "xmos", flags: 0x22 };
+tick(100);
+check(boltShown(1) && iconMatches(100, 1), "full on the charger (flags 0x22): the bolt too");
+battery = { level: 40, source: "log", charging: true };
+tick(100);
+check(boltShown(1), "Move's log saying charging: the bolt");
+battery = { level: 40, source: "log", charging: false };
+tick(100);
+check(!boltShown(1) && litIn(110, 115, 1, 5) === 0, "the log saying not charging: no bolt");
+battery = { level: 40, source: "xmos", flags: 0x20 };
+tick(100);
+check(!boltShown(1), "an undecoded state (flags 0x20): no bolt");
 
 /* ---- Unknown again: the header goes back to what it was ---- */
 battery = null;
@@ -105,7 +128,7 @@ check(popupShown("Low battery"), "warned again after recovering to 12%");
 tick(400);
 H.printed.length = 0;
 
-/* Charging (only Move's log says): no warning. */
+/* Charging: no warning -- from Move's log, or from the flags. */
 battery = { level: 50, source: "log", charging: true };
 tick(100);
 H.printed.length = 0;
@@ -113,6 +136,15 @@ battery = { level: 5, source: "log", charging: true };
 tick(100);
 check(!popupShown("Low battery"), "no warning while the log says it is charging");
 check(iconMatches(5, 1), "the log's level is drawn the same way");
+tick(400);
+battery = { level: 50, source: "xmos", flags: 0x21 };
+tick(100);
+H.printed.length = 0;
+battery = { level: 4, source: "xmos", flags: 0x21 };
+tick(100);
+check(!popupShown("Low battery"), "no warning while the flags say charging");
+battery = { level: 5, source: "log", charging: true };
+tick(100);
 
 /* ---- Low: the icon blinks; charging, it does not ---- */
 function blinkFrames(n) {
@@ -137,7 +169,7 @@ f = blinkFrames(80);
 check(f.on === 80, "at 11% it is steady again " + JSON.stringify(f));
 
 /* ---- Perform: the badge on the top line ---- */
-battery = { level: 60, source: "xmos", flags: 0x21 };
+battery = { level: 60, source: "xmos", flags: 0 };
 tick(100);
 jog(-8); jog(2); click();     /* Perform */
 click();                      /* Gig */
@@ -147,6 +179,11 @@ check(iconMatches(60, 1), "Perform draws the battery on its top line");
  * all the room the icon leaves. */
 check(litIn(113, 115, 1, 5) === 0, "the song name stops short of the battery");
 check(litIn(100, 112, 1, 5) > 0, "the song name runs up to the icon");
+/* Charging: the bolt takes its place, and the name stops short of it. */
+battery = { level: 60, source: "xmos", flags: 0x21 };
+tick(100);
+check(boltShown(1) && iconMatches(60, 1), "Perform: the bolt beside the icon");
+check(litIn(110, 111, 1, 5) === 0 && litIn(100, 109, 1, 5) > 0, "...and the song name stops short of the bolt");
 
 console.log(`battery: ${passes} passed, ${failures} failed`);
 if (failures) process.exit(1);

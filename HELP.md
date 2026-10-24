@@ -37,8 +37,8 @@ Screen reached when first loading the module.
 header here, in Perform (on the top line) and in Jam, since Move's own
 battery display is hidden while the Arranger is up. At 10% or below the icon
 blinks, and a "Low battery" popup appears once; it warns again only after the
-battery has been back above 12%. Neither happens while Move reports it is
-charging. It needs a Schwung that reports the battery (`host_battery()`); on
+battery has been back above 12%. Neither happens while it is charging. On the
+charger, charging or full, a lightning bolt shows to the left of the icon. It needs a Schwung that reports the battery (`host_battery()`); on
 an older Schwung nothing is shown.
 
 ---
@@ -523,8 +523,8 @@ Play through a setlist.
 | Capture | **Keys**: turn the pads into a keyboard, and back — see **Keys** below |
 | Jog wheel | Scroll the info display |
 | Track 1 / 2 / 3 | Turn Drums / Inst 1 / Inst 2 on or off (kept until you leave Perform) |
-| Shift + Track 1 | Turn the Pads on or off (Track 1 is lit teal while Shift is held and the Pads are on) |
-| Track 4 | Turn the click on or off (lit orange while on) |
+| Track 4 | Turn the Pads on or off (lit teal while on) |
+| Shift + Track 4 | Turn the click on or off (Track 4 is lit orange while Shift is held and the click is on) |
 | Record | Start or stop recording the Schwung mix to a WAV file (see below) |
 | Knobs 1–8 | Change the Schwung parameter mapped to that knob — see **Performance Knobs** |
 | Touch a knob | Show what it controls (chain, Master FX or send, component, module) and its value |
@@ -541,8 +541,8 @@ Play through a setlist.
 | Up / Down | Scroll the pad window up / down one row (with Keys on: octave up / down) |
 | Capture | **Keys** on / off — see **Keys** below |
 | Track 1 / 2 / 3 | Turn Drums / Inst 1 / Inst 2 on or off immediately |
-| Shift + Track 1 | Turn the Pads on or off immediately |
-| Track 4 | Turn the click on or off (lit orange while on) |
+| Track 4 | Turn the Pads on or off immediately |
+| Shift + Track 4 | Turn the click on or off |
 | Record | Start or stop recording the Schwung mix to a WAV file (see below) |
 | Knobs 1–8 | Change the Schwung parameter mapped to that knob |
 | Play | Stop playback |
@@ -866,8 +866,7 @@ Output routing for one track, opened from the Options list.
 The click track: a metronome that plays a note on every beat while the
 Arranger plays — the accent note on beat 1 of each bar, the normal note on the
 others (the time signature's beat, so eighths in 6/8). Turn it on or off with
-**Track 4** in Perform and Jam, and with a second press of Track 4 in Song
-Builder (where the first shows the Click track). It also plays each Perform song's
+**Shift + Track 4** in Perform, and with the **Click** row in Song Settings. It also plays each Perform song's
 count-in, when that song's **Sound** is on (see **Setlist Song Settings**), and
 it stays quiet during a count-in so the two don't double up.
 

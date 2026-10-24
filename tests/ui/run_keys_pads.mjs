@@ -1,7 +1,7 @@
 /* Pads and Keys through the real src/ui.js.
  *
- * Pads: Track 1 steps Drum -> Chord -> Pads in Song Builder; Shift + Track 1
- * there turns them on or off; their settings and items show only what a
+ * Pads: on Track 4 in Song Builder, and Track 4 turns them on or off in
+ * Perform (the click is Shift + Track 4 there); their settings and items show only what a
  * chord on the chord grid uses; the engine gets them as a third chord
  * instrument on their own route.
  *
@@ -133,11 +133,27 @@ back();                        /* leave Perform with Keys on */
 tick(2);
 check(lastSet("keys_on") === "0", "leaving Perform ends Keys");
 
-/* ---- Pads live in Perform: Shift + Track 1 ---- */
+/* ---- Pads live in Perform: Track 4 (the click is Shift + Track 4) ---- */
 jog(-8); jog(2); click(); click(); tick(5);
+check(H.buttonLeds.get(C.MoveRow4) === 12, "Perform: Track 4 teal, the song's Pads on (" + H.buttonLeds.get(C.MoveRow4) + ")");
 H.dspSets.length = 0;
-cc(C.MoveShift, 127); press(C.MoveRow1); cc(C.MoveShift, 0); tick();
-check(lastSet("inst3_enabled") === "0" && lastSet("drum_enabled") === null, "Shift + Track 1 in Perform: Pads off, drums untouched");
+press(C.MoveRow4); tick(5);
+check(lastSet("inst3_enabled") === "0" && lastSet("drum_enabled") === null && lastSet("click_enabled") === null,
+      "Track 4 in Perform: Pads off, drums and click untouched");
+check(!H.buttonLeds.get(C.MoveRow4), "...Track 4 dark (" + H.buttonLeds.get(C.MoveRow4) + ")");
+press(C.MoveRow4); tick(5);
+check(lastSet("inst3_enabled") === "1", "Track 4 again: Pads on");
+H.dspSets.length = 0;
+cc(C.MoveShift, 127); tick(5);
+check(H.buttonLeds.get(C.MoveRow4) === 3 || !H.buttonLeds.get(C.MoveRow4),
+      "Shift held: Track 4 shows the click (" + H.buttonLeds.get(C.MoveRow4) + ")");
+press(C.MoveRow4); tick(5);
+const clickNow = lastSet("click_enabled");
+check(clickNow !== null && lastSet("inst3_enabled") === null, "Shift + Track 4: the click (" + clickNow + "), Pads untouched");
+check(H.buttonLeds.get(C.MoveRow4) === (clickNow === "1" ? 3 : 0) || (clickNow === "0" && !H.buttonLeds.get(C.MoveRow4)),
+      "...lit as the click (" + H.buttonLeds.get(C.MoveRow4) + ")");
+cc(C.MoveShift, 0); tick(5);
+check(H.buttonLeds.get(C.MoveRow4) === 12, "Shift released: Track 4 teal again (" + H.buttonLeds.get(C.MoveRow4) + ")");
 back();
 
 /* ---- Pads in Jam, on Track 4 (the click was there) ---- */
