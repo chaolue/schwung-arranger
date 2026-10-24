@@ -52,5 +52,29 @@ H.dspSets.length = 0;
 press(C.MoveRow4);
 check(lastSet("jam_inst3_enabled") === "0", "Track 4 again: Pads off");
 
+/* ---- Inst 1 (Jam): every Instrument Settings option ---- */
+H.dspSets.length = 0;
+press(C.MoveRow2);                           /* Inst 1 on: its settings all sent */
+check(["pattern", "approach", "strum", "chance", "vel_follow", "arp_rate", "arp_range", "arp_vel", "velocity"]
+          .every(k => lastSet("jam_inst1_" + k) !== null),
+      "turning Inst 1 on sends all its settings: " + JSON.stringify(H.dspSets.map(x => x[0])));
+cc(C.MoveShift, 127); press(C.MoveRow2); cc(C.MoveShift, 0); tick();
+const menu = () => { const s2 = new Set(); for (let i = 0; i < 16; i++) { H.printed.length = 0; jog(1); H.printed.forEach(t2 => s2.add(t2)); } jog(-30); return [...s2].join("|"); };
+let m = menu();
+check(/Pattern/.test(m) && /Approach/.test(m) && /Velocity/.test(m) && /Vel Follow/.test(m) && /Chance/.test(m),
+      "Inst 1 (Jam), Bass: Pattern, Approach, Velocity, Vel Follow, Chance: " + m);
+check(!/Enabled/.test(m), "...no Enabled (Track 2 is that)");
+/* Pattern (row 3: Octave Follow Voicing Pattern) to 1-5; sent at once. */
+jog(3); press(C.MoveMainButton); jog(1); press(C.MoveMainButton);
+check(lastSet("jam_inst1_pattern") === "1", "Pattern 1-5 sent live: " + lastSet("jam_inst1_pattern"));
+/* Voicing (row 2) to Arp; Follow Note (row 1) to Off: a Rate row. */
+jog(-10); jog(2); press(C.MoveMainButton); jog(2); press(C.MoveMainButton);
+check(lastSet("jam_inst1_voicing") === "arp", "Voicing Arp sent: " + lastSet("jam_inst1_voicing"));
+jog(-10); jog(1); press(C.MoveMainButton); jog(-40); press(C.MoveMainButton);
+check(lastSet("jam_inst1_follow_note") === "0", "Follow Note Off sent");
+m = menu();
+check(/Rate/.test(m) && /1\/8/.test(m) && /Range/.test(m) && /Vel Range/.test(m), "Arp, Follow Off: Rate 1/8, Range, Vel Range: " + m);
+press(C.MoveBack);
+
 console.log(`${passes} passed, ${failures} failed`);
 process.exit(failures ? 1 : 0);

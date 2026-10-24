@@ -3612,6 +3612,10 @@ static void emit_jam_instruments_follow(engine_t *e, uint8_t note, uint8_t hit_v
         instrument_t *inst = &e->jam_inst[i];
         if (!inst->enabled) continue;
         if (inst->follow_note == 0 || inst->follow_note != note) continue;
+        /* An approach note leads into the queued chord: a hit before the bar
+         * line (still on the live chord) does not cut it off. */
+        uint32_t ap_end = e->jam_play[i].approach_end;
+        if (ap_end && ch == &e->jam_chord_live && tick + e->ticks_per_beat / 2 >= ap_end && tick < ap_end) continue;
         inst_voice_t resolved;
         inst_voice_from(inst, &resolved);
         /* Distance from the previous attack, measured across a loop wrap
@@ -3726,6 +3730,12 @@ static void emit_jam_instruments_at_tick(engine_t *e, uint32_t tick) {
          * (emit_instruments_at_tick). */
         uint32_t gap = (uint32_t)(resolved.note_gap * e->ticks_per_beat);
         uint32_t off_tick = tick + e->ticks_per_bar - gap;
+        if (resolved.voicing == 2) {
+            /* An arpeggio runs on at its Rate from the bar (service_jam_arp). */
+            uint32_t step = arp_step_ticks(e, &resolved);
+            e->jam_play[i].arp_next = tick + step;
+            off_tick = tick + step - arp_gap_ticks(e, &resolved, step);
+        }
         if (i != JAM_PADS && off_tick > tick) {
             e->jam_pending_off_tick[i] = off_tick;
             e->jam_pending_off_set[i] = 1;
@@ -3733,6 +3743,77 @@ static void emit_jam_instruments_at_tick(engine_t *e, uint32_t tick) {
             /* The Pads end when the chord changes (above), or on stop. */
             e->jam_pending_off_set[i] = 0;
         }
+    }
+}
+
+/* Jam's Arp with Follow Note Off: from the bar's attack (emit_jam_instruments_
+ * at_tick), every Rate step plays the pattern's next tone of the live chord,
+ * each held a step less the gap -- as service_arp_rate does for a song. */
+static void service_jam_arp(engine_t *e, uint32_t tick) {
+    if (!e->jam_chord_live.set) return;
+    for (int i = 0; i < JAM_INSTRUMENTS; i++) {
+        inst_play_t *ps = &e->jam_play[i];
+        if (!ps->arp_next) continue;
+        instrument_t *inst = &e->jam_inst[i];
+        if (!inst->enabled || inst->voicing != 2 || inst->follow_note) { ps->arp_next = 0; continue; }
+        if (ps->arp_next > tick + 4 * e->ticks_per_beat) { ps->arp_next = 0; continue; }   /* a loop wrap */
+        if (tick < ps->arp_next) continue;
+        uint32_t at = ps->arp_next;
+        inst_voice_t v;
+        inst_voice_from(inst, &v);
+        if (e->jam_last_chord_set[i])
+            emit_instrument_chord_off(e, &e->jam_last_resolved[i], &e->jam_last_chord[i]);
+        instrument_attack(e, &v, ps, &e->jam_chord_live, voice_velocity(&v), tick);
+        e->jam_last_chord[i] = e->jam_chord_live;
+        e->jam_last_chord_set[i] = 1;
+        e->jam_last_resolved[i] = v;
+        uint32_t step = arp_step_ticks(e, &v);
+        ps->arp_next = at + step;
+        if (ps->arp_next <= tick) ps->arp_next = tick + 1;
+        e->jam_pending_off_tick[i] = at + step - arp_gap_ticks(e, &v, step);
+        e->jam_pending_off_set[i] = 1;
+    }
+}
+
+/* Jam's approach notes (Bass voicing): a chord queued on the pads takes over
+ * at the next bar line, so half a beat before it the bass moves to a passing
+ * note into the queued chord's bass -- a semitone below or above it, or the
+ * scale step below. Not when the bass note stays the same, or when nothing
+ * is queued. */
+static void service_jam_approaches(engine_t *e, uint32_t tick) {
+    if (!e->jam_chord_pending_set || !e->jam_chord_live.set || e->ticks_per_bar == 0 || e->ticks_per_beat == 0) return;
+    uint32_t half = e->ticks_per_beat / 2;
+    uint32_t boundary = (tick / e->ticks_per_bar + 1) * e->ticks_per_bar;
+    if (boundary - tick > half) return;
+    for (int i = 0; i < JAM_INSTRUMENTS; i++) {
+        instrument_t *inst = &e->jam_inst[i];
+        inst_play_t *ps = &e->jam_play[i];
+        if (!inst->enabled || inst->voicing != 0 || inst->approach == 0 || ps->approach_end == boundary) continue;
+        inst_voice_t v;
+        inst_voice_from(inst, &v);
+        uint32_t gap = (uint32_t)(v.note_gap * e->ticks_per_beat);
+        if (gap >= half) continue;
+        const chord_t *from = e->jam_last_chord_set[i] ? &e->jam_last_chord[i] : &e->jam_chord_live;
+        int to_n[MAX_CHORD_TONES], from_n[MAX_CHORD_TONES];
+        chord_voiced_notes(&v, &e->jam_chord_pending, to_n);
+        chord_voiced_notes(&v, from, from_n);
+        if (to_n[0] % 12 == from_n[0] % 12) continue;
+        int note = v.approach == 2 ? to_n[0] + 1
+                 : v.approach == 3 ? scale_step_below(to_n[0], e->jam_chord_pending.key_pc)
+                 : to_n[0] - 1;
+        if (e->jam_last_chord_set[i])
+            emit_instrument_chord_off(e, &e->jam_last_resolved[i], &e->jam_last_chord[i]);
+        v.played_valid = 1;
+        v.played_n = v.played_sent = 1;
+        v.played[0] = (uint8_t)clampi(note, 0, 127);
+        v.played_vel = voice_velocity(&v);
+        emit_instrument_event(e, &v, 0x90, v.played[0], v.played_vel);
+        e->jam_last_chord[i] = *from;
+        e->jam_last_chord_set[i] = 1;
+        e->jam_last_resolved[i] = v;
+        ps->approach_end = boundary;
+        e->jam_pending_off_tick[i] = boundary - gap > tick ? boundary - gap : tick + 1;
+        e->jam_pending_off_set[i] = 1;
     }
 }
 
@@ -6008,6 +6089,10 @@ static void update_bar_counter(engine_t *e) {
             emit_jam_instruments_at_tick(e, e->playhead_tick);
         }
     }
+    if (e->running) {
+        service_jam_approaches(e, e->playhead_tick);
+        service_jam_arp(e, e->playhead_tick);
+    }
     /* Song instruments change chord at each chord bar, counted from each
      * section's own start -- not the absolute bar grid above, which drifts
      * from the song's sections once one ends mid-bar. */
@@ -7027,6 +7112,24 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
                               : strcmp(val, "schwung") == 0 ? OUTPUT_TARGET_SCHWUNG : OUTPUT_TARGET_EXTERNAL;
         } else if (strcmp(k, "velocity") == 0) {
             ji->velocity = (uint8_t)clampi(atoi(val), 1, 127);
+        } else if (strcmp(k, "pattern") == 0) {
+            ji->pattern = (uint8_t)clampi(atoi(val), 0, 9);
+        } else if (strcmp(k, "approach") == 0) {
+            ji->approach = (uint8_t)clampi(atoi(val), 0, 3);
+        } else if (strcmp(k, "strum") == 0) {
+            ji->strum_ms = (uint8_t)clampi(atoi(val), 0, 100);
+        } else if (strcmp(k, "strum_dir") == 0) {
+            ji->strum_dir = (uint8_t)clampi(atoi(val), 0, 2);
+        } else if (strcmp(k, "chance") == 0) {
+            ji->chance = (uint8_t)clampi(atoi(val), 1, 100);
+        } else if (strcmp(k, "vel_follow") == 0) {
+            ji->vel_follow = atoi(val) ? 1 : 0;
+        } else if (strcmp(k, "arp_rate") == 0) {
+            ji->arp_rate = (uint8_t)clampi(atoi(val), 1, 6);
+        } else if (strcmp(k, "arp_range") == 0) {
+            ji->arp_range = (uint8_t)clampi(atoi(val), 1, 3);
+        } else if (strcmp(k, "arp_vel") == 0) {
+            ji->arp_vel = (uint8_t)clampi(atoi(val), 0, 90);
         }
         return;
     }

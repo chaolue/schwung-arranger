@@ -2546,9 +2546,9 @@ let jamInstConfig = jamInstDefaults();
  * each bar, the Pads (3) a chord held until it changes, an octave up. */
 function jamInstDefaults() {
     return [
-        { octave: 3, voicing: "bass", inversion: INVERSION_AUTO, note_gap: 0.25, follow_note: 36 },
-        { octave: 3, voicing: "chord", inversion: INVERSION_AUTO, note_gap: 0.25, follow_note: 0 },
-        { octave: 4, voicing: "chord", inversion: INVERSION_AUTO, note_gap: 0.125, follow_note: 0 }
+        { octave: 3, voicing: "bass", inversion: INVERSION_AUTO, note_gap: 0.25, follow_note: 36, velocity: 100 },
+        { octave: 3, voicing: "chord", inversion: INVERSION_AUTO, note_gap: 0.25, follow_note: 0, velocity: 100 },
+        { octave: 4, voicing: "chord", inversion: INVERSION_AUTO, note_gap: 0.125, follow_note: 0, velocity: 80 }
     ];
 }
 let jamInstrumentEditIndex = 0;  /* 0 Inst 1, 1 Inst 2, 2 Pads -- which jamInstConfig entry the menu edits */
@@ -8473,33 +8473,8 @@ function handleInstrumentInput(cc, value) {
     if (cc === MoveMainKnob) {
         const delta = decodeDelta(value);
         if (instrumentEditing) {
-            const key = row.key;
-            if (key === "enabled") {
-                inst.enabled = !inst.enabled;
-            } else if (key === "octave") {
-                inst.octave = Math.max(-1, Math.min(8, inst.octave + delta));
-            } else if (key === "follow") {
-                inst.follow_note = stepFollowNote(inst.follow_note, delta, inst.voicing === "bass" || !inst.voicing);
-            } else if (key === "voicing") {
-                inst.voicing = stepVoicing(inst.voicing || "bass", delta);
-            } else if (key === "inversion") {
-                /* Inversion: root/1st/2nd/3rd/Auto. Clamped per-chord (a triad
-                 * has no 3rd inversion) on the DSP side; the menu just offers
-                 * all four so a 7th/maj7/m7/dim7 chord can use the 3rd. */
-                inst.inversion = Math.max(0, Math.min(INVERSION_AUTO, (inst.inversion || 0) + delta));
-            } else if (key === "gap") {
-                /* Note gap: 0 = none, then 1/16, 1/8, 1/4, 1/2, 1 beat. */
-                const steps = [0, 0.0625, 0.125, 0.25, 0.5, 1.0];
-                const cur = (typeof inst.note_gap === "number") ? inst.note_gap : 0.25;
-                const idx = steps.indexOf(cur);
-                const newIdx = Math.max(0, Math.min(steps.length - 1, (idx < 0 ? 3 : idx) + delta));
-                inst.note_gap = steps[newIdx];
-            } else if (key === "velocity") {
-                /* Note-on velocity, 1-127. */
-                inst.velocity = Math.max(1, Math.min(127, instrumentVelocity(inst) + delta));
-            } else {
-                stepInstVariety(inst, key, delta);
-            }
+            if (row.key === "enabled") inst.enabled = !inst.enabled;
+            else stepInstrumentField(inst, row.key, delta);
             unsavedChanges = true;
             markInstrumentLive(instrumentEditTrack);
         } else {
@@ -8528,6 +8503,35 @@ function handleInstrumentInput(cc, value) {
             currentView = VIEW_BUILDER;
             needsRedraw = true;
         }
+    }
+}
+
+/* Turn one Instrument Settings field (not Enabled) by `delta` -- Song
+ * Builder's tracks and Jam's instruments edit the same settings this way. */
+function stepInstrumentField(inst, key, delta) {
+    if (key === "octave") {
+        inst.octave = Math.max(-1, Math.min(8, (typeof inst.octave === "number" ? inst.octave : 3) + delta));
+    } else if (key === "follow") {
+        inst.follow_note = stepFollowNote(inst.follow_note, delta, inst.voicing === "bass" || !inst.voicing);
+    } else if (key === "voicing") {
+        inst.voicing = stepVoicing(inst.voicing || "bass", delta);
+    } else if (key === "inversion") {
+        /* Inversion: root/1st/2nd/3rd/Auto. Clamped per-chord (a triad
+         * has no 3rd inversion) on the DSP side; the menu just offers
+         * all four so a 7th/maj7/m7/dim7 chord can use the 3rd. */
+        inst.inversion = Math.max(0, Math.min(INVERSION_AUTO, (inst.inversion || 0) + delta));
+    } else if (key === "gap") {
+        /* Note gap: 0 = none, then 1/16, 1/8, 1/4, 1/2, 1 beat. */
+        const steps = [0, 0.0625, 0.125, 0.25, 0.5, 1.0];
+        const cur = (typeof inst.note_gap === "number") ? inst.note_gap : 0.25;
+        const idx = steps.indexOf(cur);
+        const newIdx = Math.max(0, Math.min(steps.length - 1, (idx < 0 ? 3 : idx) + delta));
+        inst.note_gap = steps[newIdx];
+    } else if (key === "velocity") {
+        /* Note-on velocity, 1-127. */
+        inst.velocity = Math.max(1, Math.min(127, instrumentVelocity(inst) + delta));
+    } else {
+        stepInstVariety(inst, key, delta);
     }
 }
 
@@ -9140,12 +9144,31 @@ function pushJamInstrumentRouting(idx) {
      * than Options -> Instrument actually configured, silencing it even
      * though every other setting was correct. */
     set(key + "channel", String(channel - 1), t);
+    for (const field of ["octave", "voicing", "inversion", "gap", "follow", "velocity", ...JAM_VARIETY_FIELDS]) {
+        const [param, value] = jamInstParam(idx, field);
+        set(key + param, value, t);
+    }
+}
+
+/* The variety settings Jam's instruments carry, as Song Builder's do. */
+const JAM_VARIETY_FIELDS = ["pattern", "approach", "strum", "strum_dir", "chance", "vel_follow",
+    "arp_rate", "arp_range", "arp_vel"];
+
+/* A Jam instrument's setting `field` (a menu row key) as the engine's
+ * jam_inst<N>_<param> and its value. */
+function jamInstParam(idx, field) {
     const cfg = jamInstConfig[idx];
-    set(key + "octave", String(cfg.octave), t);
-    set(key + "voicing", cfg.voicing, t);
-    set(key + "inversion", String(cfg.inversion), t);
-    set(key + "note_gap", String(cfg.note_gap), t);
-    set(key + "follow_note", String(cfg.follow_note), t);
+    const v = instVariety(cfg);
+    switch (field) {
+        case "octave": return ["octave", String(cfg.octave)];
+        case "voicing": return ["voicing", cfg.voicing || "bass"];
+        case "inversion": return ["inversion", String(cfg.inversion)];
+        case "gap": return ["note_gap", String(cfg.note_gap)];
+        case "follow": return ["follow_note", String(cfg.follow_note || 0)];
+        case "velocity": return ["velocity", String(instrumentVelocity(cfg))];
+        case "vel_follow": return ["vel_follow", v.vel_follow ? "1" : "0"];
+        default: return [field, String(v[field])];
+    }
 }
 
 function openJamInstrumentMenu(idx) {
@@ -9157,23 +9180,19 @@ function openJamInstrumentMenu(idx) {
     needsRedraw = true;
 }
 
-/* A Jam instrument's live settings. The Pads are always a chord held from
- * bar to bar, so they have no Follow Note or Voicing. */
+/* A Jam instrument's live settings: everything Song Builder's Instrument
+ * Settings has (but Enabled -- its Track button is that), showing the rows
+ * for its voicing. The Pads are always a chord held from bar to bar, so they
+ * get the chord settings only, as Song Builder's Pads track does. */
 function jamInstrumentRows(idx) {
-    const cfg = jamInstConfig[idx];
-    const rows = [
-        { key: "octave", label: "Octave", value: String(cfg.octave) },
-        { key: "follow", label: "Follow Note", value: cfg.follow_note > 0 ? String(cfg.follow_note) : "Off" },
-        { key: "voicing", label: "Voicing", value: cfg.voicing === "chord" ? "Chord" : "Bass" },
-        { key: "inversion", label: "Inversion", value: inversionLabel(cfg.inversion) },
-        { key: "gap", label: "Note Gap", value: noteGapLabel(cfg.note_gap) }
-    ];
-    return idx === 2 ? rows.filter(r => r.key !== "follow" && r.key !== "voicing") : rows;
+    const rows = instrumentRowsFor(jamInstConfig[idx]).filter(r => r.key !== "enabled");
+    return idx === 2 ? padsRowsOnly(TRACK_PADS, rows) : rows;
 }
 
 function drawJamInstrumentMenu() {
     drawMenuHeader(INST_TRACK_NAMES[jamInstrumentEditIndex] + " (Jam)", "");
     const items = jamInstrumentRows(jamInstrumentEditIndex);
+    if (jamInstrumentFocus >= items.length) jamInstrumentFocus = items.length - 1;
     drawMenuList({
         ...LIST_ROW_FIT,
         labelX: 3,
@@ -9193,38 +9212,29 @@ function drawJamInstrumentMenu() {
 function handleJamInstrumentMenuInput(cc, value) {
     const idx = jamInstrumentEditIndex;
     const cfg = jamInstConfig[idx];
-    const key = "jam_inst" + (idx + 1) + "_";
     const rows = jamInstrumentRows(idx);
-    const rowKey = (rows[jamInstrumentFocus] || rows[0]).key;
+    const rowKey = (rows[Math.max(0, Math.min(rows.length - 1, jamInstrumentFocus))] || rows[0]).key;
+    /* Heard at once: only the changed setting goes to the engine. */
+    const send = (field) => {
+        const [param, val] = jamInstParam(idx, field);
+        if (typeof host_module_set_param === "function") host_module_set_param("jam_inst" + (idx + 1) + "_" + param, val);
+    };
     if (cc === MoveMainKnob) {
         const delta = decodeDelta(value);
         if (jamInstrumentEditing) {
-            if (rowKey === "octave") {
-                cfg.octave = Math.max(-1, Math.min(8, cfg.octave + delta));
-                if (typeof host_module_set_param === "function") host_module_set_param(key + "octave", String(cfg.octave));
-            } else if (rowKey === "follow") {
-                cfg.follow_note = stepFollowNote(cfg.follow_note, delta, cfg.voicing !== "chord");
-                if (typeof host_module_set_param === "function") host_module_set_param(key + "follow_note", String(cfg.follow_note));
-            } else if (rowKey === "voicing") {
-                cfg.voicing = (cfg.voicing === "chord") ? "bass" : "chord";
-                if (typeof host_module_set_param === "function") host_module_set_param(key + "voicing", cfg.voicing);
-            } else if (rowKey === "inversion") {
-                cfg.inversion = Math.max(0, Math.min(INVERSION_AUTO, cfg.inversion + delta));
-                if (typeof host_module_set_param === "function") host_module_set_param(key + "inversion", String(cfg.inversion));
-            } else if (rowKey === "gap") {
-                /* Note gap: 0 = none, then 1/16, 1/8, 1/4, 1/2, 1 beat. */
-                const steps = [0, 0.0625, 0.125, 0.25, 0.5, 1.0];
-                const i = steps.indexOf(cfg.note_gap);
-                const newIdx = Math.max(0, Math.min(steps.length - 1, (i < 0 ? 3 : i) + delta));
-                cfg.note_gap = steps[newIdx];
-                if (typeof host_module_set_param === "function") host_module_set_param(key + "note_gap", String(cfg.note_gap));
-            }
+            stepInstrumentField(cfg, rowKey, delta);
+            send(rowKey);
         } else {
             jamInstrumentFocus = Math.max(0, Math.min(rows.length - 1, jamInstrumentFocus + delta));
         }
         needsRedraw = true;
     } else if (cc === MoveMainButton && value > 0) {
-        jamInstrumentEditing = !jamInstrumentEditing;
+        if (rowKey === "vel_follow") {
+            cfg.vel_follow = !instVariety(cfg).vel_follow;
+            send("vel_follow");
+        } else {
+            jamInstrumentEditing = !jamInstrumentEditing;
+        }
         needsRedraw = true;
     } else if (cc === MoveBack && value > 0) {
         if (jamInstrumentEditing) {

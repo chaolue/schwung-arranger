@@ -314,6 +314,80 @@ int main(int argc, char **argv) {
     CHECK(g_on == 3 && d_off == 3, "G picked: at the next bar D is released and G struck");
     api->set_param(inst, "jam_inst3_enabled", "0");
     stop_and_ring_out(api, inst);
+
+    /* ---- Jam's Inst 1: an Arp at its Rate; then a bass approaching a queued chord ----
+     * Arp Up at 1/8, Follow Note Off, octave 3, on D: D3 F#3 A3 D3 ... a
+     * note every 120 ticks from the bar. */
+    base = state_u32(api, inst, "primary_published_gen");
+    api->set_param(inst, "song_json", json);
+    CHECK(wait_field_change(api, inst, "primary_published_gen", base, 3000), "Jam arp: groove published");
+    api->set_param(inst, "jam_inst1_output", "schwung");
+    api->set_param(inst, "jam_inst1_channel", "1");
+    api->set_param(inst, "jam_inst1_octave", "3");
+    api->set_param(inst, "jam_inst1_voicing", "arp");
+    api->set_param(inst, "jam_inst1_inversion", "0");
+    api->set_param(inst, "jam_inst1_follow_note", "0");
+    api->set_param(inst, "jam_inst1_pattern", "0");
+    api->set_param(inst, "jam_inst1_arp_rate", "2");
+    api->set_param(inst, "jam_inst1_note_gap", "0.125");
+    api->set_param(inst, "jam_inst1_enabled", "1");
+    api->set_param(inst, "jam_chord", "D:maj:0");
+    g_captured_count = 0;
+    api->set_param(inst, "play", "1");
+    int at_tick[64], an_note[64], n_arp = 0;
+    {
+        int prev = 0;
+        for (int b = 0; b < 1300 && n_arp < 64; b++) {
+            api->render_block(inst, audio, MOVE_FRAMES_PER_BLOCK);
+            char t[1024];
+            api->get_param(inst, "transport", t, sizeof(t));
+            unsigned bar = 1, beat = 1; double bp = 0;
+            sscanf(strstr(t, "\"bar\":"), "\"bar\":%u", &bar);
+            sscanf(strstr(t, "\"beat\":"), "\"beat\":%u", &beat);
+            sscanf(strstr(t, "\"beat_progress\":"), "\"beat_progress\":%lf", &bp);
+            int now = (int)((bar - 1) * 960 + (beat - 1) * 240 + bp * 240);
+            for (int i = prev; i < g_captured_count && n_arp < 64; i++)
+                if (g_captured[i].channel == 1 && g_captured[i].status == 0x90 && g_captured[i].vel > 0) {
+                    at_tick[n_arp] = now; an_note[n_arp++] = g_captured[i].note;
+                }
+            prev = g_captured_count;
+        }
+    }
+    int arp_ok = n_arp >= 12;
+    const int dseq[3] = { 50, 54, 57 };
+    for (int i = 0; i < n_arp && i < 12; i++) {
+        if (an_note[i] != dseq[i % 3]) arp_ok = 0;
+        if (i > 0 && (at_tick[i] - at_tick[i - 1] < 115 || at_tick[i] - at_tick[i - 1] > 125)) arp_ok = 0;
+    }
+    printf("info: jam arp:");
+    for (int i = 0; i < n_arp && i < 8; i++) printf(" %d@%d", an_note[i], at_tick[i]);
+    printf("\n");
+    CHECK(arp_ok, "Jam Arp Up at 1/8: D F# A every 120 ticks");
+    stop_and_ring_out(api, inst);
+
+    /* Bass with Approach below, Follow Note Off, octave 3: D live, G queued
+     * mid-bar -- F#3 (54) half a beat before the bar line, then G3 (55). */
+    api->set_param(inst, "jam_inst1_voicing", "bass");
+    api->set_param(inst, "jam_inst1_approach", "1");
+    api->set_param(inst, "jam_chord", "D:maj:0");
+    g_captured_count = 0;
+    api->set_param(inst, "play", "1");
+    for (int b = 0; b < 1000; b++) api->render_block(inst, audio, MOVE_FRAMES_PER_BLOCK);   /* into bar 2 */
+    api->set_param(inst, "jam_chord", "G:maj:0");
+    int first_app = -1, first_g = -1, idx = 0;
+    for (int b = 0; b < 800; b++) {
+        api->render_block(inst, audio, MOVE_FRAMES_PER_BLOCK);
+        for (; idx < g_captured_count; idx++) {
+            if (g_captured[idx].channel != 1 || g_captured[idx].status != 0x90 || g_captured[idx].vel == 0) continue;
+            if (g_captured[idx].note == 54 && first_app < 0) first_app = b;
+            if (g_captured[idx].note == 55 && first_g < 0) first_g = b;
+        }
+    }
+    printf("info: jam approach block %d, G block %d\n", first_app, first_g);
+    CHECK(first_app >= 0 && first_g > first_app && first_g - first_app >= 75 && first_g - first_app <= 90,
+          "Jam approach: F#3 half a beat (~86 blocks) before G3 at the bar line");
+    api->set_param(inst, "jam_inst1_enabled", "0");
+    stop_and_ring_out(api, inst);
     api->destroy_instance(inst);
     if (g_failures == 0) printf("\nALL TESTS PASSED\n");
     else printf("\n%d TEST(S) FAILED\n", g_failures);

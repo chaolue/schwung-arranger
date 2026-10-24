@@ -108,6 +108,10 @@
   chord as a full chord on Options > Pads, held from bar to bar until
   another is picked; Shift + Track 4 opens their settings (Octave,
   Inversion, Note Gap).
+- Jam's instrument settings (Shift + Track 2/3/4) have everything Song
+  Builder's do: Arp and its Pattern, Rate, Range and Vel Range; bass
+  patterns and Approach (into a chord queued on the pads); Strum; Velocity;
+  Vel Follow; Chance.
 
 ### Chords outside the key
 - The chord page's Root takes any root: a semitone at a time from the key

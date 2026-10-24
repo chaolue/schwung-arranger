@@ -735,25 +735,34 @@ With chord pads showing, an extra line at the bottom of the display shows the ke
 
 #### Jam Instrument Settings
 
-Hold Shift and press Track 2 or Track 3 to open that instrument's settings. Changes take effect immediately while playing and are not saved.
+Hold Shift and press Track 2, Track 3 or Track 4 to open the settings of Inst 1,
+Inst 2 or the Pads. They are the same settings as Song Builder's **Instrument
+Settings** (see there for what each does) — Octave, Follow Note, Voicing (Bass,
+Chord, **Arp**), Pattern, Rate, Range, Vel Range, Inversion, Approach, Strum,
+Strum Dir, Note Gap, Velocity, Vel Follow and Chance — showing only the ones the
+voicing uses; there's no Enabled (the Track button is that). The Pads get the
+chord settings only, as on Song Builder's Pads track. Changes are heard at once
+while playing and are not saved.
 
 | Control | Action |
 |---------|--------|
-| Jog wheel (browse mode) | Move between Octave, Follow Note, Voicing, Inversion, Note Gap |
+| Jog wheel (browse mode) | Move between the settings |
 | Jog wheel (edit mode) | Change the selected setting |
-| Jog click | Toggle edit / browse mode |
+| Jog click | Toggle edit / browse mode; on Vel Follow it toggles On/Off directly |
 | Back (edit mode) | Return to browse mode |
 | Back (browse mode) | Return to Jam Mode |
 
-| Setting | Effect |
-|---------|--------|
-| Octave | Octave the chord is played in |
-| Follow Note | The drum note that triggers each chord hit. A hit just before the barline plays the next bar's chord. **Off** plays the chord once at the start of every bar. With Bass voicing, turning up from Off jumps straight to 36 (the kick) |
-| Voicing | **Bass** plays the chord's root note; **Chord** plays the full chord |
-| Inversion | Which chord note is at the bottom (Chord voicing only). **Auto**, the default, voice-leads by the chord's place in the key, the same as Song Builder's Auto |
-| Note Gap | How early each note is cut before the next one |
+What differs in Jam, where the chord comes from the chord pads:
 
-Inst 1 starts on Follow Note = kick with Bass voicing; Inst 2 starts on Follow Note = Off with Chord voicing. Both use the output and MIDI channel set in **Options**.
+- **Follow Note Off** plays the chord at the start of every bar (the Pads hold
+  it instead); an **Arp** with Follow Note Off runs at its **Rate** from the bar.
+- **Approach** leads into a chord you've **queued** on the pads: half a beat
+  before the bar line where it takes over, the bass moves to the passing note.
+- **Vel Follow** takes each note's velocity from the Follow Note's drum hit.
+
+Inst 1 starts on Follow Note = kick with Bass voicing; Inst 2 on Follow Note =
+Off with Chord voicing; the Pads on a held chord an octave up. Each uses the
+output and MIDI channel set in **Options** for Inst 1, Inst 2 and Pads.
 
 ---
 
