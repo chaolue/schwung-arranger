@@ -3,6 +3,12 @@
 ## Unreleased
 
 ### Song Builder
+- **Chord and Inst pads**: on the Chord, Inst 1/2 and Pads tracks a pad
+  plays a bar of a chord or item and picks it; a step then adds it to that
+  bar (halfway when beat 1 is taken), or takes it out if it's already there.
+  The left pads are roots (the key's own first), the right ones chord types
+  -- or, on Inst and Pads, bass, chord and arp variations (Pads: inversion
+  x strum).
 - The footer names only what works on the selected row: **NAME** on a
   section row, **ADD** on "+ Add", and **MENU** where the click does nothing.
   A locked song shows no click, pad or move actions; its chords and items

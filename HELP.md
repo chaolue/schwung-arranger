@@ -165,7 +165,8 @@ The display lists the section, then its chords in order with where each starts
 | Delete | Delete the selected chord |
 | Copy | Duplicate the selected chord after the section's last chord |
 | Loop | Copy this section's chords to other sections: a list of the song's other sections opens with the same-named ones (Chorus, Chorus 2, ...) already ticked. Jog click ticks or unticks a section — any section, whatever its name — and the top row (**Copy to N sections**) copies, replacing theirs; a shorter section keeps what fits. Back copies nothing. Works the same on the Inst and Click tracks for their items |
-| Step buttons | Select that bar's first chord (the selected chord's bar is white) |
+| Pads | Play a bar of a chord and pick it (see **Chord and Inst pads** below) |
+| Step buttons | With a pad picked: add its chord to that bar, or take it out (see below). Otherwise select that bar's first chord (the selected chord's bar is white) |
 | Left / Right | Move to the previous / next section |
 | Mute / Shift + Mute | Merge / split sections (see Edit Song) |
 | Menu | Open Song Settings |
@@ -173,6 +174,35 @@ The display lists the section, then its chords in order with where each starts
 
 **Button LED hints:** Track 1 is lit azure blue. Copy and Delete are lit when a
 chord is selected; Loop when the song has another section.
+
+#### Chord and Inst pads
+
+On the Chord, Inst 1, Inst 2 and Pads tracks the pads try out and add chords
+and items, as the Drum track's add clips. A pad plays one bar of what it holds
+(while the song is stopped — while it plays, a pad only picks) and picks it,
+lit white. Then a step button adds it to that bar:
+
+- An empty bar (nothing on beat 1) gets it on beat 1.
+- A bar that already has something else on beat 1 gets it halfway through the
+  bar — beat 3 in 4/4, the "and" of beat 2 in 3/4 — replacing what's there.
+- Pressing the step of a bar that has it already takes it out.
+
+The pads are in two halves:
+
+| Half | Chord track | Inst 1 / Inst 2 | Pads |
+|------|-------------|-----------------|------|
+| Left (columns 1–4) | The chord's root, the key's own first — from the bottom row: **I ii iii IV**, **V vi vii° N.C.** (No Chord), **♭II ♭III ♯IV ♭VI**, **♭VII**. Each starts as its usual type (ii minor, vii° diminished) | The chord the preview plays over (by default the chord at the selected item's bar). The item itself plays the song's chords | As for Inst |
+| Right (columns 5–8) | The chord's type for the picked root: **Major, Minor, 7th, Maj7** / **Min7, Sus2, Sus4, 7Sus4** / **Dim, Aug, 6th, Min6** / **Add9, 9th, Maj9, Min9** | The item: two rows of Bass patterns (1, 1-5, 1-8, 1-5-8-5 / 1-5 Low, 1-3-5-3, 1-3-5-8, 1-3-5-6-b7), then **Chord, Chord Strum Up, Chord Strum Down, Arp Up** / **Arp Down, Up-Down, Alberti, 1-5-8-10** | The item: a column per inversion (**Auto, Root, 1st, 2nd**), a row per strum (**Off, Up, Down, Alt**) |
+
+The key's own roots are lit in the track colour and the others dimmer; on the
+Inst and Pads tracks the right half is coloured by voicing (lime bass, blue
+chord, violet arp). The name of what a pad holds shows for a moment.
+
+The preview plays only that track's instrument (on the Chord track, the
+instruments that are on — the Pads if none is), over the section's first drum
+bar with the drums and click silent, so a Follow Note bass still plays on the
+kick. An item added from a pad sets only what the pad names (Voicing and
+Pattern, or Inversion and Strum); everything else stays the track's.
 
 ---
 
@@ -250,6 +280,7 @@ Shift + jog, Delete, Copy, step buttons, Mute, Left/Right), plus:
 |---------|--------|
 | Jog click (on an item) | Open Item Settings for it |
 | Jog click (on + Add) | Add an item after the last one and open it |
+| Pads / Step buttons | Try out and add items — see **Chord and Inst pads** (Chord Track) |
 | Menu | Open Instrument Settings for this track |
 
 Items play against the chords, so while the song has no chords the Inst and

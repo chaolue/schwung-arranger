@@ -3604,7 +3604,7 @@ function instrumentForTrack(track) {
 const instLiveDirty = new Set();
 
 function markInstrumentLive(track) {
-    if (isInstTrack(track) && playbackState === "playing" && currentMode !== MODE_PERFORMANCE) instLiveDirty.add(track);
+    if (isInstTrack(track) && playbackState === "playing" && currentMode !== MODE_PERFORMANCE && !harmonyPreviewing) instLiveDirty.add(track);
 }
 
 export function instrumentLiveJson(song, idx, start) {
@@ -5518,7 +5518,7 @@ function updateDspState() {
      * Skip while a pad preview is active: the preview is a single-clip
      * audition and following it would reset the builder cursor to the first
      * clip, changing the highlighted clip the user is previewing. */
-    if (playbackState === "playing" && lastDspTransport && lastDspTransport.running && !padPreviewClip) {
+    if (playbackState === "playing" && lastDspTransport && lastDspTransport.running && !padPreviewClip && !harmonyPreviewing) {
         /* Use the fractional bar position (bar_frac, 0-based) so a clip that
          * ends mid-bar (Advanced Trim / speed) switches sections at the exact
          * musical boundary instead of the next integer bar. */
@@ -6287,8 +6287,9 @@ function builderPadColorForIndex(index) {
 
 function drawBuilderLEDs() {
     clearPadLEDs();
-    /* The 32 clip pads are Drum-track only; leave them unlit for Chord and
-     * Instrument tracks. */
+    /* The Chord, Inst and Pads tracks' pads: see drawHarmonyPads. The
+     * Click track's stay unlit. */
+    if (harmonyTrack(builderTrack)) { drawHarmonyPads(); return; }
     if (builderTrack !== TRACK_DRUM) return;
     logDebug("drawBuilderLEDs page=" + builderPage + " grooves=" + grooveClips.length + " fills=" + fillClips.length);
     for (let i = 0; i < NUM_PADS; i++) {
@@ -7500,7 +7501,8 @@ function drawChordStepLEDs(force) {
      * (secIndex); -1 if playback isn't currently inside it (e.g. mid-
      * transition to the next section), in which case nothing flashes here. */
     let currentBar = -1;
-    if (playbackState === "playing" && lastDspTransport && lastDspTransport.running) {
+    /* (A pad preview's bar is not the section's.) */
+    if (playbackState === "playing" && lastDspTransport && lastDspTransport.running && !harmonyPreviewing) {
         const dspBar = lastDspTransport.bar || 1;
         const dspBarFrac = (typeof lastDspTransport.bar_frac === "number") ? lastDspTransport.bar_frac : (dspBar - 1);
         /* builderPlayingFromTemp: currentSong is already sliced to start at
@@ -8113,6 +8115,8 @@ function handleStepPress(stepIndex, velocity) {
     const totalBars = sectionChordBars(sec);
     const barIndex = stepScrollOffset + stepIndex;
     if (barIndex < 0 || barIndex >= totalBars) return;
+    /* A pad selected: the step adds it to the bar, or takes it out. */
+    if (currentView === VIEW_BUILDER && harmonyStepPress(builderTrack, sec, barIndex)) return;
     if (builderTrack === TRACK_CHORD) {
         /* The list is the editor; a step selects that bar's first chord. */
         if (currentView !== VIEW_BUILDER) return;
@@ -11301,6 +11305,8 @@ function handleBuilderInput(cc, value) {
 /* Play in Song Builder: stop while playing; Shift + Play plays the song from
  * the start; Play plays from the clip at the cursor. */
 function builderPlayPress() {
+    /* A pad preview still starting gives way to the song. */
+    if (harmonyPreviewing && playbackState !== "playing") endHarmonyPreview();
     if (playbackState === "playing") {
         stopPlayback();
     } else if (shiftHeld) {
@@ -13756,8 +13762,10 @@ function handlePadPress(note, velocity) {
         return;
     }
     if (currentView === VIEW_BUILDER) {
-        /* The 32 clip pads only apply to the Drum track. */
+        /* Clips on the Drum track; roots, chords and items on the Chord,
+         * Inst and Pads tracks (see handleHarmonyPad). */
         if (builderTrack === TRACK_DRUM) handleBuilderPad(note, velocity);
+        else if (harmonyTrack(builderTrack)) handleHarmonyPad(note, velocity);
         return;
     }
     const padIndex = getPadIndex(note);
@@ -14372,6 +14380,310 @@ function handleBuilderPad(note, velocity) {
         padPreviewScheduled = false;
         previewStartTime = 0;
     }
+}
+
+/* ── Harmony pads: the Chord, Inst and Pads tracks ──────────────────── */
+
+/* The left half (columns 0-3) holds roots, the key's own first -- from the
+ * bottom row: I ii iii IV / V vi vii° N.C. / bII bIII #IV bVI / bVII (as
+ * semitones above the key, -1 = unused). The right half (columns 4-7)
+ * holds chord types on the Chord track and item variations on the Inst
+ * and Pads tracks. A pad plays a bar of what it holds and selects it; a
+ * step then adds it to that bar (harmonyStepPress). On the Inst and Pads
+ * tracks the root is only the chord the preview plays over: the item
+ * plays the song's chords. */
+const HARMONY_ROOTS = [0, 2, 4, 5, 7, 9, 11, CHORD_ROOT_NONE, 1, 3, 6, 8, 10, -1, -1, -1];
+const HARMONY_TYPES = ["maj", "min", "7", "maj7", "m7", "sus2", "sus4", "7sus4",
+    "dim", "aug", "6", "m6", "add9", "9", "maj9", "m9"];
+const HARMONY_STRUM_MS = 30;
+/* Inst 1/2: two rows of bass patterns, then chords and arps. */
+const HARMONY_INST_VARIATIONS = [
+    ...BASS_PATTERN_LABELS.map((name, i) => ({ name: "Bass " + name, fields: { voicing: "bass", pattern: i } })),
+    { name: "Chord", fields: { voicing: "chord", strum: 0 } },
+    { name: "Chord Strum Up", fields: { voicing: "chord", strum: HARMONY_STRUM_MS, strum_dir: 0 } },
+    { name: "Chord Strum Down", fields: { voicing: "chord", strum: HARMONY_STRUM_MS, strum_dir: 1 } },
+    ...[0, 1, 2, 6, 9].map(i => ({ name: "Arp " + ARP_PATTERN_LABELS[i], fields: { voicing: "arp", pattern: i } }))
+];
+/* Pads (always a chord): a row per strum, a column per inversion. */
+const HARMONY_PADS_VARIATIONS = [[0, "No Strum"], [1, "Strum Up"], [2, "Strum Down"], [3, "Strum Alt"]].flatMap(([s, sname]) =>
+    [INVERSION_AUTO, 0, 1, 2].map(inv => ({
+        name: inversionLabel(inv) + " " + sname,
+        fields: s === 0 ? { inversion: inv, strum: 0 }
+            : { inversion: inv, strum: HARMONY_STRUM_MS, strum_dir: s - 1 }
+    })));
+const HARMONY_VOICING_COLOUR = { bass: 9 /* Bright Lime */, chord: AzureBlue, arp: 20 /* Electric Violet */ };
+const HARMONY_TYPE_COLOUR = 26;  /* Light Magenta */
+
+/* What the pads have selected, for the song it was selected in: the Chord
+ * track's root and type, the Inst/Pads tracks' preview root, and each
+ * Inst/Pads track's variation (an index into its list). -1 = none. */
+let harmonySong = null;
+let harmonyChordRoot = -1;
+let harmonyChordQuality = "maj";
+let harmonyInstRoot = -1;
+const harmonyVariation = new Map();
+/* A pad preview (one bar of the temporary song) is playing or starting;
+ * harmonyPreviewConfirmed once the engine has started it. */
+let harmonyPreviewing = false;
+let harmonyPreviewConfirmed = false;
+let harmonyPreviewStart = 0;
+const HARMONY_PREVIEW_TIMEOUT_MS = 3000;
+
+function harmonyTrack(track) {
+    return track === TRACK_CHORD || isInstTrack(track);
+}
+
+function harmonyCheckSong() {
+    const song = viewSong();
+    if (harmonySong === song) return;
+    harmonySong = song;
+    harmonyChordRoot = -1;
+    harmonyChordQuality = "maj";
+    harmonyInstRoot = -1;
+    harmonyVariation.clear();
+}
+
+function harmonyVariations(track) {
+    return track === TRACK_PADS ? HARMONY_PADS_VARIATIONS : HARMONY_INST_VARIATIONS;
+}
+
+/* The selected variation of an Inst/Pads track, or null. */
+function harmonySelectedVariation(track) {
+    harmonyCheckSong();
+    const i = harmonyVariation.has(track) ? harmonyVariation.get(track) : -1;
+    return i >= 0 ? harmonyVariations(track)[i] : null;
+}
+
+/* The chord the Chord track's pads have selected, or null. */
+function harmonySelectedChord() {
+    harmonyCheckSong();
+    if (harmonyChordRoot < 0) return null;
+    if (harmonyChordRoot === CHORD_ROOT_NONE) return { none: true };
+    const key = currentSong ? (currentSong.key || DEFAULT_KEY) : DEFAULT_KEY;
+    return { root: chordRootName(key, harmonyChordRoot), quality: harmonyChordQuality };
+}
+
+/* The chord sounding at `bar` of `sec` (the last one at or before it), or
+ * null before the section's first. */
+function chordInEffect(sec, bar) {
+    for (let b = bar; b >= 0; b--) {
+        const list = barChords(sec, b).filter(c => !c.none);
+        if (list.length) return list[list.length - 1];
+    }
+    return null;
+}
+
+/* What an Inst/Pads preview plays over: the root pad's chord, else the
+ * chord at the selected item's bar, else the key's I. */
+function harmonyInstChord(sec) {
+    const key = currentSong ? (currentSong.key || DEFAULT_KEY) : DEFAULT_KEY;
+    if (harmonyInstRoot >= 0) {
+        return { root: chordRootName(key, harmonyInstRoot), quality: chordRootDefaultQuality(harmonyInstRoot) };
+    }
+    const bar = Math.max(0, listCursorBar(sec));
+    const c = sec ? chordInEffect(sec, bar) : null;
+    return c ? { root: c.root, quality: c.quality, bass: c.bass } : diatonicChord(key, 0);
+}
+
+function harmonyPadColour(track, p) {
+    const col = p % PAD_COLUMNS, slot = Math.floor(p / PAD_COLUMNS) * 4 + (col % 4);
+    const trackColour = TRACK_ROW_COLOUR[track];
+    if (col < 4) {
+        const r = HARMONY_ROOTS[slot];
+        if (r < 0 || (r === CHORD_ROOT_NONE && track !== TRACK_CHORD)) return Black;
+        if (r === (track === TRACK_CHORD ? harmonyChordRoot : harmonyInstRoot)) return White;
+        if (r === CHORD_ROOT_NONE) return DarkGrey;
+        return CHORD_ROOT_SCALE_DEGREE[r] >= 0 ? trackColour : veryDarkPartner(trackColour);
+    }
+    if (track === TRACK_CHORD) {
+        return harmonyChordRoot >= 0 && harmonyChordRoot !== CHORD_ROOT_NONE &&
+            harmonyChordQuality === HARMONY_TYPES[slot] ? White : HARMONY_TYPE_COLOUR;
+    }
+    if (harmonyVariation.get(track) === slot) return White;
+    if (track === TRACK_PADS) return trackColour;
+    return HARMONY_VOICING_COLOUR[HARMONY_INST_VARIATIONS[slot].fields.voicing];
+}
+
+function drawHarmonyPads() {
+    harmonyCheckSong();
+    for (let i = 0; i < NUM_PADS; i++) padColor(i, harmonyPadColour(builderTrack, i), true);
+}
+
+/* A pad on the Chord, Inst or Pads track: select what it holds and play a
+ * bar of it. While the song plays it only selects. */
+function handleHarmonyPad(note, velocity) {
+    const p = getPadIndex(note);
+    if (p < 0 || velocity === 0) return;
+    harmonyCheckSong();
+    const track = builderTrack;
+    const col = p % PAD_COLUMNS, slot = Math.floor(p / PAD_COLUMNS) * 4 + (col % 4);
+    const key = currentSong ? (currentSong.key || DEFAULT_KEY) : DEFAULT_KEY;
+    const sec = viewSong() ? viewSong().sections[chordDisplaySectionIndex()] : null;
+    let chord, variation = null, name;
+    if (col < 4) {
+        const r = HARMONY_ROOTS[slot];
+        if (r < 0 || (r === CHORD_ROOT_NONE && track !== TRACK_CHORD)) return;
+        if (track === TRACK_CHORD) {
+            harmonyChordRoot = r;
+            if (r !== CHORD_ROOT_NONE) harmonyChordQuality = chordRootDefaultQuality(r);
+            chord = harmonySelectedChord();
+        } else {
+            harmonyInstRoot = r;
+            chord = harmonyInstChord(sec);
+            variation = harmonySelectedVariation(track);
+        }
+        name = chord.none ? "No Chord" : chordLabel(chord, key);
+    } else if (track === TRACK_CHORD) {
+        if (harmonyChordRoot < 0 || harmonyChordRoot === CHORD_ROOT_NONE) harmonyChordRoot = 0;
+        harmonyChordQuality = HARMONY_TYPES[slot];
+        chord = harmonySelectedChord();
+        name = chordLabel(chord, key);
+    } else {
+        harmonyVariation.set(track, slot);
+        variation = harmonyVariations(track)[slot];
+        chord = harmonyInstChord(sec);
+        name = variation.name;
+    }
+    showPopup(track === TRACK_CHORD ? "Chord" : itemTrackName(track), name, 1000);
+    ledDirtyAll = true;
+    needsRedraw = true;
+    if (!chord.none) harmonyPreview(track, chord, variation ? variation.fields : null);
+}
+
+/* Play one bar of `chord` (and, on an Inst/Pads track, that track alone with
+ * `fields` as an item): a temporary one-section song over the section's
+ * first drum bar, the drums and click silenced (a Follow Note bass still
+ * hears the kick). It stops by itself at the bar's end. */
+function harmonyPreview(track, chord, fields) {
+    if (playbackState === "playing" && !harmonyPreviewing) return;
+    const song = viewSong();
+    if (!song) return;
+    const sec = song.sections[chordDisplaySectionIndex()];
+    const temp = JSON.parse(JSON.stringify(song));
+    const k = instIndex(track);
+    const insts = [0, 1, 2].map(i => Object.assign({}, (temp.instruments || [])[i] || defaultInstrument(i),
+        { bars: [], overrides: [] }));
+    if (k >= 0) insts.forEach((inst, i) => { inst.enabled = i === k; });
+    else if (!insts.some(inst => inst.enabled)) insts[2].enabled = true;
+    temp.instruments = insts;
+    const first = sec && Array.isArray(sec.clips) ? sec.clips.find(c => !c.placeholder) : null;
+    const startBar = first && typeof first.start_bar === "number" ? first.start_bar : 0;
+    const clip = first
+        ? Object.assign({}, first, { start_bar: startBar, end_bar: startBar + 1, start_beat: 0, end_beat: 0, speed: 1 })
+        : { placeholder: true, name: "", start_bar: 0, end_bar: 1 };
+    const inst = [[], [], []];
+    if (k >= 0 && fields) inst[k] = [Object.assign({ bar: 0 }, fields)];
+    const c = Object.assign({}, chord);
+    delete c.beat;
+    delete c.adv;
+    temp.sections = [{ name: "Preview", clips: [clip], chords: [c], inst }];
+    temp.count_in = false;
+    const saved = currentSong;
+    const savedLoop = dspLoopEnabled;
+    currentSong = temp;
+    dspLoopEnabled = false;
+    harmonyPreviewing = true;
+    harmonyPreviewConfirmed = false;
+    harmonyPreviewStart = Date.now();
+    playCurrentSong(false, function () {
+        dspLoopEnabled = savedLoop;
+        harmonyPreviewConfirmed = true;
+    });
+    currentSong = saved;
+    harmonySetSwitches(false);
+}
+
+/* The drums and click off for a preview, or back as they were. Blocking
+ * writes, as playCurrentSong's: the engine's one parameter slot would let
+ * a quick second write clobber the first (or the song) before it lands. */
+function harmonySetSwitches(on) {
+    const block = typeof host_module_set_param_blocking === "function";
+    if (!block && typeof host_module_set_param !== "function") return;
+    const set = block ? host_module_set_param_blocking : host_module_set_param;
+    const t = block ? 100 : undefined;
+    if (on) pushLiveMutesToDsp(set, t);
+    else set("drum_enabled", "0", t);
+    set("click_enabled", on && clickOn ? "1" : "0", t);
+}
+
+/* Called every tick: once the preview has played (or was stopped) -- or
+ * never started -- give the drums and the click back. */
+function tickHarmonyPreview() {
+    if (!harmonyPreviewing || playbackState === "playing") return;
+    if (harmonyPreviewConfirmed || Date.now() - harmonyPreviewStart > HARMONY_PREVIEW_TIMEOUT_MS) endHarmonyPreview();
+}
+
+function endHarmonyPreview() {
+    harmonyPreviewing = false;
+    harmonyPreviewConfirmed = false;
+    harmonySetSwitches(true);
+    stepLedsDirty = true;
+}
+
+/* Halfway through a bar: beat 3 of 4, the "and" of 2 in 3/4 (Advanced). */
+function harmonyHalfBeat() {
+    return beatsPerBar() / 2 + 1;
+}
+
+/* A step on the Chord, Inst or Pads track with a pad selected: add the
+ * selection to that bar -- on beat 1, or halfway if beat 1 has something
+ * else (replacing what is there) -- or, if the bar already has it, take it
+ * out. False with nothing selected (the step then selects, as before). */
+function harmonyStepPress(track, sec, bar) {
+    if (!harmonyTrack(track)) return false;
+    const chord = track === TRACK_CHORD ? harmonySelectedChord() : null;
+    const variation = track === TRACK_CHORD ? null : harmonySelectedVariation(track);
+    if (!chord && !variation) return false;
+    if (songIsLocked()) { lockedNotice(); return true; }
+    const half = harmonyHalfBeat();
+    if (track === TRACK_CHORD) {
+        const same = (c) => c.none ? !!chord.none : (!chord.none && !c.bass &&
+            noteSemitone(c.root) === noteSemitone(chord.root) && c.quality === chord.quality);
+        const list = barChords(sec, bar);
+        const i = list.findIndex(same);
+        if (i >= 0) {
+            removeChordEvent(sec, bar, i);
+            chordListCursor = Math.min(chordListCursor, sectionChordEvents(sec).length);
+            syncChordCursorBar(sec);
+        } else {
+            const beat = chordPosFree(sec, bar, 1, -1, -1) ? 1 : half;
+            const at = barChords(sec, bar).findIndex(c => chordBeat(c) === beat);
+            if (at >= 0) removeChordEvent(sec, bar, at);
+            const add = Object.assign({}, chord);
+            if (beat !== 1) add.beat = beat;
+            if (!Number.isInteger(beat)) add.adv = true;
+            insertChordEvent(sec, bar, add);
+            selectChordListAt(sec, bar, beat);
+        }
+    } else {
+        if (!itemAddAvailable()) {
+            showPopup(itemTrackName(track), "Add a chord to the Chord track first", 2000);
+            return true;
+        }
+        const list = sortItems(sectionItems(sec, track));
+        const f = variation.fields;
+        const i = list.findIndex(it => it.bar === bar && Object.keys(f).every(k => it[k] === f[k]));
+        let it = null;
+        if (i >= 0) {
+            list.splice(i, 1);
+        } else {
+            const beat = itemPosFree(list, bar, 1, null) ? 1 : half;
+            const at = list.findIndex(x => x.bar === bar && chordBeat(x) === beat);
+            if (at >= 0) list.splice(at, 1);
+            it = Object.assign({ bar }, f);
+            if (beat !== 1) it.beat = beat;
+            if (!Number.isInteger(beat)) it.adv = true;
+            list.push(it);
+        }
+        sortItems(list);
+        itemListCursor = it ? list.indexOf(it) : Math.min(itemListCursor, list.length);
+        syncItemCursorBar(list);
+        unsavedChanges = true;
+        markInstrumentLive(track);
+    }
+    stepLedsDirty = true;
+    needsRedraw = true;
+    return true;
 }
 
 function changeBuilderPage(delta) {
@@ -16283,9 +16595,12 @@ function builderFooterHints() {
     }
     const setOrOut = clk ? ["MENU", "SET"] : ["BACK", "OUT"];
     if (builderTrack === TRACK_CLICK) return [first, ["T4", "PADS"], setOrOut];
-    if (builderTrack === TRACK_PADS) return [first, ["T4", "CLICK"], setOrOut];
-    if (builderTrack === TRACK_CHORD) return [first, ["T1", "DRUM"], setOrOut];
-    return [first, ["T1", "DRUM"], setOrOut];
+    /* The Chord, Inst and Pads tracks lead with the pads, as the Drum track
+     * does: a pad plays and picks; with one picked, a step adds it. */
+    const picked = builderTrack === TRACK_CHORD ? harmonySelectedChord() : harmonySelectedVariation(builderTrack);
+    const pad = picked && !locked ? ["STEP", "ADD"] : ["PAD", "PICK"];
+    if (builderTrack === TRACK_PADS) return [pad, ["T4", "CLICK"], first];
+    return [pad, ["T1", "DRUM"], first];
 }
 
 function drawFooterHints() {
@@ -16301,6 +16616,7 @@ function drawPopup() {
 globalThis.tick = function() {
     pollBattery();
     tickKeys();
+    tickHarmonyPreview();
     flushInstrumentLive();
     tickPopup();
     {

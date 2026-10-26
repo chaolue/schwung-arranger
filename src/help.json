@@ -130,6 +130,31 @@
           ]
         },
         {
+          "title": "Chord & Inst Pads",
+          "lines": [
+            "Chord, Inst, Pads:",
+            "Left pads: roots,",
+            "the key's first",
+            "(I ii iii IV / V vi",
+            "vii N.C. / bII...).",
+            "Right pads: chord",
+            "types, or the Inst",
+            "or Pads variations.",
+            "",
+            "Pad: plays a bar of",
+            "it and picks it.",
+            "Step: adds it to",
+            "the bar (halfway if",
+            "beat 1 is taken);",
+            "again: removes it.",
+            "",
+            "On Inst/Pads the",
+            "root is only what",
+            "the preview plays",
+            "over."
+          ]
+        },
+        {
           "title": "Click Track",
           "lines": [
             "Track 4 twice shows",
