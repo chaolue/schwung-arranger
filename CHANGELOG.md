@@ -66,6 +66,10 @@
 - Setlist Edit: Left/Right no longer move songs (Shift + jog does).
 
 ### Perform
+- The display has a **Perform** header with the song's key (the setlist's,
+  if it sets one) beside the battery. The song moves to the line below,
+  without "Now:", and Sec and NSc are one line: the section playing > the
+  next one.
 - A knob on a module's own presets (its preset browser's parameter -- an
   SF2's programs, say) shows the preset's name in the popup and the Knobs
   list, not its number. Preset comes first in the knob's parameter list

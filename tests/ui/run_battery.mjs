@@ -1,7 +1,8 @@
 /* The battery: Schwung's host_battery() level drawn at the right of the
  * header on the root and Perform screens, a lightning bolt beside it while on
- * the charger, and a popup once when it falls to 10%. Pixels are read back from the fill_rect calls (the header and Perform
- * text are drawn through it too). */
+ * the charger, and a popup once when it falls to 10%. Pixels are read back
+ * from the fill_rect calls (the header and Perform text are drawn through it
+ * too). */
 import * as H from './host_mock.mjs';
 
 const SONGS = "/data/UserData/UserLibrary/Arranger/Songs";
@@ -168,22 +169,22 @@ tick(100);
 f = blinkFrames(80);
 check(f.on === 80, "at 11% it is steady again " + JSON.stringify(f));
 
-/* ---- Perform: the badge on the top line ---- */
+/* ---- Perform: the badge in its header, the key beside it ---- */
 battery = { level: 60, source: "xmos", flags: 0 };
 tick(100);
 jog(-8); jog(2); click();     /* Perform */
 click();                      /* Gig */
 tick(20);
-check(iconMatches(60, 1), "Perform draws the battery on its top line");
-/* The song name is cut short of the icon, not drawn through it, and gets
- * all the room the icon leaves. */
-check(litIn(113, 115, 1, 5) === 0, "the song name stops short of the battery");
-check(litIn(100, 112, 1, 5) > 0, "the song name runs up to the icon");
-/* Charging: the bolt takes its place, and the name stops short of it. */
+check(iconMatches(60, 1), "Perform draws the battery in its header");
+/* The key (Key C) ends a gap short of the icon. */
+check(litIn(112, 115, 1, 5) === 0 && litIn(95, 111, 1, 5) > 0, "the key stops short of the battery");
+/* The song name, on the line below, has the full width. */
+check(litIn(100, 125, 12, 16) > 0, "the long song name runs on under the battery");
+/* Charging: the bolt takes its place, and the key moves left of it. */
 battery = { level: 60, source: "xmos", flags: 0x21 };
 tick(100);
 check(boltShown(1) && iconMatches(60, 1), "Perform: the bolt beside the icon");
-check(litIn(110, 111, 1, 5) === 0 && litIn(100, 109, 1, 5) > 0, "...and the song name stops short of the bolt");
+check(litIn(108, 111, 1, 5) === 0 && litIn(90, 107, 1, 5) > 0, "...and the key stops short of the bolt");
 
 console.log(`battery: ${passes} passed, ${failures} failed`);
 if (failures) process.exit(1);

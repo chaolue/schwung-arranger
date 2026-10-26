@@ -34,7 +34,7 @@ Screen reached when first loading the module.
 | Back (tap twice) | Exit the module (return to Schwung menu). The first tap shows a popup asking for a second tap within 3 seconds |
 
 **Battery.** A battery icon, filled to the charge, shows at the right of the
-header here, in Perform (on the top line) and in Jam, since Move's own
+header here, in Perform and in Jam, since Move's own
 battery display is hidden while the Arranger is up. At 10% or below the icon
 blinks, and a "Low battery" popup appears once; it warns again only after the
 battery has been back above 12%. Neither happens while it is charging. On the
@@ -512,6 +512,16 @@ is skipped.
 ## Perform
 
 Play through a setlist.
+
+The display shows, under a **Perform** header that carries the song's key
+(the setlist's key for it, if set) and the battery:
+
+| Line | Shows |
+|------|-------|
+| 1 | The current song |
+| Sec | The section playing (or selected) > the one after it — "Next song" at the end of a song |
+| Next | The next song in the setlist |
+| Time | The song's position and length, and the whole set's length |
 
 ### While stopped
 

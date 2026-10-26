@@ -2647,7 +2647,7 @@ const jamHeaderScroller = createUniformScroller();
 /* Dedicated marquee scrollers for the four performance info lines (Now / Sec /
  * NSec / Next). Kept separate from the shared menu/header scrollers so long
  * song and section names scroll in place without fighting other scrollers. */
-const perfLineScrollers = [0, 1, 2, 3].map(() => createUniformScroller());
+const perfLineScrollers = [0, 1, 2].map(() => createUniformScroller());
 
 const PAD_PREVIEW_DELAY_MS = 250; /* delay before pad tap triggers insert preview */
 
@@ -10478,6 +10478,44 @@ function perfPrint(x, y, text, color) {
     fontPrint4x5(perfCtx, x, y, asciiFold(String(text)).toUpperCase(), color);
 }
 
+/* A key in the same face, which has capitals only: its flat is drawn as a
+ * small b (a 3x5 b), so Bb does not read as BB. The text between flats is
+ * drawn as runs, so the face's own spacing holds. */
+function perfKeyRuns(text) {
+    /* A "b" after the first character is a flat. */
+    const t = String(text), runs = [];
+    let cur = "";
+    for (let i = 0; i < t.length; i++) {
+        if (t[i] === "b" && i > 0) { if (cur) runs.push(cur); runs.push(null); cur = ""; }
+        else cur += t[i];
+    }
+    if (cur) runs.push(cur);
+    return runs;
+}
+const PERF_FLAT_W = 3;
+/* Pixel width, as perfTextWidth: the last glyph's trailing gap left out. */
+function perfKeyWidth(text) {
+    const runs = perfKeyRuns(text);
+    let w = 0;
+    runs.forEach((r, i) => { w += (r === null ? PERF_FLAT_W : perfTextWidth(r)) + (i < runs.length - 1 ? 1 : 0); });
+    return w;
+}
+function perfPrintKey(x, y, text) {
+    for (const r of perfKeyRuns(text)) {
+        if (r === null) {
+            /* #.. / #.. / ### / #.# / ### */
+            fill_rect(x, y, 1, 5, 1);
+            fill_rect(x + 1, y + 2, 2, 1, 1);
+            fill_rect(x + 1, y + 4, 2, 1, 1);
+            fill_rect(x + 2, y + 3, 1, 1, 1);
+            x += PERF_FLAT_W + 1;
+        } else {
+            perfPrint(x, y, r, 1);
+            x += perfTextWidth(r) + 1;
+        }
+    }
+}
+
 /* Pixel width of `text` as perfPrint draws it. */
 function perfTextWidth(text) {
     return fontWidth4x5(asciiFold(String(text)).toUpperCase());
@@ -10561,12 +10599,12 @@ function drawPerformance() {
             if (stoppedSelection + 1 < fullSong.sections.length) {
                 nextSecName = fullSong.sections[stoppedSelection + 1]?.name || "";
             } else if (currentSetlist && currentSetlist.songs[perfSongIndex + 1]) {
-                nextSecName = "→ next song";
+                nextSecName = "Next song";
             }
         } else if (playbackSectionIndex + 1 < fullSong.sections.length) {
             nextSecName = fullSong.sections[playbackSectionIndex + 1]?.name || "";
         } else if (currentSetlist && currentSetlist.songs[perfSongIndex + 1]) {
-            nextSecName = "→ next song";
+            nextSecName = "Next song";
         }
     }
     /* Log only on change, not every tick (drawPerformance runs every tick
@@ -10588,33 +10626,44 @@ function drawPerformance() {
             " perfSelected=" + perfSelectedSection + " playbackSection=" + playbackSectionIndex);
     }
 
-    /* Scroll each info line independently so long song/section names marquee
-     * instead of being hard-truncated. */
-    const perfLines = [songName, secName, nextSecName || "—", nextSongName || "—"];
-    const perfPrefixes = ["Now:  ", " Sec:  ", " NSc:  ", "Next: "];
-    /* 11px line pitch from row 1: five 5-row lines end on row 49, leaving a
-     * clear gap above the button-hint footer (rows 57-63). At a 12px pitch
-     * the time line ended on row 54 and sat against the footer. */
-    const perfYs = [1, 12, 23, 34];
-    for (let i = 0; i < 4; i++) {
+    /* The header: Perform, and at its right the key the song plays in (a
+     * setlist's own key for it, if set) and the battery. */
+    const entry = currentSetlist && perfSongIndex >= 0 ? currentSetlist.songs[perfSongIndex] : null;
+    const playKey = entry && KEYS.indexOf(entry.key) >= 0 ? entry.key : ((displaySong && displaySong.key) || DEFAULT_KEY);
+    drawMenuHeader("Perform", headerRightWithBattery(""));
+    drawHeaderBattery();
+    const keyText = "Key " + keyLabel(playKey);
+    const keyRight = SCREEN_WIDTH - 3 - (batteryLevel !== null ? batteryBadgeWidth() + 4 : 0);
+    perfPrintKey(keyRight - perfKeyWidth(keyText) + 1, 1, keyText);
+
+    /* Below it the song; the section playing > the next one; the next song.
+     * Each line scrolls on its own so long names marquee instead of being
+     * hard-truncated, and the values line up after their labels. */
+    const secLine = secName && nextSecName ? secName + " > " + nextSecName : (secName || nextSecName || "—");
+    const perfLines = [songName, secLine, nextSongName || "—"];
+    const perfPrefixes = ["", "Sec:", "Next:"];
+    const valueX = 2 + Math.max(perfTextWidth("Sec:"), perfTextWidth("Next:")) + 4;
+    /* 11px line pitch: the header's text on row 1, then rows 12-45, leaving
+     * a clear gap above the button-hint footer (rows 57-63). */
+    const perfYs = [12, 23, 34];
+    for (let i = 0; i < 3; i++) {
         const scroller = perfLineScrollers[i];
         scroller.setSelected(perfLines[i]);
         scroller.tick();
-        /* Fit by pixels, not characters: the space left after the prefix,
+        /* Fit by pixels, not characters: the space left after the label,
          * and when the name is wider than that, a scrolled window trimmed to
          * fit -- the face is proportional, so a fixed character count let
          * wide names run off the right edge, scrolled or not. */
-        /* The top line shares its row with the battery. */
-        const batteryRoom = i === 0 && batteryLevel !== null ? batteryBadgeWidth() + 4 : 0;
-        const avail = SCREEN_WIDTH - 2 - perfTextWidth(perfPrefixes[i]) - 1 - batteryRoom;
+        const x = perfPrefixes[i] ? valueX : 2;
+        const avail = SCREEN_WIDTH - 1 - x;
         let text = perfLines[i];
         if (perfTextWidth(text) > avail) {
             const n = Math.max(1, perfCharsThatFit(text, avail));
             text = perfFitText(scroller.getScrolledText(text, n), avail);
         }
-        perfPrint(2, perfYs[i], perfPrefixes[i] + text, 1);
+        if (perfPrefixes[i]) perfPrint(2, perfYs[i], perfPrefixes[i], 1);
+        perfPrint(x, perfYs[i], text, 1);
     }
-    drawBatteryBadge(SCREEN_WIDTH - 3, perfYs[0]);
     /* Song time as it progresses, plus the total song and set durations. The
      * current position comes from the DSP transport's 0-based fractional bar
      * (bar_frac) mapped against the full song; during the count-in click the
