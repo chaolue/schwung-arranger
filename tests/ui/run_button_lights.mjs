@@ -84,6 +84,23 @@ press(C.MoveMenu);
 backLit("Inst 1 settings");
 check(footerDrawn(), "Inst 1 settings: a footer");
 press(C.MoveBack);
+
+/* The Chord Picker: a footer, the chord line moved up into the list's last
+ * row (four list rows above it), printed so Cm7 keeps its lower-case m. */
+press(C.MoveRow1); press(C.MoveRow1);     /* Drum, then Chord */
+jog(-5); jog(1);
+const prints = [];
+const hostPrint = g.print;
+g.print = (x, y, t, c) => { prints.push({ y, t: String(t) }); return hostPrint(x, y, t, c); };
+click();
+backLit("the Chord Picker");
+check(footerHas("SEL") && footerHas("EDIT") && footerHas("OUT"), "the Chord Picker: JOG SEL, CLK EDIT, BACK OUT");
+const line = prints.filter(p => p.t.startsWith("= ")).pop();
+check(line && line.t === "= C b1" && line.y === 46, "the chord line in the list's last row: " + JSON.stringify(line));
+const rows = prints.filter(p => p.y > 8 && !p.t.startsWith("= "));
+check(rows.length && rows.every(p => p.y + 8 <= 46), "list rows stop above it: " + JSON.stringify(rows.map(p => p.y)));
+g.print = hostPrint;
+press(C.MoveBack);
 press(C.MoveBack);
 
 /* A confirm box (deleting a song): its footer, every pair of it. */

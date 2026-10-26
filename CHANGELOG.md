@@ -129,6 +129,8 @@
   settings, and Options > Drums, Inst, Keys and Click were dark.
 - A confirm box (delete, overwrite...) has a footer: **JOG SEL**,
   **CLK PICK**, **BACK OUT**.
+- Chord Settings has a footer: the chord line (`= Cm7 b1`) moved up to
+  the list's last row to make room, so four fields show at a time.
 - Jam's instrument settings (Shift + Track 2/3/4) have everything Song
   Builder's do: Arp and its Pattern, Rate, Range and Vel Range; bass
   patterns and Approach (into a chord queued on the pads); Strum; Velocity;

@@ -206,6 +206,9 @@ stop it while playing; the page stays open.
 A bar can hold several chords, each on its own beat. A chord you open but don't
 change is kept exactly as it was, even one whose root is outside the key.
 
+The line under the fields shows the chord as it stands and where it starts
+(e.g. `= Cm7 b1`); the footer is below it.
+
 **Button LED hints:** Back and Main are lit.
 
 ---

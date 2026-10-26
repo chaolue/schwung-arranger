@@ -8303,6 +8303,12 @@ function chordPickItems() {
     ];
 }
 
+/* The chord being made ("= Cm7 1.1") sits in the list's last row, so the
+ * list shows four rows and the footer keeps its band. It is printed (not
+ * drawn in the header's face) because that face has capitals only: Cm7 would
+ * read as CM7. */
+const CHORD_PICK_LINE_Y = LIST_TOP_Y + 4 * 9;
+
 function drawChordPick() {
     const key = currentSong ? (currentSong.key || DEFAULT_KEY) : DEFAULT_KEY;
     drawMenuHeader("Chord", keyLabel(key));
@@ -8319,9 +8325,9 @@ function drawChordPick() {
         editMode: chordPickEditing,
         labelGap: 2,
         prioritizeSelectedValue: true,
-        listArea: { topY: LIST_TOP_Y, bottomY: LIST_INDICATOR_BOTTOM_Y }
+        listArea: { topY: LIST_TOP_Y, bottomY: CHORD_PICK_LINE_Y - 1 }
     });
-    print(2, LIST_INDICATOR_BOTTOM_Y + 2, "= " + chordLabel(pickResult(), key) + " " + chordPosLabel(chordPickBar, chordPickBeat), 1);
+    print(2, CHORD_PICK_LINE_Y, "= " + chordLabel(pickResult(), key) + " " + chordPosLabel(chordPickBar, chordPickBeat), 1);
 }
 
 function handleChordPickInput(cc, value) {
@@ -16192,6 +16198,7 @@ export function footerHints() {
         case VIEW_TRIM: return editMenuHints(trimEditing);
         case VIEW_INSTRUMENT: return editMenuHints(instrumentEditing);
         case VIEW_INSTRUMENT_BAR: return editMenuHints(itemEditing);
+        case VIEW_CHORD_PICK: return editMenuHints(chordPickEditing);
         case VIEW_SETLIST_CLICK:
             /* Sections and Knobs open a screen rather than edit in place. */
             if (!clickSettingsEditing && SETLIST_SONG_ROWS[clickSettingsFocus] &&
@@ -16222,7 +16229,6 @@ export function footerHints() {
             if (shiftHeld) return [["JOG", "KEY"], ["TRK", "INST"]];
             return [["PAD", jamPlaying ? "CUE" : "PLAY"], ["TRK", "MUTE"], ["BACK", "OUT"]];
         default:
-            /* The Chord Picker uses the footer rows for its chord line. */
             return null;
     }
 }
