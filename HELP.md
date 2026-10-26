@@ -786,7 +786,7 @@ mutes, the steps, the knobs — and so do Keys under a Schwung chain editor.
 
 | Control (Keys on) | Action |
 |-------------------|--------|
-| Pads | Play notes, at the pad's velocity. The key's root lights blue, the other scale notes white, notes outside the scale (Chromatic layouts) stay dark; a held pad lights green |
+| Pads | Play notes, at the pad's velocity. The key's root lights blue, the other scale notes white, notes outside the scale (Chromatic layouts) stay dark; a held note lights green on every pad that plays it (the 4ths and 3rds layouts repeat notes a row up) |
 | Up / Down | Octave up / down (−1 to 8) |
 | Capture | Back to the normal pads |
 

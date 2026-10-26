@@ -16007,11 +16007,22 @@ function tickKeys() {
     }
 }
 
+/* Is `note` held on any pad? The 4ths and 3rds layouts repeat a note a row
+ * up and a few pads left, so one held key lights all its pads. */
+function keysNoteHeld(note) {
+    if (note < 0) return false;
+    for (const q of keysPressed) {
+        if (keysPadNote(keysLayout, keysScale, keysSentRoot, keysOctave, q) === note) return true;
+    }
+    return false;
+}
+
 /* The pads as a keyboard: the key's root in blue, other scale notes white,
- * notes outside the scale (Chromatic layouts) dark; a pad held green. */
+ * notes outside the scale (Chromatic layouts) dark; a held note green, on
+ * every pad that plays it. */
 function keysPadColour(p) {
-    if (keysPressed.has(p)) return PureGreen;
     const note = keysPadNote(keysLayout, keysScale, keysSentRoot, keysOctave, p);
+    if (keysPressed.has(p) || keysNoteHeld(note)) return PureGreen;
     if (note < 0) return Black;
     const rel = ((note - keysSentRoot) % 12 + 12) % 12;
     if (rel === 0) return KEYS_ROOT_COLOUR;
@@ -16023,12 +16034,18 @@ function drawKeysLEDs() {
     flushPadGridImmediate();
 }
 
-/* A pad pressed or released while Keys are on: its light only -- the
- * engine has already played it. */
+/* A pad pressed or released while Keys are on: its light, and those of the
+ * other pads playing the same note, only -- the engine has already played
+ * it. */
 function keysPadPress(padIndex, velocity) {
     if (padIndex < 0) return;
     if (velocity > 0) keysPressed.add(padIndex); else keysPressed.delete(padIndex);
-    padColor(padIndex, keysPadColour(padIndex), true);
+    const note = keysPadNote(keysLayout, keysScale, keysSentRoot, keysOctave, padIndex);
+    for (let p = 0; p < NUM_PADS; p++) {
+        if (p === padIndex || (note >= 0 && keysPadNote(keysLayout, keysScale, keysSentRoot, keysOctave, p) === note)) {
+            padColor(p, keysPadColour(p), true);
+        }
+    }
 }
 
 /* Arranger's own popups (record, click, mutes, exit confirm, backups,

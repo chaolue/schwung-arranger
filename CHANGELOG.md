@@ -88,6 +88,8 @@
 - Record records the Schwung mix to a WAV, as in Perform.
 
 ### Pads and Keys
+- Keys: a held note lights green on every pad that plays it, not just the
+  one pressed (the 4ths and 3rds layouts repeat a note a row up).
 - **Pads**: a third instrument that plays the chords as a full chord on the
   chord grid -- piano pads under the song. Track 1 now steps Drum -> Chord
   -> Pads; Shift + Track 1 on the Pads track turns it on or off.

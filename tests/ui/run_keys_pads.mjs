@@ -7,7 +7,8 @@
  *
  * Keys: Capture in Perform or Jam turns the pads into a keyboard -- the
  * engine gets the route, layout, key and octave and plays the pads itself;
- * here, the pads light as keys, a held pad lights green, Up/Down change
+ * here, the pads light as keys, a held note lights green on every pad that
+ * plays it, Up/Down change
  * octave, and Keys end with Capture again or on leaving the screen. */
 import * as H from './host_mock.mjs';
 
@@ -118,6 +119,20 @@ g.onMidiMessageInternal([0x90, C.MovePads[1], 100]); tick();
 check(H.padLeds.get(C.MovePads[1]) === 126, "a held key lights green");
 g.onMidiMessageInternal([0x80, C.MovePads[1], 0]); tick();
 check(H.padLeds.get(C.MovePads[1]) === C.White, "released, it goes back");
+/* In Key 4ths: a row up is three scale steps on, so G is both pad 3 and
+ * pad 8 (the row above's first pad). Holding either lights both. */
+check(M.keysPadNote(0, 0, 2, 3, 3) === M.keysPadNote(0, 0, 2, 3, 8), "pads 3 and 8 play the same note");
+g.onMidiMessageInternal([0x90, C.MovePads[3], 100]); tick();
+check(H.padLeds.get(C.MovePads[3]) === 126 && H.padLeds.get(C.MovePads[8]) === 126,
+      "a held key lights every pad with its note: " + H.padLeds.get(C.MovePads[3]) + "/" + H.padLeds.get(C.MovePads[8]));
+check(H.padLeds.get(C.MovePads[1]) === C.White, "...and no other");
+g.onMidiMessageInternal([0x90, C.MovePads[8], 100]); tick();
+g.onMidiMessageInternal([0x80, C.MovePads[3], 0]); tick();
+check(H.padLeds.get(C.MovePads[3]) === 126 && H.padLeds.get(C.MovePads[8]) === 126,
+      "with the note still held on pad 8, both stay green");
+g.onMidiMessageInternal([0x80, C.MovePads[8], 0]); tick();
+check(H.padLeds.get(C.MovePads[3]) === C.White && H.padLeds.get(C.MovePads[8]) === C.White,
+      "all released: both go back (" + H.padLeds.get(C.MovePads[3]) + "/" + H.padLeds.get(C.MovePads[8]) + ")");
 press(C.MoveUp);
 check(lastSet("keys_octave") === "4", "Up: octave 4");
 press(C.MoveDown); press(C.MoveDown);
