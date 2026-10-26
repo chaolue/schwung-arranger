@@ -564,7 +564,7 @@ The Track buttons are live mutes, not saved to the song. Each song starts with i
 
 **Recording:** Record starts recording Schwung's audio output (the same "Resample" source Schwung's own sampler uses) to `UserLibrary/Recordings/Arranger/<setlist>_<date-time>.wav`; press it again to stop and save. It runs independently of Play/Stop, so a whole set can go into one file, and stops when you leave Perform. Record is red while recording and white otherwise.
 
-**Button LED hints:** Back, Up, Down and Play are lit; Play is white when stopped and green while playing. Track 1, 2 and 3 are lit in their track colour while that part is on, and off while it is muted.
+**Button LED hints:** Back, Up, Down and Play are lit; Play is white when stopped and green while playing. Track 1, 2, 3 and 4 (the Pads) are lit in their track colour while that part is on, and off while it is muted; with Shift held, Track 4 shows the click instead.
 
 ---
 
@@ -728,7 +728,7 @@ Step LEDs show the current clip's bar layout, flashing white-to-black on the cur
 
 **Recording:** as in Perform, Record records Schwung's audio output to `UserLibrary/Recordings/Arranger/Jam_<folder>_<date-time>.wav` until you press it again or leave Jam, independently of Play/Stop. Record is red while recording and white otherwise.
 
-**Button LED hints:** Back, Up, Down, Left and Right are lit; Play is green while playing (it stops playback) and off while stopped — a pad starts playback. Track 1, 2 and 3 are lit in their track colour while that part is on.
+**Button LED hints:** Back, Up, Down, Left and Right are lit; Play is green while playing (it stops playback) and off while stopped — a pad starts playback. Track 1, 2, 3 and 4 (the Pads) are lit in their track colour while that part is on.
 
 #### Jam Chord Pads
 

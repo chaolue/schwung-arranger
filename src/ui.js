@@ -5961,8 +5961,18 @@ function updateButtonLEDs() {
                 }
                 break;
             case VIEW_OPTIONS:
+            case VIEW_OPTIONS_DRUMS:
+            case VIEW_OPTIONS_INST:
+            case VIEW_OPTIONS_KEYS:
+            case VIEW_OPTIONS_CLICK:
             case VIEW_OPTIONS_CHAINS:
             case VIEW_KNOB_PICK:
+            /* Song Builder's chord, item and instrument pages, and Jam's
+             * instrument page: Back leaves. */
+            case VIEW_CHORD_PICK:
+            case VIEW_INSTRUMENT:
+            case VIEW_INSTRUMENT_BAR:
+            case VIEW_JAM_INSTRUMENT:
                 active.set(MoveBack, WhiteLedFull);
                 active.set(MoveMainButton, WhiteLedFull);
                 break;
@@ -16147,6 +16157,8 @@ function editMenuHints(editing) {
 }
 
 export function footerHints() {
+    /* A confirm box: the click takes the highlighted choice, Back cancels. */
+    if (confirmState) return [["JOG", "SEL"], ["CLK", "PICK"], ["BACK", "OUT"]];
     switch (currentView) {
         case VIEW_ROOT:
             return [["JOG", "SEL"], ["CLK", "OPEN"], ["BACK", "EXIT"]];
@@ -16637,7 +16649,7 @@ globalThis.tick = function() {
                 case VIEW_JAM_INSTRUMENT: drawJamInstrumentMenu(); break;
             }
         }
-        if (!confirmState) drawFooterHints();
+        drawFooterHints();
         drawPopup();
         needsRedraw = false;
     }

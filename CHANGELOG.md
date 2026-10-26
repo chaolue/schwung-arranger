@@ -124,6 +124,11 @@
   Inversion, Note Gap).
 - Perform: Track 4 turns the **Pads** on or off (lit teal), as in Jam; the
   click moved to Shift + Track 4 (lit orange while Shift is held).
+- Back is lit on every screen it works on: Song Builder's item pages (Inst,
+  Pads and Click), Instrument Settings and the Chord Picker, Jam's instrument
+  settings, and Options > Drums, Inst, Keys and Click were dark.
+- A confirm box (delete, overwrite...) has a footer: **JOG SEL**,
+  **CLK PICK**, **BACK OUT**.
 - Jam's instrument settings (Shift + Track 2/3/4) have everything Song
   Builder's do: Arp and its Pattern, Rate, Range and Vel Range; bass
   patterns and Approach (into a chord queued on the pads); Strum; Velocity;
