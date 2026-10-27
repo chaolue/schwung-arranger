@@ -1,7 +1,9 @@
 /* Song Builder's pads on the Chord, Inst and Pads tracks, against a mock
  * engine that confirms builds and runs once played:
  *  - the left half holds roots (the key's own first, then the others), the
- *    right half chord types (Chord track) or item variations (Inst, Pads);
+ *    right half chord types (Chord track) or item variations (Inst, Pads)
+ *    -- an Inst's by its Voicing: Bass patterns with an Approach row, Arp
+ *    patterns with a Range row, or a chord's inversion x strum;
  *  - a pad plays one bar of what it holds -- a one-section song with that
  *    chord, only the track's instrument, drums and click silenced -- and
  *    selects it (lit white); the drums and click come back afterwards;
@@ -15,7 +17,7 @@ const PATH = SONGS + "/h.json";
 H.files.set(PATH, JSON.stringify({ name: "H", key: "C", tempo_bpm: 120, time_sig_num: 4, time_sig_den: 4,
     sections: [{ name: "A", clips: [{ source: "Grooves/beat.mid", name: "beat", start_bar: 0, end_bar: 4 }],
                  chords: [{ root: "C", quality: "maj" }] }],
-    instruments: [{ enabled: false, octave: 2, voicing: "bass", follow_note: 36 }] }));
+    instruments: [{ enabled: false, octave: 2, voicing: "bass", follow_note: 36 }, { voicing: "arp" }] }));
 
 let gen = 0, running = false;
 const g = globalThis;
@@ -124,7 +126,9 @@ check(ch[0] && !Array.isArray(ch[0]) && ch[0].root === "C", "the same chord's st
 /* ---- the Inst 1 track: variations ---- */
 press(C.MoveRow2);
 tick(5);
-check(padLed(0, 4) === 9 && padLed(2, 4) === C.AzureBlue && padLed(3, 7) === 20, "bass, chord and arp variations");
+check(padLed(0, 4) === 9 && padLed(1, 7) === 9, "Inst 1 (Bass): two rows of bass patterns");
+check(padLed(2, 4) === C.Black && padLed(2, 7) === C.Black, "...a dark row");
+check(padLed(3, 4) === 26 && padLed(3, 7) === 26, "...and the Approaches on top");
 check(padLed(1, 3) === C.Black, "no No Chord pad here");
 check(has(["PAD", "PICK"]), "nothing picked on Inst 1: PAD PICK");
 pad(0, 5);                    /* Bass 1-5 */
@@ -136,6 +140,15 @@ check(s && s.sections[0].chords[0].root === "C", "...over the chord at the selec
 check(s && s.instruments[0].follow_note === 36 && s.sections[0].clips[0].source.indexOf("beat") >= 0,
       "...following the section's own kick");
 running = false; tick(5);
+pad(3, 7);                    /* Approach Scale: with Bass 1-5 */
+let f = lastSong().instruments[0].items[0];
+check(f.pattern === 1 && f.approach === 3 && padLed(3, 7) === C.White && padLed(0, 5) === C.White,
+      "an Approach goes with the picked pattern: " + JSON.stringify(f));
+running = false; tick(5);
+pad(3, 7);                    /* again: off */
+f = lastSong().instruments[0].items[0];
+check(f.pattern === 1 && f.approach === undefined && padLed(3, 7) === 26, "...pressed again it comes off: " + JSON.stringify(f));
+running = false; tick(5);
 pad(1, 0);                    /* V: preview over G instead */
 check(lastSong().sections[0].chords[0].root === "G" && lastSong().instruments[0].items[0].pattern === 1, "a root pad: the same item over G");
 running = false; tick(5);
@@ -145,6 +158,35 @@ song = saved([C.MoveRow2]);
 let items = song.sections[0].inst[0];
 check(items.length === 1 && items[0].bar === 2 && items[0].voicing === "bass" && items[0].pattern === 1 && !items[0].beat,
       "Bass 1-5 added to bar 3 only: " + JSON.stringify(items));
+
+/* ---- Inst 2, an Arp: its patterns, and a Range ---- */
+press(C.MoveRow3);
+tick(5);
+check(padLed(0, 4) === 20 && padLed(2, 5) === 20 && padLed(2, 6) === C.Black, "Inst 2 (Arp): ten arp patterns");
+check(padLed(3, 4) === 26 && padLed(3, 6) === 26 && padLed(3, 7) === C.Black, "...and three Ranges on top");
+pad(3, 5);                    /* 2 Oct, no pattern picked yet: Up */
+f = lastSong().instruments[1].items[0];
+check(f.voicing === "arp" && f.pattern === 0 && f.arp_range === 2, "a Range with nothing picked: Arp Up, 2 Oct: " + JSON.stringify(f));
+running = false; tick(5);
+pad(1, 6);                    /* Alberti, keeping 2 Oct */
+f = lastSong().instruments[1].items[0];
+check(f.pattern === 6 && f.arp_range === 2, "...a pattern keeps it: " + JSON.stringify(f));
+running = false; tick(5);
+
+/* Inst 2 set to Chord: the Pads' grid, picks cleared. */
+press(C.MoveBack);
+let doc = JSON.parse(H.files.get(PATH));
+doc.instruments[1].voicing = "chord";
+H.files.set(PATH, JSON.stringify(doc));
+click();
+press(C.MoveRow3);
+tick(5);
+check(padLed(0, 4) === C.AzureBlue && padLed(3, 7) === C.AzureBlue, "Inst 2 (Chord): sixteen chord pads");
+check(has(["PAD", "PICK"]), "...nothing picked");
+pad(1, 6);                    /* 1st Inv, Strum Up */
+f = lastSong().instruments[1].items[0];
+check(f.voicing === "chord" && f.inversion === 1 && f.strum > 0 && f.strum_dir === 0, "...1st Inv, Strum Up: " + JSON.stringify(f));
+running = false; tick(5);
 
 /* ---- the Pads track: inversion x strum ---- */
 press(C.MoveRow4);

@@ -14396,27 +14396,43 @@ const HARMONY_ROOTS = [0, 2, 4, 5, 7, 9, 11, CHORD_ROOT_NONE, 1, 3, 6, 8, 10, -1
 const HARMONY_TYPES = ["maj", "min", "7", "maj7", "m7", "sus2", "sus4", "7sus4",
     "dim", "aug", "6", "m6", "add9", "9", "maj9", "m9"];
 const HARMONY_STRUM_MS = 30;
-/* Inst 1/2: two rows of bass patterns, then chords and arps. */
-const HARMONY_INST_VARIATIONS = [
-    ...BASS_PATTERN_LABELS.map((name, i) => ({ name: "Bass " + name, fields: { voicing: "bass", pattern: i } })),
-    { name: "Chord", fields: { voicing: "chord", strum: 0 } },
-    { name: "Chord Strum Up", fields: { voicing: "chord", strum: HARMONY_STRUM_MS, strum_dir: 0 } },
-    { name: "Chord Strum Down", fields: { voicing: "chord", strum: HARMONY_STRUM_MS, strum_dir: 1 } },
-    ...[0, 1, 2, 6, 9].map(i => ({ name: "Arp " + ARP_PATTERN_LABELS[i], fields: { voicing: "arp", pattern: i } }))
-];
-/* Pads (always a chord): a row per strum, a column per inversion. */
-const HARMONY_PADS_VARIATIONS = [[0, "No Strum"], [1, "Strum Up"], [2, "Strum Down"], [3, "Strum Alt"]].flatMap(([s, sname]) =>
-    [INVERSION_AUTO, 0, 1, 2].map(inv => ({
-        name: inversionLabel(inv) + " " + sname,
-        fields: s === 0 ? { inversion: inv, strum: 0 }
-            : { inversion: inv, strum: HARMONY_STRUM_MS, strum_dir: s - 1 }
-    })));
+/* The right half's 16 pads (from the bottom row) on an Inst or Pads track,
+ * by what the instrument plays (null = dark). An entry with `mod` is a
+ * modifier: it adds its fields to the pattern selected beside it, as the
+ * Chord track's types do to its root.
+ *  Chord (the Pads, or an Inst set to Chord): a row per strum, a column per
+ *    inversion;
+ *  Bass: its 8 patterns, the top row an Approach for them;
+ *  Arp: its 10 patterns, the top row a Range for them. */
+function harmonyChordGrid(extra) {
+    return [[0, "No Strum"], [1, "Strum Up"], [2, "Strum Down"], [3, "Strum Alt"]].flatMap(([s, sname]) =>
+        [INVERSION_AUTO, 0, 1, 2].map(inv => ({
+            name: inversionLabel(inv) + " " + sname,
+            fields: Object.assign({}, extra, s === 0 ? { inversion: inv, strum: 0 }
+                : { inversion: inv, strum: HARMONY_STRUM_MS, strum_dir: s - 1 })
+        })));
+}
+function harmonyPadded(list, top) {
+    return [...list, ...new Array(12 - list.length).fill(null), ...top, ...new Array(4 - top.length).fill(null)];
+}
+const HARMONY_VARIATIONS = {
+    pads: harmonyChordGrid({}),
+    chord: harmonyChordGrid({ voicing: "chord" }),
+    bass: harmonyPadded(
+        BASS_PATTERN_LABELS.map((name, i) => ({ name: "Bass " + name, fields: { voicing: "bass", pattern: i } })),
+        APPROACH_LABELS.map((name, a) => ({ name: "Approach " + name, mod: true, fields: { approach: a } }))),
+    arp: harmonyPadded(
+        ARP_PATTERN_LABELS.map((name, i) => ({ name: "Arp " + name, fields: { voicing: "arp", pattern: i } })),
+        [1, 2, 3].map(r => ({ name: arpRangeLabel(r), mod: true, fields: { arp_range: r } })))
+};
 const HARMONY_VOICING_COLOUR = { bass: 9 /* Bright Lime */, chord: AzureBlue, arp: 20 /* Electric Violet */ };
 const HARMONY_TYPE_COLOUR = 26;  /* Light Magenta */
 
 /* What the pads have selected, for the song it was selected in: the Chord
  * track's root and type, the Inst/Pads tracks' preview root, and each
- * Inst/Pads track's variation (an index into its list). -1 = none. */
+ * Inst/Pads track's variation -- { list, slot, mod }: the list it was picked
+ * from (an Inst whose Voicing changes since has none), its pattern's slot
+ * and its modifier's (-1 = none). -1 = none. */
 let harmonySong = null;
 let harmonyChordRoot = -1;
 let harmonyChordQuality = "maj";
@@ -14443,15 +14459,32 @@ function harmonyCheckSong() {
     harmonyVariation.clear();
 }
 
-function harmonyVariations(track) {
-    return track === TRACK_PADS ? HARMONY_PADS_VARIATIONS : HARMONY_INST_VARIATIONS;
+/* Which list an Inst/Pads track's right half holds: the Pads' own, else the
+ * instrument's Voicing. */
+function harmonyListName(track) {
+    if (track === TRACK_PADS) return "pads";
+    const song = viewSong();
+    const inst = song && song.instruments ? song.instruments[instIndex(track)] : null;
+    const v = inst && inst.voicing;
+    return HARMONY_VARIATIONS[v] && v !== "pads" ? v : "bass";
 }
 
-/* The selected variation of an Inst/Pads track, or null. */
-function harmonySelectedVariation(track) {
+/* The track's selection, if it was picked from the list its pads hold now. */
+function harmonySelection(track) {
     harmonyCheckSong();
-    const i = harmonyVariation.has(track) ? harmonyVariation.get(track) : -1;
-    return i >= 0 ? harmonyVariations(track)[i] : null;
+    const sel = harmonyVariation.get(track);
+    return sel && sel.list === harmonyListName(track) ? sel : null;
+}
+
+/* The selected variation of an Inst/Pads track -- its pattern with its
+ * modifier's fields added -- or null. */
+function harmonySelectedVariation(track) {
+    const sel = harmonySelection(track);
+    if (!sel) return null;
+    const list = HARMONY_VARIATIONS[sel.list];
+    const main = list[sel.slot], mod = sel.mod >= 0 ? list[sel.mod] : null;
+    if (!mod) return main;
+    return { name: main.name + " " + mod.name, fields: Object.assign({}, main.fields, mod.fields) };
 }
 
 /* The chord the Chord track's pads have selected, or null. */
@@ -14499,9 +14532,12 @@ function harmonyPadColour(track, p) {
         return harmonyChordRoot >= 0 && harmonyChordRoot !== CHORD_ROOT_NONE &&
             harmonyChordQuality === HARMONY_TYPES[slot] ? White : HARMONY_TYPE_COLOUR;
     }
-    if (harmonyVariation.get(track) === slot) return White;
-    if (track === TRACK_PADS) return trackColour;
-    return HARMONY_VOICING_COLOUR[HARMONY_INST_VARIATIONS[slot].fields.voicing];
+    const name = harmonyListName(track), entry = HARMONY_VARIATIONS[name][slot];
+    if (!entry) return Black;
+    const sel = harmonySelection(track);
+    if (sel && (sel.slot === slot || sel.mod === slot)) return White;
+    if (entry.mod) return HARMONY_TYPE_COLOUR;
+    return track === TRACK_PADS ? trackColour : HARMONY_VOICING_COLOUR[name];
 }
 
 function drawHarmonyPads() {
@@ -14539,8 +14575,15 @@ function handleHarmonyPad(note, velocity) {
         chord = harmonySelectedChord();
         name = chordLabel(chord, key);
     } else {
-        harmonyVariation.set(track, slot);
-        variation = harmonyVariations(track)[slot];
+        const list = harmonyListName(track), entry = HARMONY_VARIATIONS[list][slot];
+        if (!entry) return;
+        const sel = harmonySelection(track) || { list, slot: 0, mod: -1 };
+        /* A modifier goes with the selected pattern (the first, if none);
+         * pressed again it comes off. */
+        if (entry.mod) sel.mod = sel.mod === slot ? -1 : slot;
+        else sel.slot = slot;
+        harmonyVariation.set(track, sel);
+        variation = harmonySelectedVariation(track);
         chord = harmonyInstChord(sec);
         name = variation.name;
     }

@@ -7,8 +7,9 @@
   plays a bar of a chord or item and picks it; a step then adds it to that
   bar (halfway when beat 1 is taken), or takes it out if it's already there.
   The left pads are roots (the key's own first), the right ones chord types
-  -- or, on Inst and Pads, bass, chord and arp variations (Pads: inversion
-  x strum).
+  -- or, on Inst and Pads, variations of what the instrument plays: Bass
+  patterns with an Approach, Arp patterns with a Range, or a chord's
+  inversion x strum (the Pads, or an Inst set to Chord).
 - The footer names only what works on the selected row: **NAME** on a
   section row, **ADD** on "+ Add", and **MENU** where the click does nothing.
   A locked song shows no click, pad or move actions; its chords and items

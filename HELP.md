@@ -192,17 +192,20 @@ The pads are in two halves:
 | Half | Chord track | Inst 1 / Inst 2 | Pads |
 |------|-------------|-----------------|------|
 | Left (columns 1–4) | The chord's root, the key's own first — from the bottom row: **I ii iii IV**, **V vi vii° N.C.** (No Chord), **♭II ♭III ♯IV ♭VI**, **♭VII**. Each starts as its usual type (ii minor, vii° diminished) | The chord the preview plays over (by default the chord at the selected item's bar). The item itself plays the song's chords | As for Inst |
-| Right (columns 5–8) | The chord's type for the picked root: **Major, Minor, 7th, Maj7** / **Min7, Sus2, Sus4, 7Sus4** / **Dim, Aug, 6th, Min6** / **Add9, 9th, Maj9, Min9** | The item: two rows of Bass patterns (1, 1-5, 1-8, 1-5-8-5 / 1-5 Low, 1-3-5-3, 1-3-5-8, 1-3-5-6-b7), then **Chord, Chord Strum Up, Chord Strum Down, Arp Up** / **Arp Down, Up-Down, Alberti, 1-5-8-10** | The item: a column per inversion (**Auto, Root, 1st, 2nd**), a row per strum (**Off, Up, Down, Alt**) |
+| Right (columns 5–8) | The chord's type for the picked root: **Major, Minor, 7th, Maj7** / **Min7, Sus2, Sus4, 7Sus4** / **Dim, Aug, 6th, Min6** / **Add9, 9th, Maj9, Min9** | The item, by the instrument's Voicing — **Bass**: its patterns (**1, 1-5, 1-8, 1-5-8-5** / **1-5 Low, 1-3-5-3, 1-3-5-8, 1-3-5-6-b7**), the top row an Approach for them (**Off, Below, Above, Scale**). **Chord**: as the Pads. **Arp**: its patterns (**Up, Down, Up-Down, Random** / **Rnd Walk, Shuffle, Alberti, Pedal** / **Converge, 1-5-8-10**), the top row a Range for them (**1, 2, 3 Oct**) | The item: a column per inversion (**Auto, Root, 1st, 2nd**), a row per strum (**Off, Up, Down, Alt**) |
 
 The key's own roots are lit in the track colour and the others dimmer; on the
-Inst and Pads tracks the right half is coloured by voicing (lime bass, blue
-chord, violet arp). The name of what a pad holds shows for a moment.
+Inst tracks the right half is coloured by voicing (lime bass, blue chord,
+violet arp), and its top row of Approaches or Ranges in pink. An Approach or
+Range goes with the pattern picked beside it (the first, if none is); press it
+again to take it off. Changing the instrument's Voicing changes the pads, and
+clears what was picked. The name of what a pad holds shows for a moment.
 
 The preview plays only that track's instrument (on the Chord track, the
 instruments that are on — the Pads if none is), over the section's first drum
 bar with the drums and click silent, so a Follow Note bass still plays on the
 kick. An item added from a pad sets only what the pad names (Voicing and
-Pattern, or Inversion and Strum); everything else stays the track's.
+Pattern, and an Approach or Range; or Inversion and Strum); everything else stays the track's.
 
 ---
 
