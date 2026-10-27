@@ -87,6 +87,16 @@ check(s && s.instruments[2].enabled && !s.instruments[0].enabled, "...on the Pad
 check(lastSet("drum_enabled") === "0" && lastSet("click_enabled") === "0", "...drums and click silenced");
 check(padLed(1, 1) === C.White, "vi selected: white");
 check(has(["STEP", "ADD"]), "footer: STEP ADD: " + JSON.stringify(M.footerHints()));
+check(!sets.some(x => x[0] === "stop"), "a first preview stops nothing");
+/* Another pad while it plays: stopped first (its notes released), then the
+ * new bar -- not restarted over it, where shared notes weren't re-attacked. */
+let from = sets.length;
+pad(1, 0);                    /* V */
+let keys = sets.slice(from).map(x => x[0]);
+check(keys.indexOf("stop") >= 0 && keys.indexOf("stop") < keys.indexOf("song_json"),
+      "a pad during a preview stops it before the next: " + keys.join(","));
+check(running && lastSong().sections[0].chords[0].root === "G", "...and G plays");
+pad(1, 1);                    /* vi again */
 running = false; tick(5);    /* the bar ends */
 check(lastSet("drum_enabled") === "1" && lastSet("click_enabled") === "0" /* the click was off */,
       "after the preview the drums are back: " + lastSet("drum_enabled"));

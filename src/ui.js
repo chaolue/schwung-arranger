@@ -14578,6 +14578,15 @@ function harmonyPreview(track, chord, fields) {
     delete c.adv;
     temp.sections = [{ name: "Preview", clips: [clip], chords: [c], inst }];
     temp.count_in = false;
+    /* A preview still playing stops first. Restarting over it sent the old
+     * chord's note-offs and the new one's note-ons on the same tick, so a
+     * note the two share wasn't heard as a new attack -- silent once the
+     * first had faded (found live). Stopping now releases them while the
+     * new bar builds. */
+    if (harmonyPreviewing) {
+        if (typeof host_module_set_param_blocking === "function") host_module_set_param_blocking("stop", "1", 100);
+        else if (typeof host_module_set_param === "function") host_module_set_param("stop", "1");
+    }
     const saved = currentSong;
     const savedLoop = dspLoopEnabled;
     currentSong = temp;
