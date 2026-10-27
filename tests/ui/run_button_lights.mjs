@@ -99,6 +99,7 @@ const line = prints.filter(p => p.t.startsWith("= ")).pop();
 check(line && line.t === "= C b1" && line.y === 46, "the chord line in the list's last row: " + JSON.stringify(line));
 const rows = prints.filter(p => p.y > 8 && !p.t.startsWith("= "));
 check(rows.length && rows.every(p => p.y + 8 <= 46), "list rows stop above it: " + JSON.stringify(rows.map(p => p.y)));
+check(rows.some(p => p.y === 37), "...four of them, no blank row before it: " + JSON.stringify([...new Set(rows.map(p => p.y))]));
 g.print = hostPrint;
 press(C.MoveBack);
 press(C.MoveBack);

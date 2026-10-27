@@ -8329,6 +8329,10 @@ function drawChordPick() {
         editMode: chordPickEditing,
         labelGap: 2,
         prioritizeSelectedValue: true,
+        /* Four rows exactly fill the space above the chord line, but the
+         * list's own count (the area's height over a row's, rounded down)
+         * came to three, leaving a blank row. */
+        maxVisible: 4,
         listArea: { topY: LIST_TOP_Y, bottomY: CHORD_PICK_LINE_Y - 1 }
     });
     print(2, CHORD_PICK_LINE_Y, "= " + chordLabel(pickResult(), key) + " " + chordPosLabel(chordPickBar, chordPickBeat), 1);
