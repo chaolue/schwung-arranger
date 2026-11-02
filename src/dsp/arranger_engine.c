@@ -176,6 +176,11 @@ static void *arranger_worker_thread(void *arg);
 /* Fixed double-buffer capacities for the folder/song scan caches. The worker
  * scans into the inactive slot; the audio thread reads the active slot. */
 #define FOLDER_CACHE_MAX 512
+/* Song Builder's Similar list: how many clips it answers with, at most how
+ * many from any one folder, and the room for its JSON. */
+#define SIM_MAX_RESULTS 40
+#define SIM_PER_FOLDER 2
+#define SIM_JSON_CAP (SIM_MAX_RESULTS * 200 + 256)
 #define SONG_CACHE_MAX   256
 
 #define OUTPUT_TARGET_EXTERNAL 0
@@ -621,12 +626,27 @@ static void emit_instruments_all_off(engine_t *e);
  * Clips are stored as a single concatenated buffer to keep the entry small.
  * Must be >= MAX_CLIPS_PER_FOLDER so no clip is dropped from the scan. */
 #define FOLDER_HEAP_CLIPS 512
+
+/* A clip's rhythm, for finding similar clips (Song Builder's Similar list):
+ * where in the bar each kind of drum lands, every bar folded onto one --
+ * FP_BINS steps a bar (12 a beat in 4/4, so 16ths and triplets both fall on
+ * steps), velocity-weighted, each kind scaled to its own loudest step.
+ * Taken from the notes the library scan already reads for each clip's bar
+ * count, so it costs no extra file reads. */
+#define FP_BINS 48
+#define FP_CATS 4             /* kick, snare, hats/ride, the rest */
+typedef struct {
+    uint8_t ts_num, ts_den;   /* the clip's meter; ts_num 0 = no notes */
+    uint8_t bins[FP_CATS][FP_BINS];
+} clip_fp_t;
+
 struct folder_entry {
     char name[128];
     char path[MAX_PATH_LEN];
     char category[128];     /* category path (e.g. "Vintage/03 Swing"); "" for root-level folders */
     char *clip_names;       /* heap: clip_count * 128 byte slots */
     uint32_t *clip_bars;    /* heap: clip_count bar counts */
+    clip_fp_t *clip_fp;     /* heap: clip_count rhythm fingerprints (may be NULL) */
     int clip_count;
 };
 
@@ -638,6 +658,7 @@ struct song_entry {
 typedef struct {
     const char *name;
     uint32_t bars;
+    int idx;                /* where it was before sorting */
 } clip_sort_pair_t;
 
 static int clip_pair_cmp(const void *a, const void *b) {
@@ -1121,6 +1142,17 @@ typedef struct engine {
     clip_lookup_entry_t *clip_index;
     int clip_index_cap;
     int clip_index_valid;
+    /* Song Builder's Similar search: set_param("similar_find") writes the
+     * request ("<id>\t<folder index>\t<clip path>") into the buffer
+     * sim_req_active does not point to, flips it and bumps sim_req_gen; the
+     * worker runs the search (run_similar_search) and publishes its answer
+     * the same way, for get_param("similar_json"). */
+    char sim_req[2][MAX_PATH_LEN];
+    _Atomic(int) sim_req_active;
+    _Atomic(uint32_t) sim_req_gen;
+    uint32_t sim_done_gen;              /* worker-owned */
+    char sim_json[2][SIM_JSON_CAP];
+    _Atomic(int) sim_json_active;
     /* Last error message */
     char error_msg[256];
 } engine_t;
@@ -1128,6 +1160,7 @@ typedef struct engine {
 /* Forward declaration: the engine's deferred work, run on the worker thread
  * each wake. Defined after the scan helpers. */
 static void arranger_worker_iterate(engine_t *e);
+static void run_similar_search(engine_t *e);
 
 /* -------------------------------------------------------------------------- */
 /* Worker thread body                                                         */
@@ -4723,6 +4756,7 @@ static void free_folder_slot(folder_entry_t *folders, int count) {
     for (int i = 0; i < count; i++) {
         if (folders[i].clip_names) { free(folders[i].clip_names); folders[i].clip_names = NULL; }
         if (folders[i].clip_bars) { free(folders[i].clip_bars); folders[i].clip_bars = NULL; }
+        if (folders[i].clip_fp) { free(folders[i].clip_fp); folders[i].clip_fp = NULL; }
         folders[i].clip_count = 0;
     }
 }
@@ -4902,7 +4936,47 @@ static void scan_songs_into(engine_t *e, song_entry_t *songs, int *out_count) {
     *out_count = count;
 }
 
-static int scan_clip_bars(const char *path, uint32_t *out_bars) {
+/* Which of a fingerprint's kinds a General MIDI drum note is. */
+static int fp_category(uint8_t note) {
+    switch (note) {
+    case 35: case 36: return 0;                                  /* kick */
+    case 37: case 38: case 39: case 40: return 1;                /* snare, side stick, clap */
+    case 42: case 44: case 46: case 51: case 53: case 59: return 2; /* hats, ride */
+    default: return 3;                                           /* toms, crashes, percussion */
+    }
+}
+
+/* A note-on the scan saw, for the fingerprint. */
+typedef struct {
+    uint32_t tick;
+    uint8_t note, vel;
+} fp_note_t;
+#define FP_SCAN_NOTES 4096    /* a clip's notes the fingerprint takes; the rest are left out */
+
+static void fp_build(clip_fp_t *fp, const fp_note_t *notes, int n, uint32_t ticks_per_bar,
+                     uint32_t ts_num, uint32_t ts_den) {
+    memset(fp, 0, sizeof(*fp));
+    if (n <= 0 || ticks_per_bar == 0) return;
+    float acc[FP_CATS][FP_BINS] = { { 0 } };
+    for (int i = 0; i < n; i++) {
+        uint32_t pos = notes[i].tick % ticks_per_bar;
+        /* The nearest step; a note just before the barline is the downbeat's. */
+        int bin = (int)((((uint64_t)pos * FP_BINS * 2) + ticks_per_bar) / ((uint64_t)ticks_per_bar * 2)) % FP_BINS;
+        acc[fp_category(notes[i].note)][bin] += notes[i].vel / 127.0f;
+    }
+    for (int c = 0; c < FP_CATS; c++) {
+        float max = 0.0f;
+        for (int b = 0; b < FP_BINS; b++) if (acc[c][b] > max) max = acc[c][b];
+        if (max <= 0.0f) continue;
+        for (int b = 0; b < FP_BINS; b++) fp->bins[c][b] = (uint8_t)(acc[c][b] / max * 255.0f + 0.5f);
+    }
+    fp->ts_num = (uint8_t)(ts_num ? ts_num : 4);
+    fp->ts_den = (uint8_t)(ts_den ? ts_den : 4);
+}
+
+/* A clip's length in whole bars -- and, given `fp`, its rhythm fingerprint,
+ * from the same read. */
+static int scan_clip_bars(const char *path, uint32_t *out_bars, clip_fp_t *fp) {
     FILE *f = fopen(path, "rb");
     if (!f) return -1;
     fseek(f, 0, SEEK_END);
@@ -4921,6 +4995,8 @@ static int scan_clip_bars(const char *path, uint32_t *out_bars) {
     if (div & 0x8000 || div == 0) div = 240;
     uint32_t end_tick = 0;
     uint32_t ts_num = 0, ts_den = 0; /* time signature from meta (den stored as power of 2) */
+    fp_note_t *notes = fp ? malloc(FP_SCAN_NOTES * sizeof(fp_note_t)) : NULL;
+    int nnotes = 0;
     const uint8_t *cur = buf + 8 + hlen;
     const uint8_t *buf_end = buf + sz;
     int track_idx = 0;
@@ -4967,6 +5043,12 @@ static int scan_clip_bars(const char *path, uint32_t *out_bars) {
             uint8_t type = status & 0xF0;
             int dlen = (type == 0xC0 || type == 0xD0) ? 1 : 2;
             if (tp + dlen > tend) break;
+            if (type == 0x90 && dlen == 2 && tp[1] > 0 && notes && nnotes < FP_SCAN_NOTES) {
+                notes[nnotes].tick = abs_tick;
+                notes[nnotes].note = tp[0] & 0x7F;
+                notes[nnotes].vel = tp[1];
+                nnotes++;
+            }
             tp += dlen;
             if (abs_tick > end_tick) end_tick = abs_tick;
         }
@@ -4984,6 +5066,8 @@ static int scan_clip_bars(const char *path, uint32_t *out_bars) {
     if (end_tick % ticks_per_bar) bars++;
     if (bars < 1) bars = 1;
     *out_bars = bars;
+    if (fp) fp_build(fp, notes, notes ? nnotes : 0, ticks_per_bar, ts_num, ts_den);
+    free(notes);
     return 0;
 }
 
@@ -5040,7 +5124,8 @@ static void scan_dir_recursive(const char *folder_root, const char *rel_prefix, 
             memcpy(slot, tmp, 127);
             slot[127] = '\0';
             uint32_t bars = 1;
-            scan_clip_bars(child_path, &bars);
+            if (f->clip_fp) memset(&f->clip_fp[f->clip_count], 0, sizeof(clip_fp_t));
+            scan_clip_bars(child_path, &bars, f->clip_fp ? &f->clip_fp[f->clip_count] : NULL);
             if (f->clip_bars) f->clip_bars[f->clip_count] = bars;
             f->clip_count++;
         }
@@ -5119,27 +5204,47 @@ static int scan_song_folder_into(folder_entry_t *f, const char *full_path,
     if (!f->clip_names) return -1;
     f->clip_bars = calloc(FOLDER_HEAP_CLIPS, sizeof(uint32_t));
     if (!f->clip_bars) { free(f->clip_names); f->clip_names = NULL; return -1; }
+    /* Without room for fingerprints the folder still scans; its clips just
+     * aren't found by a Similar search. */
+    f->clip_fp = calloc(FOLDER_HEAP_CLIPS, sizeof(clip_fp_t));
 
     scan_dir_recursive(full_path, "", f);
-    /* Sort clip names while keeping clip_bars aligned. */
+    /* Sort clip names while keeping clip_bars and clip_fp aligned. */
     if (f->clip_count > 1) {
         clip_sort_pair_t *pairs = calloc(f->clip_count, sizeof(clip_sort_pair_t));
         if (pairs) {
             for (int i = 0; i < f->clip_count; i++) {
                 pairs[i].name = f->clip_names + (i * 128);
                 pairs[i].bars = f->clip_bars ? f->clip_bars[i] : 1;
+                pairs[i].idx = i;
             }
             qsort(pairs, f->clip_count, sizeof(clip_sort_pair_t), clip_pair_cmp);
             char *temp_names = malloc(f->clip_count * 128);
+            clip_fp_t *temp_fp = f->clip_fp ? malloc(f->clip_count * sizeof(clip_fp_t)) : NULL;
             if (temp_names) {
                 for (int i = 0; i < f->clip_count; i++) {
                     memcpy(temp_names + (i * 128), pairs[i].name, 128);
                     if (f->clip_bars) f->clip_bars[i] = pairs[i].bars;
+                    if (temp_fp) temp_fp[i] = f->clip_fp[pairs[i].idx];
                 }
                 memcpy(f->clip_names, temp_names, f->clip_count * 128);
+                if (temp_fp) memcpy(f->clip_fp, temp_fp, f->clip_count * sizeof(clip_fp_t));
+                /* Names sorted but not their fingerprints: they'd belong to
+                 * the wrong clips, so the folder goes without. */
+                else if (f->clip_fp) { free(f->clip_fp); f->clip_fp = NULL; }
                 free(temp_names);
             }
+            free(temp_fp);
             free(pairs);
+        }
+    }
+    /* A folder has a few dozen clips, not FOLDER_HEAP_CLIPS: give back the
+     * fingerprint room it didn't use (~100 KB a folder otherwise). */
+    if (f->clip_fp) {
+        if (f->clip_count == 0) { free(f->clip_fp); f->clip_fp = NULL; }
+        else {
+            clip_fp_t *shrunk = realloc(f->clip_fp, f->clip_count * sizeof(clip_fp_t));
+            if (shrunk) f->clip_fp = shrunk;
         }
     }
     return 0;
@@ -5616,6 +5721,10 @@ static void arranger_worker_iterate(engine_t *e) {
     }
     atomic_store_explicit(&e->folders_busy, 0, memory_order_release);
     atomic_store_explicit(&e->scan_busy, 0, memory_order_release);
+
+    /* After any scan this wake took, so a search asked for while the
+     * library was still loading runs on the finished scan. */
+    run_similar_search(e);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -6814,6 +6923,17 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
         g_dsp_debug = (atoi(val) != 0);
         return;
     }
+    if (strcmp(key, "similar_find") == 0) {
+        /* Song Builder's Similar list: hand the request to the worker (see
+         * run_similar_search). A bounded copy and a semaphore post -- safe
+         * on the audio thread. */
+        int target = 1 - atomic_load_explicit(&e->sim_req_active, memory_order_relaxed);
+        copy_trunc(e->sim_req[target], sizeof(e->sim_req[target]), val);
+        atomic_store_explicit(&e->sim_req_active, target, memory_order_release);
+        atomic_fetch_add_explicit(&e->sim_req_gen, 1, memory_order_acq_rel);
+        sem_post(&e->worker_wake);
+        return;
+    }
     if (strcmp(key, "song_json") == 0) {
         /* The new song carries the settings live updates were previewing. */
         memset(e->inst_live_set, 0, sizeof e->inst_live_set);
@@ -7568,6 +7688,154 @@ static int fmt_transport(engine_t *e, char *buf, int buf_len) {
                     e->tempo_bpm);
 }
 
+/* ---- Similar clips (Song Builder) ----------------------------------------
+ *
+ * Every clip in the library compared with one, by fingerprint (clip_fp_t):
+ * each drum kind's steps, each spread a little onto its neighbours (so a
+ * note played a step early or late still meets), compared by cosine, then
+ * weighted -- the kick and snare most, the hats and ride next, the rest
+ * least. A kind neither clip plays is left out; one only one plays counts
+ * against it. Only clips in the same meter count, and only of the same kind
+ * (a fill finds fills, a groove grooves), none from the clip's own folder
+ * (it is on the pads already) and at most SIM_PER_FOLDER from any other, so
+ * one song's grooves don't fill the list. */
+static const float FP_WEIGHT[FP_CATS] = { 0.35f, 0.30f, 0.25f, 0.10f };
+
+static void fp_spread(const clip_fp_t *fp, float out[FP_CATS][FP_BINS], float norm[FP_CATS]) {
+    for (int c = 0; c < FP_CATS; c++) {
+        const uint8_t *b = fp->bins[c];
+        float n2 = 0.0f;
+        for (int i = 0; i < FP_BINS; i++) {
+            float v = b[i] + 0.5f * (b[(i + FP_BINS - 1) % FP_BINS] + b[(i + 1) % FP_BINS]);
+            out[c][i] = v;
+            n2 += v * v;
+        }
+        norm[c] = sqrtf(n2);
+    }
+}
+
+/* 0..1: how alike clip `b` is to the spread fingerprint (a, an). */
+static float fp_similarity(const float a[FP_CATS][FP_BINS], const float an[FP_CATS], const clip_fp_t *b) {
+    float bs[FP_CATS][FP_BINS], bn[FP_CATS];
+    fp_spread(b, bs, bn);
+    float sum = 0.0f, wsum = 0.0f;
+    for (int c = 0; c < FP_CATS; c++) {
+        if (an[c] <= 0.0f && bn[c] <= 0.0f) continue;
+        wsum += FP_WEIGHT[c];
+        if (an[c] <= 0.0f || bn[c] <= 0.0f) continue;
+        float dot = 0.0f;
+        for (int i = 0; i < FP_BINS; i++) dot += a[c][i] * bs[c][i];
+        sum += FP_WEIGHT[c] * dot / (an[c] * bn[c]);
+    }
+    return wsum > 0.0f ? sum / wsum : 0.0f;
+}
+
+typedef struct {
+    float score;
+    int folder, clip;
+} sim_hit_t;
+
+static int sim_hit_cmp(const void *pa, const void *pb) {
+    const sim_hit_t *a = pa, *b = pb;
+    if (a->score != b->score) return a->score < b->score ? 1 : -1;
+    if (a->folder != b->folder) return a->folder - b->folder;
+    return a->clip - b->clip;
+}
+
+/* Publish a Similar answer: written into the buffer get_param isn't
+ * reading, then flipped. */
+static void sim_publish(engine_t *e, const char *json) {
+    int target = 1 - atomic_load_explicit(&e->sim_json_active, memory_order_acquire);
+    copy_trunc(e->sim_json[target], SIM_JSON_CAP, json);
+    atomic_store_explicit(&e->sim_json_active, target, memory_order_release);
+}
+
+/* Run the latest Similar request, if there is one the worker hasn't
+ * answered. Worker thread: it alone writes the folder scan, so reading the
+ * active slot here is safe. Answers {"id":N,"status":S,"items":[{"f":folder
+ * index,"c":clip path,"b":bars,"s":0-100}...]}, best first; status is "ok",
+ * "not_found" (no such clip in that folder) or "no_notes". */
+static void run_similar_search(engine_t *e) {
+    uint32_t gen = atomic_load_explicit(&e->sim_req_gen, memory_order_acquire);
+    if (gen == e->sim_done_gen) return;
+    e->sim_done_gen = gen;
+    char req[MAX_PATH_LEN];
+    copy_trunc(req, sizeof(req), e->sim_req[atomic_load_explicit(&e->sim_req_active, memory_order_acquire)]);
+    char *t1 = strchr(req, '\t');
+    char *t2 = t1 ? strchr(t1 + 1, '\t') : NULL;
+    if (!t1 || !t2) return;
+    *t1 = '\0';
+    *t2 = '\0';
+    int id = atoi(req);
+    int src_folder = atoi(t1 + 1);
+    const char *src_path = t2 + 1;
+    static char json[SIM_JSON_CAP];   /* worker-only */
+    int nfold = 0;
+    folder_entry_t *folders = get_cached_folders(e, &nfold);
+    int src_clip = -1;
+    if (folders && src_folder >= 0 && src_folder < nfold) {
+        for (int c = 0; c < folders[src_folder].clip_count; c++) {
+            if (strcmp(folders[src_folder].clip_names + c * 128, src_path) == 0) { src_clip = c; break; }
+        }
+    }
+    if (src_clip < 0 || !folders[src_folder].clip_fp) {
+        snprintf(json, sizeof(json), "{\"id\":%d,\"status\":\"not_found\",\"items\":[]}", id);
+        sim_publish(e, json);
+        return;
+    }
+    const clip_fp_t *src = &folders[src_folder].clip_fp[src_clip];
+    if (src->ts_num == 0) {
+        snprintf(json, sizeof(json), "{\"id\":%d,\"status\":\"no_notes\",\"items\":[]}", id);
+        sim_publish(e, json);
+        return;
+    }
+    int src_fill = str_contains_ci(src_path, "fill");
+    float a[FP_CATS][FP_BINS], an[FP_CATS];
+    fp_spread(src, a, an);
+    int total = 0;
+    for (int i = 0; i < nfold; i++) total += folders[i].clip_count;
+    sim_hit_t *hits = malloc((total > 0 ? total : 1) * sizeof(sim_hit_t));
+    int nh = 0;
+    if (hits) {
+        for (int i = 0; i < nfold; i++) {
+            if (i == src_folder || !folders[i].clip_fp) continue;
+            for (int c = 0; c < folders[i].clip_count; c++) {
+                const clip_fp_t *b = &folders[i].clip_fp[c];
+                if (b->ts_num != src->ts_num || b->ts_den != src->ts_den) continue;
+                if (str_contains_ci(folders[i].clip_names + c * 128, "fill") != src_fill) continue;
+                hits[nh].score = fp_similarity(a, an, b);
+                hits[nh].folder = i;
+                hits[nh].clip = c;
+                nh++;
+            }
+        }
+        qsort(hits, nh, sizeof(sim_hit_t), sim_hit_cmp);
+    }
+    jw_t w;
+    jw_init(&w, json, sizeof(json) - 2);
+    jw_fmt(&w, "{\"id\":%d,\"status\":\"ok\",\"items\":[", id);
+    uint8_t *per_folder = calloc(nfold > 0 ? nfold : 1, 1);
+    int out = 0;
+    for (int k = 0; k < nh && out < SIM_MAX_RESULTS && per_folder; k++) {
+        const sim_hit_t *h = &hits[k];
+        if (per_folder[h->folder] >= SIM_PER_FOLDER) continue;
+        int mark = w.off;
+        if (out > 0) jw_lit(&w, ",");
+        jw_fmt(&w, "{\"f\":%d,\"c\":", h->folder);
+        jw_str(&w, folders[h->folder].clip_names + h->clip * 128);
+        jw_fmt(&w, ",\"b\":%u,\"s\":%d}",
+               folders[h->folder].clip_bars ? folders[h->folder].clip_bars[h->clip] : 1,
+               (int)(h->score * 100.0f + 0.5f));
+        if (!w.ok) { w.off = mark; break; }
+        per_folder[h->folder]++;
+        out++;
+    }
+    memcpy(json + w.off, "]}", 3);
+    free(per_folder);
+    free(hits);
+    sim_publish(e, json);
+}
+
 /* Append a fmt_* answer to a writer (a JSON value, written in place). */
 static void jw_answer(jw_t *w, int (*fmt)(engine_t *, char *, int), engine_t *e) {
     if (!w->ok) return;
@@ -7723,6 +7991,14 @@ static int arr_get_param(void *instance, const char *key, char *buf, int buf_len
     }
     if (strncmp(key, "songs_json", 10) == 0) {
         return fmt_songs_json(e, list_key_start(key, 10), buf, buf_len);
+    }
+    if (strcmp(key, "similar_json") == 0) {
+        /* The worker's last Similar answer ("" before the first). */
+        const char *src = e->sim_json[atomic_load_explicit(&e->sim_json_active, memory_order_acquire)];
+        size_t n = strnlen(src, SIM_JSON_CAP - 1);
+        if ((int)n >= buf_len) return -1;
+        memcpy(buf, src, n + 1);
+        return (int)n;
     }
     if (strncmp(key, "folders_json", 12) == 0) {
         return fmt_folders_json(e, list_key_start(key, 12), buf, buf_len);

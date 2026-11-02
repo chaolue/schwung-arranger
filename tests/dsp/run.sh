@@ -19,6 +19,14 @@ cc -O2 -shared -fPIC -Wall -Wextra -Werror -I"$REPO_ROOT/src/dsp" -o "$TMP/dsp.s
 cc -O0 -Wall -Wextra -I"$REPO_ROOT/src/dsp" -o "$TMP/test_clock" \
     "$REPO_ROOT/tests/dsp/test_clock.c" -ldl
 "$TMP/test_clock" "$TMP/dsp.so"
+# test_similar writes its own small library, so it always runs.
+cc -Wall -Wextra -Werror -g -pthread -I"$REPO_ROOT/src/dsp" -I"$REPO_ROOT/tests/dsp" -o "$TMP/test_similar" \
+    "$REPO_ROOT/tests/dsp/test_similar.c" "$REPO_ROOT/src/dsp/arranger_engine.c" -ldl -lm
+if "$TMP/test_similar" > "$TMP/test_similar.out" 2>&1; then
+    echo "test_similar: ok"
+else
+    echo "test_similar: FAILED"; tail -20 "$TMP/test_similar.out"; exit 1
+fi
 
 LIB="${ARRANGER_TEST_LIBRARY:-}"
 if [ -z "$LIB" ]; then
@@ -28,7 +36,7 @@ fi
 status=0
 for src in "$REPO_ROOT"/tests/dsp/test_*.c; do
     name="$(basename "$src" .c)"
-    [ "$name" = "test_clock" ] && continue
+    [ "$name" = "test_clock" ] || [ "$name" = "test_similar" ] && continue
     cc -Wall -Wextra -g -pthread -I"$REPO_ROOT/src/dsp" -I"$REPO_ROOT/tests/dsp" -o "$TMP/$name" \
         "$src" "$REPO_ROOT/src/dsp/arranger_engine.c" -ldl -lm
     if "$TMP/$name" "$LIB" > "$TMP/$name.out" 2>&1; then

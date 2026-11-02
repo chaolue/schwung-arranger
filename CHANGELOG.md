@@ -3,6 +3,18 @@
 ## Unreleased
 
 ### Song Builder
+- **Similar clips**: Shift+Record on the Drum track, or **Find Similar** at
+  the bottom of a clip's Trim Clip screen, lists clips from other folders
+  with a rhythm like the selected clip's -- same meter, and grooves for a
+  groove, fills for a fill -- best first, with how alike each is. Play hears
+  one; the click loads its folder onto the pads, the clip lit white. The
+  engine takes each clip's rhythm while it scans the library, so the search
+  reads no files of its own.
+- **Record** first lists the folders the song's clips come from, then
+  **Browse...** for the library, when there are two or more. A clip from the
+  song's old folder keeps playing from it when the folder changes.
+- Holding a pad plays the clip from the pads' folder, not by name from
+  wherever in the library it is found.
 - **Chord and Inst pads**: on the Chord, Inst 1/2 and Pads tracks a pad
   plays a bar of a chord or item and picks it; a step then adds it to that
   bar (halfway when beat 1 is taken), or takes it out if it's already there.

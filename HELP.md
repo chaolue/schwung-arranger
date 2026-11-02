@@ -66,6 +66,8 @@ Browse, rename, delete, and load songs.
 
 Choose the MIDI folder a new song is built from, or change the current song's source folder (via **Record** in Edit Song). Folders are grouped by category (e.g. `GM Ballads`, `Vintage Drummer/03 Swing`); drill into a category to reach its song folders.
 
+When the song's clips come from two or more folders, **Record** first lists those folders, in the order the song first uses them, then **Browse...** for the rest of the library (Back from it returns to the list). With clips from one folder, Record opens the library straight away. Either way the folder you pick goes onto the pads and becomes the song's folder; clips from the old folder keep playing from it.
+
 | Control | Action |
 |---------|--------|
 | Jog wheel | Scroll the current category's sub-categories and folders |
@@ -115,7 +117,8 @@ playback (Play, Back) work the same on every track.
 | Play (during playback) | Stop playback (LED turns red) |
 | Play (stopped) | Preview the clip at the cursor (LED green) |
 | Shift + Play | Save and play from the start of the song |
-| Record (blue)| Change the MIDI song's source folder (reloads the clip palette from the selected folder) |
+| Record (blue)| Change the MIDI song's source folder (reloads the clip palette from the selected folder) — see **Source Folder Picker** |
+| Shift + Record | Find clips like the selected one in other folders — see **Similar Clips** |
 | Delete | Delete the clip at the cursor. In a section with chords or Inst/Click items it leaves an **(empty)** placeholder of the same length, so what follows stays on its drums; tap a pad to fill it, or Delete again to remove it |
 | Shift + Delete | Delete the current section (must keep at least one) |
 | Copy | Duplicate the clip at the cursor |
@@ -383,6 +386,7 @@ The top line shows the clip's **source folder** (read-only), so you can see whic
 | Jog wheel (browse mode) | Move between fields |
 | Jog click | Toggle edit / browse mode for the selected field |
 | Jog click (on Advanced Trim) | Toggle Advanced Trim on/off |
+| Jog click (on Find Similar) | Keep the changes and list clips like this one — see **Similar Clips** |
 | Back (browse mode) | Commit changes and return to Song Builder |
 | Back (edit mode) | Cancel the current field and return to browse mode |
 
@@ -400,9 +404,31 @@ The top line shows the clip's **source folder** (read-only), so you can see whic
 | Limit Note | Note to thin (set to a note number, e.g. 36; 0 = off) |
 | Limit Notes/Bar | Max note hits to keep per bar (0 = off). For example, for kicks, on strong beats (1, plus 3 in 4/4 / 4 in 6/8) are always kept; extra kicks nearest to other kicks are dropped first. |
 | MIDI Channel | Per-clip MIDI out channel override: **Default** follows the Drums output channel (set in Options), or set 1–16 to route this clip to a specific channel |
+| Find Similar | The last row: list clips like this one (see **Similar Clips**) |
 
 
 **Button LED hints:** Back and Main are lit.
+
+---
+
+### Similar Clips
+
+Open it with **Shift + Record** on the Drum track (for the clip at the cursor), or the **Find Similar** row at the bottom of a clip's Trim Clip screen. It searches the whole library for drum clips with a rhythm like that clip's, and lists them best first, with how alike each one is (100% = the same pattern). The line under the list names the selected clip's folder.
+
+What counts as alike is where the kick, snare and hats/ride land in the bar (most for the kick and snare, least for toms, crashes and percussion), with a little give for notes played early or late. Only clips in the same time signature count, and only of the same kind: a groove finds grooves, a fill finds fills ("Fill" in the name). Clips from the selected clip's own folder are left out (they are on the pads already), and no folder has more than two in the list.
+
+| Control | Action |
+|---------|--------|
+| Jog wheel | Select a clip |
+| Play | Hear the selected clip at the song's tempo; Play again stops |
+| Jog click | Load the clip's folder onto the pads, at the page that shows it, with the clip lit white |
+| Back | Return to Song Builder |
+
+Loading a folder from here only changes the pads. The song's own folder stays as it was, and a clip you add from the pads remembers the folder it came from. The white pad stays white until the pads load another folder.
+
+The search reads the library's clips when Arranger scans the library, so it adds no wait of its own; while the library is still being scanned the list waits for it.
+
+**Button LED hints:** Back is lit, and Play while there is a list (green while a clip plays).
 
 ---
 

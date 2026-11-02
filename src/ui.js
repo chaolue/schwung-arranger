@@ -125,6 +125,10 @@ const VIEW_ROOT = "root";
 const VIEW_FOLDER_LIST = "folder_list";
 const VIEW_BUILDER = "builder";
 const VIEW_TRIM = "trim";
+/* Song Builder's Similar list (Shift+Record, or a clip's Edit > Find
+ * Similar), and Record's list of the folders the song's clips come from. */
+const VIEW_SIMILAR = "similar";
+const VIEW_SONG_FOLDERS = "song_folders";
 const VIEW_SONG_BANK = "song_bank";
 const VIEW_PERFORMANCE = "performance_view";
 const VIEW_OPTIONS = "options";
@@ -372,6 +376,9 @@ let folderClipMap = null;
  * folder (opened via the Record button in the Song Builder) rather than to
  * create a new song. Selecting a folder reloads the clip palette from it. */
 let builderChangeFolder = false;
+/* The folder list was opened from Record's list of the song's own folders
+ * (its Browse...), so Back goes back there. */
+let folderPickerFromSongFolders = false;
 
 let currentSong = null;   /* { id, name, source_folder, tempo_bpm, time_signature, sections: [] } */
 let currentSectionIndex = 0;
@@ -2656,7 +2663,7 @@ const PAD_PREVIEW_DELAY_MS = 250; /* delay before pad tap triggers insert previe
  * Setlist / clip names that overflow the row width. */
 const SCROLLABLE_MENU_VIEWS = new Set([
     VIEW_ROOT, VIEW_FOLDER_LIST, VIEW_BUILDER, VIEW_TRIM, VIEW_SONG_SETTINGS, VIEW_SONG_BACKUPS,
-    VIEW_SONG_BANK, VIEW_OPTIONS, VIEW_OPTIONS_DRUMS, VIEW_OPTIONS_INST, VIEW_OPTIONS_KEYS, VIEW_OPTIONS_CLICK, VIEW_OPTIONS_CHAINS,
+    VIEW_SIMILAR, VIEW_SONG_FOLDERS, VIEW_SONG_BANK, VIEW_OPTIONS, VIEW_OPTIONS_DRUMS, VIEW_OPTIONS_INST, VIEW_OPTIONS_KEYS, VIEW_OPTIONS_CLICK, VIEW_OPTIONS_CHAINS,
     VIEW_SETLIST_BANK, VIEW_SETLIST_EDIT,
     VIEW_SETLIST_PICK, VIEW_SETLIST_CLICK, VIEW_SETLIST_SECTIONS, VIEW_SETLIST_SECTION_PICK, VIEW_COPY_TRACK_PICK,
     VIEW_PERF_SETLIST, VIEW_PERFORMANCE,
@@ -5813,7 +5820,8 @@ function updateButtonLEDs() {
                 active.set(MoveBack, WhiteLedFull);
                 active.set(MoveMenu, WhiteLedFull);
                 /* Record (change source folder) is a Drum-track concept. */
-                if (!ledLocked && builderTrack === TRACK_DRUM) active.set(MoveRecord, PureBlue);
+                /* Record changes the folder (not in a locked song); Shift+Record finds similar clips. */
+                if (builderTrack === TRACK_DRUM && (!ledLocked || shiftHeld)) active.set(MoveRecord, PureBlue);
                 /* Row buttons: the selected track's row lights up in its
                  * colour; the others stay dark grey — the same grey used for
                  * an available-but-unset bar on the chord/instrument steps.
@@ -5932,8 +5940,13 @@ function updateButtonLEDs() {
                 break;
             }
             case VIEW_TRIM:
+            case VIEW_SONG_FOLDERS:
                 active.set(MoveBack, WhiteLedFull);
                 active.set(MoveMainButton, WhiteLedFull);
+                break;
+            case VIEW_SIMILAR:
+                active.set(MoveBack, WhiteLedFull);
+                if (similarResults && similarResults.length) active.set(MovePlay, playbackState === "playing" ? PureGreen : White);
                 break;
             case VIEW_SONG_SETTINGS:
             case VIEW_SONG_BACKUPS:
@@ -6282,6 +6295,13 @@ function builderPadColorForIndex(index) {
         ? grooveClips[builderPage * GROOVE_PADS_PER_BANK + slot.slot]
         : fillClips[builderPage * FILL_PADS_PER_BANK + slot.slot];
     if (!c) return 0;
+    return builderClipPadColour(c);
+}
+
+/* A palette clip's pad: its colour, or white for the clip a Similar pick
+ * put there. */
+function builderClipPadColour(c) {
+    if (builderHighlight && folderClipsIndex === builderHighlight.folder && c.path === builderHighlight.path) return White;
     return clipColor(c, false);
 }
 
@@ -6301,7 +6321,7 @@ function drawBuilderLEDs() {
          * lastPadState may already match the desired colour and the dedupe in
          * padColor would otherwise skip the send (the drawer only runs when
          * ledDirtyAll is set, so forcing is safe here). */
-        if (c) padColor(i, clipColor(c, false), true);
+        if (c) padColor(i, builderClipPadColour(c), true);
     }
     /* Track buttons are handled by setButtonLED; step LEDs show section progress. */
 }
@@ -9425,6 +9445,7 @@ function drawTrim() {
     items.push({ key: "kick_note", label: "Limit Note", value: trimPendingKickNote === 0 ? "Off" : String(trimPendingKickNote) });
     items.push({ key: "kick_target", label: "Limit Notes/Bar", value: trimPendingKickTarget === 0 ? "Off" : String(trimPendingKickTarget) });
     items.push({ key: "channel", label: "MIDI Channel", value: trimPendingChannel === 0 ? "Default" : String(trimPendingChannel) });
+    items.push({ key: "similar", label: "Find Similar", value: "" });
     drawMenuList({
         ...LIST_ROW_FIT,
         labelX: 3,
@@ -9503,6 +9524,13 @@ function commitTrim(pending) {
     needsRedraw = true;
 }
 
+/* The Edit screen's rows, by key, in order. */
+function trimFields() {
+    return trimAdvanced
+        ? ["advanced", "start", "start_beat", "end", "end_beat", "guard", "speed", "velocity", "snare_note", "snare_velocity", "kick_note", "kick_target", "channel", "similar"]
+        : ["advanced", "start", "end", "guard", "speed", "velocity", "snare_note", "snare_velocity", "kick_note", "kick_target", "channel", "similar"];
+}
+
 function handleTrimInput(cc, value) {
     const clip = trimClip;
     if (!clip) return;
@@ -9510,9 +9538,7 @@ function handleTrimInput(cc, value) {
     const effMaxBar = Math.max(1, Math.round(maxBar / trimPendingSpeed));
     const bpb = trimBeatsPerBar();
     let selectedIndex = menuStack.getSelectedIndex();
-    const fields = trimAdvanced
-        ? ["advanced", "start", "start_beat", "end", "end_beat", "guard", "speed", "velocity", "snare_note", "snare_velocity", "kick_note", "kick_target", "channel"]
-        : ["advanced", "start", "end", "guard", "speed", "velocity", "snare_note", "snare_velocity", "kick_note", "kick_target", "channel"];
+    const fields = trimFields();
     let field = fields[selectedIndex];
     if (cc === MoveMainKnob) {
         const delta = decodeDelta(value);
@@ -9574,6 +9600,13 @@ function handleTrimInput(cc, value) {
             /* Toggle Advanced Trim directly. */
             trimToggleAdvanced();
             needsRedraw = true;
+            return;
+        }
+        if (field === "similar") {
+            /* Keep the edits (as Back does), then look for clips like this one. */
+            commitTrim();
+            saveCurrentSong();
+            openSimilar(clip);
             return;
         }
         trimEditing = !trimEditing;
@@ -11004,19 +11037,9 @@ function handleFolderListInput(cc, value) {
         const folder = libraryFolders[folderIndex];
         if (builderChangeFolder) {
             /* Re-selecting the source folder for the current song: update the
-             * song's source_folder (full path) and reload the clip palette. */
-            builderChangeFolder = false;
-            if (currentSong) {
-                currentSong.source_folder = folderFullPath(folderIndex);
-                unsavedChanges = true;
-            }
-            currentView = VIEW_BUILDER;
-            menuStack.pop();
-            builderPage = 0;
-            loadFolderClips(folderIndex);
-            stepLedsDirty = true;
-            ledDirtyAll = true;
-            needsRedraw = true;
+             * song's source_folder (full path) and reload the clip palette.
+             * From Record's list of the song's folders, that list closes too. */
+            builderUseFolder(folderIndex, folderPickerFromSongFolders ? 2 : 1);
             return;
         }
         openTextEntry({
@@ -11069,11 +11092,311 @@ function handleFolderListInput(cc, value) {
         menuStack.pop();
         if (builderChangeFolder) {
             builderChangeFolder = false;
-            currentView = VIEW_BUILDER;
+            currentView = folderPickerFromSongFolders ? VIEW_SONG_FOLDERS : VIEW_BUILDER;
+            folderPickerFromSongFolders = false;
         } else {
             currentView = VIEW_SONG_BANK;
         }
         needsRedraw = true;
+    }
+}
+
+/* ── Source folders: Record ─────────────────────────────────────────── */
+
+/* Make `folder` (a full path) the song's own folder -- what its pads load --
+ * first giving every clip that relied on the old one that folder by name.
+ * A clip from the song's folder is saved without one (normalizeSongForSave),
+ * so changing the folder made the engine look for it in the new one. */
+function setSongSourceFolder(folder) {
+    if (!currentSong) return;
+    const old = currentSong.source_folder || "";
+    if (old && old !== folder) {
+        for (const sec of currentSong.sections || []) {
+            for (const c of sec.clips || []) if (!c.placeholder && !c.source_folder) c.source_folder = old;
+        }
+    }
+    currentSong.source_folder = folder;
+    unsavedChanges = true;
+}
+
+/* Back to Song Builder with library folder `folderIndex` on the pads, made
+ * the song's own folder; `pops` menu levels close. */
+function builderUseFolder(folderIndex, pops) {
+    builderChangeFolder = false;
+    folderPickerFromSongFolders = false;
+    setSongSourceFolder(folderFullPath(folderIndex));
+    for (let i = 0; i < pops; i++) menuStack.pop();
+    currentView = VIEW_BUILDER;
+    builderPage = 0;
+    loadFolderClips(folderIndex);
+    stepLedsDirty = true;
+    ledDirtyAll = true;
+    needsRedraw = true;
+}
+
+/* The library folders the song's clips come from (as folder indices), in the
+ * order the song first uses them. */
+function songClipFolders(song) {
+    const out = [];
+    for (const sec of (song && song.sections) || []) {
+        for (const c of sec.clips || []) {
+            if (c.placeholder) continue;
+            const idx = folderIndexForPath(c.source_folder || song.source_folder);
+            if (idx >= 0 && out.indexOf(idx) < 0) out.push(idx);
+        }
+    }
+    return out;
+}
+
+let songFolders = [];        /* VIEW_SONG_FOLDERS' folder indices; Browse... follows them */
+let songFoldersFocus = 0;
+
+/* Record: the folders the song's clips come from, and Browse... for the rest
+ * of the library -- or, with clips from one folder only, the library
+ * straight away. */
+function openSourceFolders() {
+    loadLibraryFolders();
+    const folders = songClipFolders(currentSong);
+    if (folders.length < 2) { openFolderBrowser(false); return; }
+    songFolders = folders;
+    songFoldersFocus = Math.max(0, folders.indexOf(folderClipsIndex));
+    currentView = VIEW_SONG_FOLDERS;
+    menuStack.push({ title: "Source Folder", selectedIndex: 0 });
+    needsRedraw = true;
+}
+
+/* The library's folders, to change the song's (from Record, or its list's
+ * Browse...), opened at the folder on the pads. */
+function openFolderBrowser(fromList) {
+    builderChangeFolder = true;
+    folderPickerFromSongFolders = fromList;
+    currentView = VIEW_FOLDER_LIST;
+    menuStack.push({ title: "Source Folder", selectedIndex: 0 });
+    loadLibraryFolders();
+    folderPickerSelectedStack = [];
+    const curIdx = folderClipsIndex >= 0 ? folderClipsIndex
+        : folderIndexForPath(currentSong ? currentSong.source_folder : "");
+    if (curIdx >= 0) {
+        setFolderPickerToFolder(curIdx);
+    } else {
+        folderPickerPath = [];
+        folderPickerSelectedIndex = 0;
+    }
+    needsRedraw = true;
+}
+
+function drawSongFolders() {
+    drawMenuHeader("Source Folder", "");
+    const items = songFolders.map(i => ({ label: shortSongName(libraryFolders[i] || "") }));
+    items.push({ label: "Browse..." });
+    drawMenuList({
+        items,
+        selectedIndex: songFoldersFocus,
+        getLabel: (item) => item.label,
+        getValue: () => "",
+        maxVisible: 5,
+        labelX: 3,
+        labelGap: 0
+    });
+}
+
+function handleSongFoldersInput(cc, value) {
+    if (cc === MoveMainKnob) {
+        const n = songFolders.length + 1;
+        const next = Math.max(0, Math.min(n - 1, songFoldersFocus + decodeDelta(value)));
+        if (next !== songFoldersFocus) { songFoldersFocus = next; needsRedraw = true; }
+    } else if (cc === MoveMainButton && value > 0) {
+        if (songFoldersFocus >= songFolders.length) openFolderBrowser(true);
+        else builderUseFolder(songFolders[songFoldersFocus], 1);
+    } else if (cc === MoveBack && value > 0) {
+        menuStack.pop();
+        currentView = VIEW_BUILDER;
+        needsRedraw = true;
+    }
+}
+
+/* ── Similar clips: Shift+Record ────────────────────────────────────── */
+
+/* The clip looked for, the engine's answer, and where the list is: the
+ * engine searches the library's fingerprints on its worker (see
+ * run_similar_search in the engine), answering under the request's id.
+ * similarResults is null until it does: [{ folder, path, bars, score,
+ * name }], best first. similarStatus: "" while waiting, else the engine's
+ * status ("ok", "not_found", "no_notes"). */
+let similarClip = null;
+let similarReqId = 0;
+let similarSent = false;
+let similarResults = null;
+let similarStatus = "";
+let similarFocus = 0;
+let similarPolls = 0;
+let similarPreviewing = false;
+const similarFolderScroller = createUniformScroller();
+/* The clip a Similar pick put on the pads: lit white there until the pads
+ * load another folder. { folder, path } */
+let builderHighlight = null;
+
+/* The clip's file as the library scan names it in folder `f` (the path the
+ * engine compares by): the song's own spelling, else the folder's clip of
+ * the same name. */
+function folderClipPath(f, source) {
+    const want = resolveClipSource(source || "", "");
+    let paths = f === folderClipsIndex ? folderClips.map(c => c.path) : [];
+    if (f !== folderClipsIndex && typeof host_module_get_param === "function") {
+        try {
+            const raw = JSON.parse(host_module_get_param("folder_clips_json_" + f) || "[]");
+            paths = raw.map(c => (typeof c === "string") ? c : c.source);
+        } catch (e) {}
+    }
+    if (paths.indexOf(want) >= 0) return want;
+    const leaf = clipDisplayName(want).toLowerCase();
+    return paths.find(p => clipDisplayName(p).toLowerCase() === leaf) || want;
+}
+
+/* Find clips like `clip` (a song clip). */
+function openSimilar(clip) {
+    if (!clip || clip.placeholder) { showPopup("Similar", "Pick a clip first", 1500); return; }
+    loadLibraryFolders();
+    similarClip = clip;
+    similarResults = null;
+    similarStatus = "";
+    similarFocus = 0;
+    similarSent = false;
+    similarPreviewing = false;
+    currentView = VIEW_SIMILAR;
+    menuStack.push({ title: "Similar", selectedIndex: 0 });
+    similarRequest();
+    needsRedraw = true;
+}
+
+/* Ask the engine, once the library's folders are known (they're how the
+ * answer names a folder). */
+function similarRequest() {
+    if (similarSent || !similarClip || libraryFolders.length === 0) return;
+    similarSent = true;
+    const f = folderIndexForPath(similarClip.source_folder || (currentSong ? currentSong.source_folder : ""));
+    if (f < 0) { similarStatus = "not_found"; similarResults = []; return; }
+    similarReqId++;
+    similarPolls = 0;
+    const req = similarReqId + "\t" + f + "\t" + folderClipPath(f, similarClip.source);
+    if (typeof host_module_set_param_blocking === "function") host_module_set_param_blocking("similar_find", req, 100);
+    else if (typeof host_module_set_param === "function") host_module_set_param("similar_find", req);
+}
+
+/* Every tick on the Similar list: send the request once the library is
+ * there, then read the answer (every few ticks) until it's this request's. */
+function tickSimilar() {
+    if (currentView !== VIEW_SIMILAR || similarResults !== null) return;
+    if (!similarSent) {
+        loadLibraryFolders();
+        similarRequest();
+        needsRedraw = true;
+        return;
+    }
+    if (similarPolls++ % 4 !== 0 || typeof host_module_get_param !== "function") return;
+    let ans = null;
+    try { ans = JSON.parse(host_module_get_param("similar_json") || "null"); } catch (e) {}
+    if (!ans || ans.id !== similarReqId) { needsRedraw = true; return; }
+    similarStatus = ans.status || "ok";
+    similarResults = (ans.items || []).map(it => ({
+        folder: it.f, path: it.c, bars: it.b || 1, score: it.s, name: clipDisplayName(it.c)
+    }));
+    needsRedraw = true;
+}
+
+function drawSimilar() {
+    const clip = similarClip;
+    drawMenuHeader(fitHeader("Like " + (clip ? clipShortName(clip) : ""), ""), "");
+    if (similarResults === null) {
+        print(4, LIST_TOP_Y, similarSent ? "Searching" + ".".repeat(1 + Math.floor(Date.now() / 400) % 3)
+                                         : loadingText("library"), 1);
+        return;
+    }
+    if (similarResults.length === 0) {
+        const why = similarStatus === "not_found" ? "Clip not in the library"
+            : similarStatus === "no_notes" ? "No notes to compare" : "Nothing similar found";
+        print(4, LIST_TOP_Y, why, 1);
+        return;
+    }
+    if (similarFocus >= similarResults.length) similarFocus = similarResults.length - 1;
+    drawMenuList({
+        ...LIST_ROW_FIT,
+        labelX: 3,
+        items: similarResults,
+        selectedIndex: similarFocus,
+        getLabel: (r) => clipShortName(r),
+        getValue: (r) => r.score + "%",
+        valueAlignRight: true,
+        labelGap: 2,
+        prioritizeSelectedValue: true,
+        /* Four rows, then the selected clip's folder on the last row's line
+         * (as the Chord Settings' chord line). */
+        maxVisible: 4,
+        listArea: { topY: LIST_TOP_Y, bottomY: CHORD_PICK_LINE_Y - 1 }
+    });
+    const r = similarResults[similarFocus];
+    const line = "in " + shortSongName(libraryFolders[r.folder] || "?");
+    similarFolderScroller.setSelected(line);
+    similarFolderScroller.tick();
+    print(2, CHORD_PICK_LINE_Y, line.length > 21 ? similarFolderScroller.getScrolledText(line, 21) : line, 1);
+}
+
+/* Stop a preview the list started, keeping Song Builder's cursor (which
+ * stopPlayback resets). */
+function similarStopPreview() {
+    if (!similarPreviewing) return;
+    similarPreviewing = false;
+    if (playbackState !== "playing") return;
+    const cursor = builderCursor;
+    stopPlayback();
+    builderCursor = cursor;
+}
+
+/* Leave the list for Song Builder. */
+function similarLeave() {
+    similarStopPreview();
+    menuStack.pop();
+    currentView = VIEW_BUILDER;
+    needsRedraw = true;
+}
+
+/* A pick: its folder onto the pads (only the pads -- the song's own folder
+ * stays as it was), at the page that shows the clip, lit white. */
+function similarLoad(r) {
+    similarLeave();
+    builderTrack = TRACK_DRUM;
+    loadFolderClips(r.folder);
+    const g = grooveClips.findIndex(c => c.path === r.path);
+    const fl = g < 0 ? fillClips.findIndex(c => c.path === r.path) : -1;
+    const page = g >= 0 ? Math.floor(g / GROOVE_PADS_PER_BANK) : (fl >= 0 ? Math.floor(fl / FILL_PADS_PER_BANK) : 0);
+    builderPage = Math.max(0, Math.min(builderPageCount() - 1, page));
+    builderHighlight = { folder: r.folder, path: r.path };
+    showPopup("Pads", shortSongName(libraryFolders[r.folder] || ""), 1500);
+    stepLedsDirty = true;
+    ledDirtyAll = true;
+}
+
+function handleSimilarInput(cc, value) {
+    const list = similarResults || [];
+    if (cc === MoveMainKnob) {
+        const next = Math.max(0, Math.min(list.length - 1, similarFocus + decodeDelta(value)));
+        if (next !== similarFocus) { similarFocus = next; needsRedraw = true; }
+    } else if (cc === MoveMainButton && value > 0) {
+        if (list[similarFocus]) similarLoad(list[similarFocus]);
+    } else if (cc === MovePlay && value > 0) {
+        /* Play hears the selected clip (at the song's tempo); again stops. */
+        if (playbackState === "playing") {
+            similarPreviewing = true;
+            similarStopPreview();
+        } else if (list[similarFocus]) {
+            const r = list[similarFocus];
+            similarPreviewing = true;
+            previewClip({ path: r.path, name: r.name, bars: r.bars, type: inferPartTypeFromFilename(r.path),
+                          source_folder: folderFullPath(r.folder) });
+        }
+        needsRedraw = true;
+    } else if (cc === MoveBack && value > 0) {
+        similarLeave();
     }
 }
 
@@ -11287,22 +11610,17 @@ function handleBuilderInput(cc, value) {
             }
         }
     } else if (cc === MoveRecord && value > 0) {
-        /* Reopen the Source Folder list to change the current song's folder.
-         * Blocked on a locked song. */
-        if (locked) { lockedNotice(); return; }
-        builderChangeFolder = true;
-        currentView = VIEW_FOLDER_LIST;
-        menuStack.push({ title: "Source Folder", selectedIndex: 0 });
-        loadLibraryFolders();
-        folderPickerSelectedStack = [];
-        const curIdx = folderIndexForPath(currentSong ? currentSong.source_folder : "");
-        if (curIdx >= 0) {
-            setFolderPickerToFolder(curIdx);
-        } else {
-            folderPickerPath = [];
-            folderPickerSelectedIndex = 0;
+        /* Shift+Record: clips like the selected one -- only browsing, so a
+         * locked song allows it too. */
+        if (shiftHeld) {
+            const sec = currentSong ? currentSong.sections[builderDisplaySectionIndex()] : null;
+            openSimilar(sec && builderCursor >= 0 ? sec.clips[builderCursor] : null);
+            return;
         }
-        needsRedraw = true;
+        /* Record: change the song's folder -- from the folders its clips
+         * come from, or the library. Blocked on a locked song. */
+        if (locked) { lockedNotice(); return; }
+        openSourceFolders();
     }
 }
 
@@ -14920,11 +15238,16 @@ function previewClip(clip, barOffset) {
     const base = currentSong || newSong(currentSong ? currentSong.source_folder : "");
     const temp = JSON.parse(JSON.stringify(base));
     const bpb = (currentSong && currentSong.time_sig_num > 0) ? currentSong.time_sig_num : 4;
+    /* The clip's folder: a pad's is the pads' folder, which a Similar pick
+     * makes one other than the song's -- and a clip looked for in the song's
+     * folder was found by name anywhere in the library, if at all. */
+    const folder = clip.source_folder || (folderClipsIndex >= 0 ? folderFullPath(folderClipsIndex) : "");
     temp.sections = [{
         id: "preview-" + Date.now(),
         name: "Preview",
         clips: [{
             source: clip.path,
+            source_folder: folder || undefined,
             name: clip.name,
             start_bar: clipStartBar(clip),
             start_beat: 1,
@@ -15811,7 +16134,7 @@ function screenWaitsOnScan() {
     if (pendingSongBankSync) return false;   /* reloads the Song Bank itself, every tick */
     switch (currentView) {
         case VIEW_SONG_BANK: case VIEW_SETLIST_PICK:
-        case VIEW_FOLDER_LIST: case VIEW_JAM_FOLDER:
+        case VIEW_FOLDER_LIST: case VIEW_JAM_FOLDER: case VIEW_SIMILAR:
             return true;
     }
     return pendingLibraryFoldersReload || !!pendingFolderClipLoadName || pendingJamFolderClipLoadIndex >= 0 ||
@@ -16039,6 +16362,7 @@ function upgradeSongSourceFolders(song) {
 let folderClipsIndex = -1;
 
 function loadFolderClips(folderIndex) {
+    if (builderHighlight && builderHighlight.folder !== folderIndex) builderHighlight = null;
     folderClipsIndex = folderIndex;
     folderClips = [];
     grooveClips = [];
@@ -16563,7 +16887,16 @@ export function footerHints() {
             /* A locked song's settings are read-only: only Lock Song clicks. */
             if (songIsLocked()) return songSettingsFocus === 4 ? [["JOG", "SEL"], ["CLK", "UNLOCK"], ["BACK", "OUT"]] : [["JOG", "SEL"], ["BACK", "OUT"]];
             return editMenuHints(songSettingsEditing);
-        case VIEW_TRIM: return editMenuHints(trimEditing);
+        case VIEW_TRIM:
+            if (!trimEditing && trimFields()[menuStack.getSelectedIndex()] === "similar") {
+                return [["JOG", "SEL"], ["CLK", "FIND"], ["BACK", "OUT"]];
+            }
+            return editMenuHints(trimEditing);
+        case VIEW_SONG_FOLDERS: return HINTS_LIST;
+        case VIEW_SIMILAR:
+            /* Back, lit, gives way to Play (as on the knob map): three pairs
+             * with it don't fit. */
+            return similarResults && similarResults.length ? [["CLK", "LOAD"], ["PLAY", "HEAR"]] : [["BACK", "OUT"]];
         case VIEW_INSTRUMENT: return editMenuHints(instrumentEditing);
         case VIEW_INSTRUMENT_BAR: return editMenuHints(itemEditing);
         case VIEW_CHORD_PICK: return editMenuHints(chordPickEditing);
@@ -16634,7 +16967,9 @@ function builderFooterHints() {
     const clk = builderClickAction();
     const first = clk ? ["CLK", clk] : ["MENU", "SET"];
     if (builderTrack === TRACK_DRUM) {
-        if (shiftHeld) return [["CLK", "SET"], ["PLAY", "SONG"], ["BACK", "OUT"]];
+        /* Shift+Record finds clips like the selected one. With Back (lit)
+         * there's no room to say so, so Back gives way. */
+        if (shiftHeld) return [["CLK", "SET"], ["PLAY", "SONG"], ["REC", "FIND"]];
         if (locked) return [["T1", "CHORD"], first, ["BACK", "OUT"]];
         /* A pad fills a selected placeholder rather than adding after it. */
         const dsec = currentSong ? currentSong.sections[builderDisplaySectionIndex()] : null;
@@ -16673,6 +17008,7 @@ globalThis.tick = function() {
     pollBattery();
     tickKeys();
     tickHarmonyPreview();
+    tickSimilar();
     flushInstrumentLive();
     tickPopup();
     {
@@ -16998,6 +17334,8 @@ globalThis.tick = function() {
                 case VIEW_FOLDER_LIST: drawFolderList(); break;
                 case VIEW_BUILDER: drawBuilder(); break;
                 case VIEW_TRIM: drawTrim(); break;
+                case VIEW_SIMILAR: drawSimilar(); break;
+                case VIEW_SONG_FOLDERS: drawSongFolders(); break;
                 case VIEW_SONG_SETTINGS: drawSongSettings(); break;
                 case VIEW_SONG_BACKUPS: drawSongBackups(); break;
                 case VIEW_SONG_BANK: drawSongBank(); break;
@@ -17096,6 +17434,8 @@ function routeCcInput(rawData, cc, value) {
         case VIEW_FOLDER_LIST: handleFolderListInput(cc, value); break;
         case VIEW_BUILDER: handleBuilderInput(cc, value); break;
         case VIEW_TRIM: handleTrimInput(cc, value); break;
+        case VIEW_SIMILAR: handleSimilarInput(cc, value); break;
+        case VIEW_SONG_FOLDERS: handleSongFoldersInput(cc, value); break;
         case VIEW_SONG_SETTINGS: handleSongSettingsInput(cc, value); break;
         case VIEW_SONG_BACKUPS: handleSongBackupsInput(cc, value); break;
         case VIEW_SONG_BANK: handleSongBankInput(cc, value); break;

@@ -71,6 +71,29 @@
           ]
         },
         {
+          "title": "Similar Clips",
+          "lines": [
+            "Shift+Record, or a",
+            "clip's Edit > Find",
+            "Similar: clips like",
+            "the selected one,",
+            "from other folders,",
+            "by rhythm (same",
+            "meter, groove/fill).",
+            "",
+            "Play: hear one.",
+            "Click: its folder",
+            "onto the pads, the",
+            "clip lit white.",
+            "",
+            "Record: the song's",
+            "folders, then",
+            "Browse... for the",
+            "rest (one folder:",
+            "the library)."
+          ]
+        },
+        {
           "title": "Chords",
           "lines": [
             "Track 1 again shows",
