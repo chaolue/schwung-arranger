@@ -31,15 +31,25 @@ H.files.set(SETLISTS + "/c_gig.json", JSON.stringify({ id: "s3", name: "C Gig",
 /* The same song, capo 2: the shapes are Bb's (C sounds from a Bb shape). */
 H.files.set(SETLISTS + "/d_gig.json", JSON.stringify({ id: "s4", name: "D Gig",
     songs: [{ id: "e4", name: "Chords", path: SONGS + "/c.json", click_bars: 0, capo: 2 }] }));
+/* The same song after a 2-bar count-in. */
+H.files.set(SETLISTS + "/e_gig.json", JSON.stringify({ id: "s5", name: "E Gig",
+    songs: [{ id: "e5", name: "Chords", path: SONGS + "/c.json", click_bars: 2 }] }));
+/* Its click file, as if written already (the mock's binary writes fail). */
+H.files.set("/data/UserData/UserLibrary/Arranger/.click-e5-0-4x240t240.mid", "MThd");
 
 /* The engine, for playing: builds confirm at once, and the transport is at
  * `barFrac` while running. */
-let gen = 0, running = false, barFrac = 0;
+let gen = 0, sgen = 0, running = false, barFrac = 0, swaps = 0;
 globalThis.host_module_get_param = (k) => k === "ui_poll" ? JSON.stringify({
-    state: { primary_published_gen: gen, staging_published_gen: 0, running, active_source: "primary" },
-    transport: { running, bar: Math.floor(barFrac) + 1, bar_frac: barFrac, beat: 1, beat_progress: 0,
+    state: { primary_published_gen: gen, staging_published_gen: sgen, running, active_source: "primary" },
+    transport: { running, bar: Math.floor(barFrac) + 1, bar_frac: barFrac, beat: 1, beat_progress: 0, swap_counter: swaps,
                  ticks_per_beat: 240, ticks_per_bar: 960, bpm: 120 } }) : null;
-const onSet = (k, v) => { if (k === "song_json") gen++; if (k === "play") running = true; if (k === "stop") running = false; };
+const onSet = (k, v) => {
+    if (k === "song_json") gen++;
+    if (k === "preload_song_json") sgen++;
+    if (k === "play") running = true;
+    if (k === "stop") running = false;
+};
 for (const f of ["host_module_set_param", "host_module_set_param_blocking"]) {
     const plain = globalThis[f];
     globalThis[f] = (k, v, t) => { onSet(k, v); return plain(k, v, t); };
@@ -158,6 +168,27 @@ check(drawnAt(2, R, "B") && flatAt(2 + fontWidth4x5("B") + 1, R), "capo 2: C sho
 const gX = 2 + fontWidth4x5("B") + 1 + 3 + 1 + fontWidth4x5(" > ") + 1;
 check(drawnAt(gX, R, "G") && minorAt(gX + fontWidth4x5("G") + 1, R), "...and Am as Gm");
 check(findOnRow(R, "KEY C") > 40, "...the key still the one it sounds in (C)");
+
+/* ---- a count-in: as the song takes over, the transport is still the
+ * click's for a moment (at its end, bar 2) -- the count is the song's
+ * start's, not bar 2's ---- */
+cc(BACK, 127); cc(BACK, 0); tick(5);
+jog(-8); jog(2); click();     /* Perform */
+jog(4); click();              /* E Gig */
+tick(30);
+barFrac = 0;
+cc(PLAY, 127); cc(PLAY, 0); tick(10);
+barFrac = 1.97;               /* the click's last beat, until the UI's count-in timer moves on */
+for (let i = 0; i < 400 && findOnRow(23, "CLICK") >= 0; i++) tick();
+tick(2);
+check(running && drawnAt(2, R, "C > A") && drawnAt(secondX("C") + fontWidth4x5("A") + 1 + 5 + 1, R, " 4"),
+      "the song just started (the transport still the click's): C > Am 4, not bar 2's count");
+check(drawnAt(2, 23, "SEC:") && drawnAt(valueX, 23, "INTRO > VERSE"), "...and the Intro, not the Verse");
+swaps++; barFrac = 0.05; tick(3);   /* the engine's swap shows */
+check(drawnAt(secondX("C") + fontWidth4x5("A") + 1 + 5 + 1, R, " 4"), "the swap shows: still 4");
+barFrac = 0.3; tick(3);
+check(drawnAt(secondX("C") + fontWidth4x5("A") + 1 + 5 + 1, R, " 3"), "...then 3, from the song's own position");
+cc(PLAY, 127); cc(PLAY, 0); tick(10);
 
 console.log(`perform display: ${passes} passed, ${failures} failed`);
 if (failures) process.exit(1);

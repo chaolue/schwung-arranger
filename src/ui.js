@@ -2490,6 +2490,11 @@ let perfClickMute = false;          /* true to suppress MIDI output during a pad
 let perfClickStartMs = 0;           /* when the JS count-in started */
 let perfClickTotalMs = 0;           /* total duration of the JS count-in */
 let perfClickSwapCounter = -1;      /* last DSP swap_counter during the click-to-song preload */
+/* The count-in's end, as the UI saw it: the transport's swap_counter then
+ * and when (see perfTransportStillClick). null = not just after one. */
+let perfClickEndSwap = null;
+let perfClickEndMs = 0;
+const PERF_CLICK_END_STALE_MS = 400;
 let perfClickSongStaged = false;    /* true once the real song has been preloaded into DSP staging */
 let perfDisplayIndex = 0;           /* scroll index for the performance info display */
 let perfScrollRow = 0;              /* row offset of the bottom visible pad row (0-based) */
@@ -5525,7 +5530,8 @@ function updateDspState() {
      * Skip while a pad preview is active: the preview is a single-clip
      * audition and following it would reset the builder cursor to the first
      * clip, changing the highlighted clip the user is previewing. */
-    if (playbackState === "playing" && lastDspTransport && lastDspTransport.running && !padPreviewClip && !harmonyPreviewing) {
+    if (playbackState === "playing" && lastDspTransport && lastDspTransport.running && !padPreviewClip && !harmonyPreviewing &&
+        !perfTransportStillClick()) {
         /* Use the fractional bar position (bar_frac, 0-based) so a clip that
          * ends mid-bar (Advanced Trim / speed) switches sections at the exact
          * musical boundary instead of the next integer bar. */
@@ -10612,6 +10618,36 @@ function perfPrintKey(x, y, text) {
     perfPrintRuns(x, y, perfKeyRuns(text));
 }
 
+/* The count-in just handed over to the song (the UI's timer, or the click
+ * timeline's end). */
+function markPerfClickEnd() {
+    perfClickEndSwap = lastDspTransport ? (lastDspTransport.swap_counter || 0) : 0;
+    perfClickEndMs = Date.now();
+}
+
+/* True while the transport is still the count-in's, just after the UI has
+ * moved on to the song: the timer fires at the computed downbeat, and the
+ * engine's swap to the song -- sample-accurate -- shows in the transport a
+ * poll or two later. Until then the transport sits at the click's end (bar
+ * 2 of a 2-bar click), read as bar 2 of the song -- the wrong chord count,
+ * time and section for a moment. So: until the swap shows (swap_counter
+ * moves) a position half a bar or more in is the click's, and the song is at
+ * its start. Never for more than PERF_CLICK_END_STALE_MS, so a swap seen
+ * before the timer (the counter then never moves again) can't hold the
+ * song at its start: half a bar takes longer than that below 300 BPM. */
+function perfTransportStillClick() {
+    if (perfClickEndSwap === null) return false;
+    const t = lastDspTransport;
+    if (Date.now() - perfClickEndMs > PERF_CLICK_END_STALE_MS ||
+        (t && (t.swap_counter || 0) !== perfClickEndSwap)) {
+        perfClickEndSwap = null;
+        return false;
+    }
+    if (!t) return false;
+    const frac = typeof t.bar_frac === "number" ? t.bar_frac : (t.bar || 1) - 1;
+    return frac >= 0.5;
+}
+
 /* Perform's chord line: the chord playing and the next one it changes
  * to -- stopped, or in the count-in, the chord the section about to play
  * starts on and the one after. As the engine plays them, a chord lasts to
@@ -10633,7 +10669,7 @@ function perfChordLine(song, key, capo) {
     const at = (e) => e.bar + (e.beat - 1) / bpb;
     let si, pos = 0;
     if (perfPlaying && !perfClickPlaying && lastDspTransport && lastDspTransport.running) {
-        const frac = (typeof lastDspTransport.bar_frac === "number" ? lastDspTransport.bar_frac
+        const frac = (perfTransportStillClick() ? 0 : typeof lastDspTransport.bar_frac === "number" ? lastDspTransport.bar_frac
             : (lastDspTransport.bar || 1) - 1) + previewBarOffset;
         let start = 0;
         for (si = 0; si < song.sections.length - 1; si++) {
@@ -10844,7 +10880,7 @@ function drawPerformance() {
     const songTotal = fullSong ? songDurationSec(fullSong) : 0;
     let curSec = 0;
     if (perfPlaying && !perfClickPlaying && lastDspTransport && lastDspTransport.running) {
-        const dspBarFrac = (typeof lastDspTransport.bar_frac === "number")
+        const dspBarFrac = perfTransportStillClick() ? 0 : (typeof lastDspTransport.bar_frac === "number")
             ? lastDspTransport.bar_frac : ((lastDspTransport.bar || 1) - 1);
         const fullBarFrac = dspBarFrac + previewBarOffset;
         const bpm = lastDspTransport.bpm || (fullSong ? (fullSong.tempo_bpm || 120) : 120);
@@ -16076,6 +16112,7 @@ function perfTick() {
             logDebug("perfTick: timer-based click transition");
             perfClickPlaying = false;
             perfClickMute = false;
+            markPerfClickEnd();
             /* The real song was preloaded into DSP staging during the click,
              * so the DSP auto-swaps to it sample-accurately at the click's
              * end. We must NOT call playCurrentSong() here — that would issue
@@ -16109,6 +16146,7 @@ function perfTick() {
             logDebug("perfTick: DSP click end fallback");
             perfClickPlaying = false;
             perfClickMute = false;
+            markPerfClickEnd();
             if (!perfClickSongStaged) {
                 /* Staging wasn't ready: blocking rebuild (rare fallback). */
                 if (perfLoadSong(perfSongIndex)) {
