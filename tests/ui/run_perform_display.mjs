@@ -19,6 +19,27 @@ const songs = (key) => [
     { id: "e2", name: "Another Song", path: SONGS + "/b.json", click_bars: 0 }];
 H.files.set(SETLISTS + "/a_gig.json", JSON.stringify({ id: "s1", name: "A Gig", songs: songs(null) }));
 H.files.set(SETLISTS + "/b_gig.json", JSON.stringify({ id: "s2", name: "B Gig", songs: songs("D#") }));
+/* A song with chords: C > Am in the Intro, F > Bb7 in the Verse. */
+H.files.set(SONGS + "/c.json", JSON.stringify({ name: "Chords", key: "C", tempo_bpm: 120, time_sig_num: 4, time_sig_den: 4,
+    sections: [{ name: "Intro", clips: [{ source: "Grooves/beat.mid", name: "beat", start_bar: 0, end_bar: 2 }],
+                 chords: [{ root: "C", quality: "maj" }, { root: "A", quality: "min" }] },
+               { name: "Verse", clips: [{ source: "Grooves/beat.mid", name: "beat", start_bar: 0, end_bar: 2 }],
+                 chords: [{ root: "F", quality: "maj" }, { root: "A#", quality: "7" }] }] }));
+H.files.set(SETLISTS + "/c_gig.json", JSON.stringify({ id: "s3", name: "C Gig",
+    songs: [{ id: "e3", name: "Chords", path: SONGS + "/c.json", click_bars: 0 }] }));
+
+/* The engine, for playing: builds confirm at once, and the transport is at
+ * `barFrac` while running. */
+let gen = 0, running = false, barFrac = 0;
+globalThis.host_module_get_param = (k) => k === "ui_poll" ? JSON.stringify({
+    state: { primary_published_gen: gen, staging_published_gen: 0, running, active_source: "primary" },
+    transport: { running, bar: Math.floor(barFrac) + 1, bar_frac: barFrac, beat: 1, beat_progress: 0,
+                 ticks_per_beat: 240, ticks_per_bar: 960, bpm: 120 } }) : null;
+const onSet = (k, v) => { if (k === "song_json") gen++; if (k === "play") running = true; if (k === "stop") running = false; };
+for (const f of ["host_module_set_param", "host_module_set_param_blocking"]) {
+    const plain = globalThis[f];
+    globalThis[f] = (k, v, t) => { onSet(k, v); return plain(k, v, t); };
+}
 
 await import('./ui_test.mjs');
 const g = globalThis;
@@ -60,6 +81,10 @@ function findOnRow(y, text) {
 }
 const FLAT = ["#..", "#..", "###", "#.#", "###"];
 const flatAt = (x, y) => FLAT.every((row, r) => [...row].every((c, i) => fb[(y + r) * W + x + i] === (c === "#" ? 1 : 0)));
+const MINOR = [".....", ".....", "##.#.", "#.#.#", "#.#.#"];
+const minorAt = (x, y) => MINOR.every((row, r) => [...row].every((c, i) => fb[(y + r) * W + x + i] === (c === "#" ? 1 : 0)));
+/* Where the header's second chord starts, after "<first> > ". */
+const secondX = (first) => 2 + fontWidth4x5(first) + 1 + fontWidth4x5(" > ") + 1;
 const valueX = 2 + Math.max(fontWidth4x5("SEC:"), fontWidth4x5("NEXT:")) + 4;
 
 g.init();
@@ -90,6 +115,28 @@ tick(30);
 const ebX = findOnRow(1, "KEY E");
 check(ebX > 40 && flatAt(ebX + fontWidth4x5("KEY E") + 1, 1), "the setlist's key for the song: Eb (" + ebX + ")");
 check(findOnRow(1, "KEY B") < 0, "...not the song's own Bb");
+
+/* ---- a song with chords: the header shows the chord and the next ---- */
+cc(BACK, 127); cc(BACK, 0); tick(5);
+jog(-8); jog(2); click();     /* Perform */
+jog(2); click();              /* C Gig */
+tick(30);
+check(findOnRow(1, "PERFORM") < 0, "with chords, no Perform title");
+check(drawnAt(2, 1, "C > A"), "stopped: the chord the song starts on > the next (C > A...)");
+check(minorAt(secondX("C") + fontWidth4x5("A") + 1, 1), "...Am, its m drawn small (not AM)");
+check(findOnRow(1, "KEY C") > 40, "...the key still at the right");
+
+const PLAY = 85;
+cc(PLAY, 127); cc(PLAY, 0); tick(20);
+barFrac = 1.5; tick(10);     /* the Intro's second bar */
+check(drawnAt(2, 1, "A") && minorAt(2 + fontWidth4x5("A") + 1, 1), "playing bar 2: Am first: " + running);
+const afterAm = 2 + fontWidth4x5("A") + 1 + 5 + 1;
+check(drawnAt(afterAm, 1, " > F"), "...then the next section's first chord, F");
+barFrac = 2.5; tick(10);     /* the Verse's first bar */
+const bbFlatX = secondX("F") + fontWidth4x5("B") + 1;
+check(drawnAt(2, 1, "F > B") && flatAt(bbFlatX, 1) && drawnAt(bbFlatX + 4, 1, "7"),
+      "the Verse: F > A#7, as the key spells it: Bb7, its flat small");
+cc(PLAY, 127); cc(PLAY, 0); tick(10);
 
 console.log(`perform display: ${passes} passed, ${failures} failed`);
 if (failures) process.exit(1);

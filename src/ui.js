@@ -10550,15 +10550,41 @@ function perfKeyRuns(text) {
     return runs;
 }
 const PERF_FLAT_W = 3;
+/* A chord's minor "m", drawn small as the flat is, so Am doesn't read AM in
+ * the capitals-only face. */
+const PERF_MINOR = { minor: true };
+const PERF_MINOR_W = 5;
+/* A chord name's runs, as perfKeyRuns: its root (a flat drawn small), a
+ * minor m drawn small (not maj's), and the rest -- every b in it a flat
+ * (7b9, m7b5, /Bb). */
+function perfChordRuns(label) {
+    const m = /^([A-G])([#b]?)(.*)$/.exec(String(label));
+    if (!m) return perfKeyRuns(label);
+    const runs = [m[1] + (m[2] === "#" ? "#" : "")];
+    if (m[2] === "b") runs.push(null);
+    let rest = m[3];
+    if (rest[0] === "m" && rest[1] !== "a") { runs.push(PERF_MINOR); rest = rest.slice(1); }
+    let cur = "";
+    for (const ch of rest) {
+        if (ch === "b") { if (cur) runs.push(cur); runs.push(null); cur = ""; }
+        else cur += ch;
+    }
+    if (cur) runs.push(cur);
+    return runs;
+}
 /* Pixel width, as perfTextWidth: the last glyph's trailing gap left out. */
-function perfKeyWidth(text) {
-    const runs = perfKeyRuns(text);
+function perfRunsWidth(runs) {
     let w = 0;
-    runs.forEach((r, i) => { w += (r === null ? PERF_FLAT_W : perfTextWidth(r)) + (i < runs.length - 1 ? 1 : 0); });
+    runs.forEach((r, i) => {
+        w += (r === null ? PERF_FLAT_W : r === PERF_MINOR ? PERF_MINOR_W : perfTextWidth(r)) + (i < runs.length - 1 ? 1 : 0);
+    });
     return w;
 }
-function perfPrintKey(x, y, text) {
-    for (const r of perfKeyRuns(text)) {
+function perfKeyWidth(text) {
+    return perfRunsWidth(perfKeyRuns(text));
+}
+function perfPrintRuns(x, y, runs) {
+    for (const r of runs) {
         if (r === null) {
             /* #.. / #.. / ### / #.# / ### */
             fill_rect(x, y, 1, 5, 1);
@@ -10566,11 +10592,68 @@ function perfPrintKey(x, y, text) {
             fill_rect(x + 1, y + 4, 2, 1, 1);
             fill_rect(x + 2, y + 3, 1, 1, 1);
             x += PERF_FLAT_W + 1;
+        } else if (r === PERF_MINOR) {
+            /* (blank) / (blank) / ##.#. / #.#.# / #.#.# */
+            fill_rect(x, y + 2, 1, 3, 1);
+            fill_rect(x + 1, y + 2, 1, 1, 1);
+            fill_rect(x + 2, y + 3, 1, 2, 1);
+            fill_rect(x + 3, y + 2, 1, 1, 1);
+            fill_rect(x + 4, y + 3, 1, 2, 1);
+            x += PERF_MINOR_W + 1;
         } else {
             perfPrint(x, y, r, 1);
             x += perfTextWidth(r) + 1;
         }
     }
+}
+function perfPrintKey(x, y, text) {
+    perfPrintRuns(x, y, perfKeyRuns(text));
+}
+
+/* Perform's header chords: the chord playing and the next one it changes
+ * to -- stopped, or in the count-in, the chord the section about to play
+ * starts on and the one after. As the engine plays them, a chord lasts to
+ * the next one in its section, and a section starts with none until its
+ * first. { cur, next } labels (cur "N.C." where none sounds, next "" with
+ * none to come), or null for a song without chords. */
+function perfHeaderChords(song, key) {
+    if (!song || !Array.isArray(song.sections)) return null;
+    const events = song.sections.map(sectionChordEvents);
+    if (!events.some(e => e.length)) return null;
+    const bpb = (song.time_sig_num > 0) ? song.time_sig_num : 4;
+    const at = (e) => e.bar + (e.beat - 1) / bpb;
+    let si, pos = 0;
+    if (perfPlaying && !perfClickPlaying && lastDspTransport && lastDspTransport.running) {
+        const frac = (typeof lastDspTransport.bar_frac === "number" ? lastDspTransport.bar_frac
+            : (lastDspTransport.bar || 1) - 1) + previewBarOffset;
+        let start = 0;
+        for (si = 0; si < song.sections.length - 1; si++) {
+            const len = sectionBars(song.sections[si]);
+            if (frac < start + len) break;
+            start += len;
+        }
+        pos = frac - start;
+    } else if (perfClickPlaying) {
+        si = 0;
+    } else {
+        si = perfSelectedSection >= 0 ? perfSelectedSection : playbackSectionIndex;
+    }
+    si = Math.max(0, Math.min(song.sections.length - 1, si || 0));
+    const here = events[si];
+    let cur = null;
+    for (const e of here) if (at(e) <= pos + 1e-6) cur = e.chord;
+    const curLabel = cur && !cur.none ? chordLabel(cur, key) : "N.C.";
+    /* The next change: later in this section, else in the section to come
+     * (this one again, for a queued repeat). */
+    const nextSec = perfPlaying && !perfClickPlaying ? perfNextSectionIndex() : si + 1;
+    const later = here.filter(e => at(e) > pos + 1e-6)
+        .concat(nextSec >= 0 && nextSec < events.length ? events[nextSec] : []);
+    let next = "";
+    for (const e of later) {
+        const l = e.chord.none ? "N.C." : chordLabel(e.chord, key);
+        if (l !== curLabel) { next = l; break; }
+    }
+    return { cur: curLabel, next };
 }
 
 /* Pixel width of `text` as perfPrint draws it. */
@@ -10683,15 +10766,28 @@ function drawPerformance() {
             " perfSelected=" + perfSelectedSection + " playbackSection=" + playbackSectionIndex);
     }
 
-    /* The header: Perform, and at its right the key the song plays in (a
+    /* The header: the chord playing > the next one (Perform, for a song
+     * without chords), and at its right the key the song plays in (a
      * setlist's own key for it, if set) and the battery. */
     const entry = currentSetlist && perfSongIndex >= 0 ? currentSetlist.songs[perfSongIndex] : null;
     const playKey = entry && KEYS.indexOf(entry.key) >= 0 ? entry.key : ((displaySong && displaySong.key) || DEFAULT_KEY);
-    drawMenuHeader("Perform", headerRightWithBattery(""));
+    const chords = perfHeaderChords(displaySong, playKey);
+    drawMenuHeader(chords ? "" : "Perform", headerRightWithBattery(""));
     drawHeaderBattery();
     const keyText = "Key " + keyLabel(playKey);
     const keyRight = SCREEN_WIDTH - 3 - (batteryLevel !== null ? batteryBadgeWidth() + 4 : 0);
-    perfPrintKey(keyRight - perfKeyWidth(keyText) + 1, 1, keyText);
+    const keyX = keyRight - perfKeyWidth(keyText) + 1;
+    perfPrintKey(keyX, 1, keyText);
+    if (chords) {
+        /* Both if they fit before the key, else the one playing (trimmed, as
+         * a last resort). */
+        const room = keyX - 4 - 2;
+        const cur = perfChordRuns(chords.cur);
+        let runs = chords.next ? cur.concat([" > "], perfChordRuns(chords.next)) : cur;
+        if (perfRunsWidth(runs) > room) runs = cur;
+        while (runs.length > 1 && perfRunsWidth(runs) > room) runs = runs.slice(0, -1);
+        perfPrintRuns(2, 1, runs);
+    }
 
     /* Below it the song; the section playing > the next one; the next song.
      * Each line scrolls on its own so long names marquee instead of being

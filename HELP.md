@@ -576,8 +576,17 @@ is skipped.
 
 Play through a setlist.
 
-The display shows, under a **Perform** header that carries the song's key
+The display shows, under a header that carries the chords, the song's key
 (the setlist's key for it, if set) and the battery:
+
+The header's left side shows the chord playing and the next one it changes
+to, e.g. **C > Am**. Stopped, or in the count-in, it shows the chord the
+section about to play starts on and the one after. As the instruments play
+them, a chord lasts until the next one in its section, so a section with no
+chord on its first beat shows **N.C.** until its first. With a pair too long
+to fit before the key, only the chord playing shows. A song without chords
+keeps the **Perform** title there. Minor's m and a flat are drawn small
+(the header's letters are all capitals), so Am doesn't read as AM.
 
 | Line | Shows |
 |------|-------|
