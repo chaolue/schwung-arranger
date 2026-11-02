@@ -27,6 +27,9 @@ H.files.set(SONGS + "/c.json", JSON.stringify({ name: "Chords", key: "C", tempo_
                  chords: [{ root: "F", quality: "maj" }, { root: "A#", quality: "7" }] }] }));
 H.files.set(SETLISTS + "/c_gig.json", JSON.stringify({ id: "s3", name: "C Gig",
     songs: [{ id: "e3", name: "Chords", path: SONGS + "/c.json", click_bars: 0 }] }));
+/* The same song, capo 2: the shapes are Bb's (C sounds from a Bb shape). */
+H.files.set(SETLISTS + "/d_gig.json", JSON.stringify({ id: "s4", name: "D Gig",
+    songs: [{ id: "e4", name: "Chords", path: SONGS + "/c.json", click_bars: 0, capo: 2 }] }));
 
 /* The engine, for playing: builds confirm at once, and the transport is at
  * `barFrac` while running. */
@@ -125,18 +128,33 @@ check(findOnRow(1, "PERFORM") < 0, "with chords, no Perform title");
 check(drawnAt(2, 1, "C > A"), "stopped: the chord the song starts on > the next (C > A...)");
 check(minorAt(secondX("C") + fontWidth4x5("A") + 1, 1), "...Am, its m drawn small (not AM)");
 check(findOnRow(1, "KEY C") > 40, "...the key still at the right");
+check(findOnRow(1, " 4") < 0 && findOnRow(1, " 1") < 0, "...no beat count while stopped");
 
 const PLAY = 85;
 cc(PLAY, 127); cc(PLAY, 0); tick(20);
-barFrac = 1.5; tick(10);     /* the Intro's second bar */
+barFrac = 0.25; tick(10);    /* the Intro's first bar, beat 2 */
+check(drawnAt(2, 1, "C > A") && drawnAt(secondX("C") + fontWidth4x5("A") + 1 + 5 + 1, 1, " 3"),
+      "playing beat 2: C > Am 3 (beats to the change)");
+barFrac = 1.5; tick(10);     /* the Intro's second bar, beat 3 */
 check(drawnAt(2, 1, "A") && minorAt(2 + fontWidth4x5("A") + 1, 1), "playing bar 2: Am first: " + running);
 const afterAm = 2 + fontWidth4x5("A") + 1 + 5 + 1;
-check(drawnAt(afterAm, 1, " > F"), "...then the next section's first chord, F");
+check(drawnAt(afterAm, 1, " > F 2"), "...then the next section's first chord, F, 2 beats away");
 barFrac = 2.5; tick(10);     /* the Verse's first bar */
 const bbFlatX = secondX("F") + fontWidth4x5("B") + 1;
 check(drawnAt(2, 1, "F > B") && flatAt(bbFlatX, 1) && drawnAt(bbFlatX + 4, 1, "7"),
       "the Verse: F > A#7, as the key spells it: Bb7, its flat small");
+check(drawnAt(bbFlatX + 4, 1, "7 2"), "...2 beats away");
 cc(PLAY, 127); cc(PLAY, 0); tick(10);
+
+/* ---- capo 2: the chords as Bb shapes, the key as it sounds ---- */
+cc(BACK, 127); cc(BACK, 0); tick(5);
+jog(-8); jog(2); click();     /* Perform */
+jog(3); click();              /* D Gig */
+tick(30);
+check(drawnAt(2, 1, "B") && flatAt(2 + fontWidth4x5("B") + 1, 1), "capo 2: C shows as Bb");
+const gX = 2 + fontWidth4x5("B") + 1 + 3 + 1 + fontWidth4x5(" > ") + 1;
+check(drawnAt(gX, 1, "G") && minorAt(gX + fontWidth4x5("G") + 1, 1), "...and Am as Gm");
+check(findOnRow(1, "KEY C") > 40, "...the key still the one it sounds in (C)");
 
 console.log(`perform display: ${passes} passed, ${failures} failed`);
 if (failures) process.exit(1);

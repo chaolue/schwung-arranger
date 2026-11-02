@@ -546,6 +546,7 @@ Perform plays the setlist's version.
 | Sound | **On**: the click track plays the count-in, on its output, channel and notes (see **Options: Click**). **Off**: a silent count-in (pad flashes only) |
 | Stop On End | If Yes, playback stops when this song finishes and the next song is selected |
 | Key | **Song (x)** plays the song's own key; any other key transposes its chords (and instrument parts) for this setlist. Turning back to the song's key clears it |
+| Capo | **Off**, or the fret (1–11) a guitarist puts a capo on: Perform's header then shows the chords as the shapes played there (capo 2 on a song in A shows G, C, D...). It changes only what's shown, not what plays; the header's key stays the key the song sounds in |
 | Tempo | **Song (x)** plays the song's own tempo; or a tempo of its own, 20–300. Turning back to the song's tempo clears it |
 | Sections | **Song** plays the sections in the song's order; **N set** is this setlist's own order (see below) |
 | Knobs | This song's own knob mappings: **Setlist** while it uses the setlist's, or how many it overrides |
@@ -580,11 +581,16 @@ The display shows, under a header that carries the chords, the song's key
 (the setlist's key for it, if set) and the battery:
 
 The header's left side shows the chord playing and the next one it changes
-to, e.g. **C > Am**. Stopped, or in the count-in, it shows the chord the
-section about to play starts on and the one after. As the instruments play
+to, e.g. **C > Am 3**. While playing, the number counts the beats to the
+change down, counting the beat you're in: across a bar of 4/4 it reads
+4, 3, 2, 1, and the change lands as the 1 ends. Stopped, or in the count-in,
+it shows the chord the section about to play starts on and the one after,
+with no count. With a **Capo** set for the song in the setlist, the chords
+are the shapes played at that fret; the key stays the one the song sounds
+in. As the instruments play
 them, a chord lasts until the next one in its section, so a section with no
-chord on its first beat shows **N.C.** until its first. With a pair too long
-to fit before the key, only the chord playing shows. A song without chords
+chord on its first beat shows **N.C.** until its first. When it all doesn't fit
+before the key, the count goes first, then the next chord. A song without chords
 keeps the **Perform** title there. Minor's m and a flat are drawn small
 (the header's letters are all capitals), so Am doesn't read as AM.
 

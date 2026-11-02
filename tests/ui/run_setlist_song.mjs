@@ -1,5 +1,5 @@
 /* A setlist's own key, tempo and section order for a song (Setlist Edit >
- * a song > Key / Tempo / Sections), through the real src/ui.js: the screens
+ * a song > Key / Capo / Tempo / Sections), through the real src/ui.js: the screens
  * that set them, what Perform then plays, and that the song file itself is
  * never changed. */
 import * as H from './host_mock.mjs';
@@ -35,8 +35,8 @@ tick(3);
 jog(-8); jog(1); click();     /* Setlists */
 jog(1); click();              /* Gig */
 click();                      /* Song A -> its settings */
-check(H.printed.includes("Key") && H.printed.includes("Song (C)") && H.printed.includes("Song (120)"),
-      "Key and Tempo rows show the song's own: " + JSON.stringify(H.printed));
+check(H.printed.includes("Key") && H.printed.includes("Song (C)"),
+      "the Key row shows the song's own: " + JSON.stringify(H.printed));
 
 /* Key: D, then back to C, which is the song's own again (no edit). */
 jog(3); click(); jog(2);
@@ -46,8 +46,20 @@ check(entry().key === undefined, "back at the song's key there is no edit: " + J
 jog(5);
 check(entry().key === "F", "Key F");
 click();
-/* Tempo: 132. */
-jog(1); click(); jog(12); click();
+/* Capo: Off, up to 2; down past Off stays Off (no edit). */
+jog(1);
+check(H.printed.includes("Capo") && H.printed.includes("Off"), "Capo row, Off: " + JSON.stringify(H.printed));
+click(); jog(2);
+check(entry().capo === 2, "Capo 2 saved: " + JSON.stringify(entry()));
+jog(-5);
+check(entry().capo === undefined, "Off again: no capo stored: " + JSON.stringify(entry()));
+jog(3);
+click();
+check(entry().capo === 3, "Capo 3");
+/* Tempo: the song's own, then 132. */
+jog(1);
+check(H.printed.includes("Song (120)"), "the Tempo row shows the song's own: " + JSON.stringify(H.printed));
+click(); jog(12); click();
 check(entry().tempo_bpm === 132, "Tempo 132 saved: " + JSON.stringify(entry()));
 
 /* Sections: Verse, Chorus, Bridge. */

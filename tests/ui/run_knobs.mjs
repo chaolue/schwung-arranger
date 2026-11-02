@@ -94,7 +94,7 @@ check(saved().knobs[0].value === "0.55", "...and saves it as the setlist's value
 back();                       /* to Setlist Edit */
 jog(-2); click();             /* Song B -> its settings */
 H.printed.length = 0;
-jog(6);                       /* Knobs: the last row, below Key, Tempo and Sections */
+jog(7);                       /* Knobs: the last row, below Key, Capo, Tempo and Sections */
 check(H.printed.includes("Knobs") && H.printed.some(t => /^Se/.test(t)), "the song's settings have a Knobs row, inheriting: " + JSON.stringify(H.printed));
 click();                      /* Knobs row */
 check(H.printed.some(t => /^1 \(C1 Cutoff\)/.test(t)), "an inherited knob shows in parentheses: " + JSON.stringify(H.printed));

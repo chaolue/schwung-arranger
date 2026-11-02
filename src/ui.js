@@ -10456,6 +10456,7 @@ const SETLIST_SONG_ROWS = [
     { key: "sound", label: "Click Sound" },
     { key: "stop", label: "Stop At End" },
     { key: "skey", label: "Key" },
+    { key: "capo", label: "Capo" },
     { key: "tempo", label: "Tempo" },
     { key: "sections", label: "Sections", opens: true },
     { key: "knobs", label: "Knobs", opens: true }
@@ -10482,6 +10483,7 @@ function setlistSongRowValue(entry, key) {
     if (key === "sound") return clickSoundOn(entry) ? "On" : "Off";
     if (key === "stop") return entry && entry.stop_after_finish ? "Yes" : "No";
     if (key === "skey") return entry && entry.key ? keyLabel(entry.key) : "Song (" + keyLabel((song && song.key) || DEFAULT_KEY) + ")";
+    if (key === "capo") return entry && entry.capo > 0 ? String(entry.capo) : "Off";
     if (key === "tempo") return entry && entry.tempo_bpm ? String(entry.tempo_bpm) : "Song (" + ((song && song.tempo_bpm) || 120) + ")";
     if (key === "sections") return entry && Array.isArray(entry.sections) ? setlistSectionIndices(song, entry).length + " set" : "Song";
     if (key === "knobs") return knobOverrideCount(entry) ? knobOverrideCount(entry) + " own" : "Setlist";
@@ -10614,9 +10616,16 @@ function perfPrintKey(x, y, text) {
  * to -- stopped, or in the count-in, the chord the section about to play
  * starts on and the one after. As the engine plays them, a chord lasts to
  * the next one in its section, and a section starts with none until its
- * first. { cur, next } labels (cur "N.C." where none sounds, next "" with
- * none to come), or null for a song without chords. */
-function perfHeaderChords(song, key) {
+ * first. With a capo (the setlist's, for the song) they're the shapes
+ * played there: capo 2 on a song in A shows G's chords, spelt as G writes
+ * them. { cur, next, beats } -- labels (cur "N.C." where none sounds, next
+ * "" with none to come) and, while playing, the beats until the next (the
+ * beat it's in counted: 4, 3, 2, 1 across a bar); null for a song without
+ * chords. */
+function perfHeaderChords(song, key, capo) {
+    const shift = capo > 0 ? -capo : 0;
+    if (shift) key = KEYS[((KEYS.indexOf(key) + shift) % 12 + 12) % 12] || key;
+    const label = (c) => c.none ? "N.C." : chordLabel(shift ? transposeChord(c, shift) : c, key);
     if (!song || !Array.isArray(song.sections)) return null;
     const events = song.sections.map(sectionChordEvents);
     if (!events.some(e => e.length)) return null;
@@ -10642,18 +10651,25 @@ function perfHeaderChords(song, key) {
     const here = events[si];
     let cur = null;
     for (const e of here) if (at(e) <= pos + 1e-6) cur = e.chord;
-    const curLabel = cur && !cur.none ? chordLabel(cur, key) : "N.C.";
+    const curLabel = cur ? label(cur) : "N.C.";
     /* The next change: later in this section, else in the section to come
-     * (this one again, for a queued repeat). */
-    const nextSec = perfPlaying && !perfClickPlaying ? perfNextSectionIndex() : si + 1;
-    const later = here.filter(e => at(e) > pos + 1e-6)
-        .concat(nextSec >= 0 && nextSec < events.length ? events[nextSec] : []);
-    let next = "";
-    for (const e of later) {
-        const l = e.chord.none ? "N.C." : chordLabel(e.chord, key);
-        if (l !== curLabel) { next = l; break; }
+     * (this one again, for a queued repeat) -- each with how far ahead it is,
+     * in bars. */
+    const playing = perfPlaying && !perfClickPlaying;
+    const nextSec = playing ? perfNextSectionIndex() : si + 1;
+    const rest = sectionBars(song.sections[si]) - pos;
+    const later = here.filter(e => at(e) > pos + 1e-6).map(e => ({ e, ahead: at(e) - pos }))
+        .concat((nextSec >= 0 && nextSec < events.length ? events[nextSec] : []).map(e => ({ e, ahead: rest + at(e) })));
+    let next = "", beats = 0;
+    for (const { e, ahead } of later) {
+        const l = label(e.chord);
+        if (l !== curLabel) {
+            next = l;
+            if (playing) beats = Math.max(1, Math.ceil(ahead * bpb - 1e-6));
+            break;
+        }
     }
-    return { cur: curLabel, next };
+    return { cur: curLabel, next, beats };
 }
 
 /* Pixel width of `text` as perfPrint draws it. */
@@ -10771,7 +10787,7 @@ function drawPerformance() {
      * setlist's own key for it, if set) and the battery. */
     const entry = currentSetlist && perfSongIndex >= 0 ? currentSetlist.songs[perfSongIndex] : null;
     const playKey = entry && KEYS.indexOf(entry.key) >= 0 ? entry.key : ((displaySong && displaySong.key) || DEFAULT_KEY);
-    const chords = perfHeaderChords(displaySong, playKey);
+    const chords = perfHeaderChords(displaySong, playKey, entry ? entry.capo : 0);
     drawMenuHeader(chords ? "" : "Perform", headerRightWithBattery(""));
     drawHeaderBattery();
     const keyText = "Key " + keyLabel(playKey);
@@ -10779,11 +10795,13 @@ function drawPerformance() {
     const keyX = keyRight - perfKeyWidth(keyText) + 1;
     perfPrintKey(keyX, 1, keyText);
     if (chords) {
-        /* Both if they fit before the key, else the one playing (trimmed, as
-         * a last resort). */
+        /* Both and the beats to the next if they fit before the key, else
+         * both, else the one playing (trimmed, as a last resort). */
         const room = keyX - 4 - 2;
         const cur = perfChordRuns(chords.cur);
-        let runs = chords.next ? cur.concat([" > "], perfChordRuns(chords.next)) : cur;
+        const both = chords.next ? cur.concat([" > "], perfChordRuns(chords.next)) : cur;
+        let runs = chords.beats ? both.concat([" " + chords.beats]) : both;
+        if (perfRunsWidth(runs) > room) runs = both;
         if (perfRunsWidth(runs) > room) runs = cur;
         while (runs.length > 1 && perfRunsWidth(runs) > room) runs = runs.slice(0, -1);
         perfPrintRuns(2, 1, runs);
@@ -12536,6 +12554,11 @@ function handleSetlistClickInput(cc, value) {
                 setSetlistStopAfterFinish(currentSetlist, setlistSongIndex, !(entry.stop_after_finish || false));
             } else if (row.key === "skey") {
                 stepSetlistKey(entry, delta);
+                saveSetlist(currentSetlist);
+            } else if (row.key === "capo") {
+                /* Off, frets 1-11: Perform shows the chords as shapes played there. */
+                const capo = Math.max(0, Math.min(11, (entry.capo || 0) + delta));
+                if (capo) entry.capo = capo; else delete entry.capo;
                 saveSetlist(currentSetlist);
             } else if (row.key === "tempo") {
                 stepSetlistTempo(entry, delta);

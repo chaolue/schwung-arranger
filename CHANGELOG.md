@@ -93,6 +93,11 @@
   of the Perform title, beside the key; stopped, the chord the section about
   to play starts on and the one after. A song without chords keeps the
   title. Minor's m is drawn small, as a flat is, so Am doesn't read AM.
+- While playing, the header counts the beats to the next chord down after
+  it (**C > Am 3**).
+- **Capo** (Setlist Edit > a song): the fret a guitarist's capo is on.
+  Perform's header shows the chords as the shapes played there; the key
+  stays the one the song sounds in.
 - A knob on a module's own presets (its preset browser's parameter -- an
   SF2's programs, say) shows the preset's name in the popup and the Knobs
   list, not its number. Preset comes first in the knob's parameter list
