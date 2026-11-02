@@ -10612,7 +10612,7 @@ function perfPrintKey(x, y, text) {
     perfPrintRuns(x, y, perfKeyRuns(text));
 }
 
-/* Perform's header chords: the chord playing and the next one it changes
+/* Perform's chord line: the chord playing and the next one it changes
  * to -- stopped, or in the count-in, the chord the section about to play
  * starts on and the one after. As the engine plays them, a chord lasts to
  * the next one in its section, and a section starts with none until its
@@ -10622,7 +10622,7 @@ function perfPrintKey(x, y, text) {
  * "" with none to come) and, while playing, the beats until the next (the
  * beat it's in counted: 4, 3, 2, 1 across a bar); null for a song without
  * chords. */
-function perfHeaderChords(song, key, capo) {
+function perfChordLine(song, key, capo) {
     const shift = capo > 0 ? -capo : 0;
     if (shift) key = KEYS[((KEYS.indexOf(key) + shift) % 12 + 12) % 12] || key;
     const label = (c) => c.none ? "N.C." : chordLabel(shift ? transposeChord(c, shift) : c, key);
@@ -10782,18 +10782,20 @@ function drawPerformance() {
             " perfSelected=" + perfSelectedSection + " playbackSection=" + playbackSectionIndex);
     }
 
-    /* The header: the chord playing > the next one (Perform, for a song
-     * without chords), and at its right the key the song plays in (a
-     * setlist's own key for it, if set) and the battery. */
+    /* The header: the song (scrolling when long) and the battery. */
+    const battery = headerRightWithBattery("");
+    drawMenuHeader(fitHeader(songName, battery), battery);
+    drawHeaderBattery();
+
+    /* Below it: the chord playing > the next one, and at the right the key
+     * the song plays in (a setlist's own key for it, if set). */
     const entry = currentSetlist && perfSongIndex >= 0 ? currentSetlist.songs[perfSongIndex] : null;
     const playKey = entry && KEYS.indexOf(entry.key) >= 0 ? entry.key : ((displaySong && displaySong.key) || DEFAULT_KEY);
-    const chords = perfHeaderChords(displaySong, playKey, entry ? entry.capo : 0);
-    drawMenuHeader(chords ? "" : "Perform", headerRightWithBattery(""));
-    drawHeaderBattery();
+    const chords = perfChordLine(displaySong, playKey, entry ? entry.capo : 0);
+    const CHORD_Y = 12;
     const keyText = "Key " + keyLabel(playKey);
-    const keyRight = SCREEN_WIDTH - 3 - (batteryLevel !== null ? batteryBadgeWidth() + 4 : 0);
-    const keyX = keyRight - perfKeyWidth(keyText) + 1;
-    perfPrintKey(keyX, 1, keyText);
+    const keyX = SCREEN_WIDTH - 2 - perfKeyWidth(keyText) + 1;
+    perfPrintKey(keyX, CHORD_Y, keyText);
     if (chords) {
         /* Both and the beats to the next if they fit before the key, else
          * both, else the one playing (trimmed, as a last resort). */
@@ -10804,20 +10806,20 @@ function drawPerformance() {
         if (perfRunsWidth(runs) > room) runs = both;
         if (perfRunsWidth(runs) > room) runs = cur;
         while (runs.length > 1 && perfRunsWidth(runs) > room) runs = runs.slice(0, -1);
-        perfPrintRuns(2, 1, runs);
+        perfPrintRuns(2, CHORD_Y, runs);
     }
 
-    /* Below it the song; the section playing > the next one; the next song.
-     * Each line scrolls on its own so long names marquee instead of being
+    /* Then the section playing > the next one, and the next song. Each line
+     * scrolls on its own so long names marquee instead of being
      * hard-truncated, and the values line up after their labels. */
     const secLine = secName && nextSecName ? secName + " > " + nextSecName : (secName || nextSecName || "—");
-    const perfLines = [songName, secLine, nextSongName || "—"];
-    const perfPrefixes = ["", "Sec:", "Next:"];
+    const perfLines = [secLine, nextSongName || "—"];
+    const perfPrefixes = ["Sec:", "Next:"];
     const valueX = 2 + Math.max(perfTextWidth("Sec:"), perfTextWidth("Next:")) + 4;
     /* 11px line pitch: the header's text on row 1, then rows 12-45, leaving
      * a clear gap above the button-hint footer (rows 57-63). */
-    const perfYs = [12, 23, 34];
-    for (let i = 0; i < 3; i++) {
+    const perfYs = [23, 34];
+    for (let i = 0; i < perfLines.length; i++) {
         const scroller = perfLineScrollers[i];
         scroller.setSelected(perfLines[i]);
         scroller.tick();

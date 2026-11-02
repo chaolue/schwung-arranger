@@ -1,9 +1,10 @@
-/* Perform's display: a "Perform" header with the key the song plays in at
- * its right (beside the battery), then the song (no "Now:"), one Sec line
- * with the section playing > the next one, the next song, and the time.
- * The key is the setlist's own for the song when it sets one, and a flat is
- * drawn as a small b (the face has capitals only). Pixels are read back from
- * fill_rect and compared with the face's own drawing of each expected line. */
+/* Perform's display: the song in the header (beside the battery), then the
+ * chords -- the one playing > the next, and the beats to it -- with the key
+ * the song plays in at the right, one Sec line with the section playing >
+ * the next one, the next song, and the time. The key is the setlist's own
+ * for the song when it sets one, and a flat and minor's m are drawn small
+ * (the face has capitals only). Pixels are read back from fill_rect and
+ * compared with the face's own drawing of each expected line. */
 import * as H from './host_mock.mjs';
 import { fontPrint4x5, fontWidth4x5 } from './shared/param_pages/font4x5.mjs';
 
@@ -86,7 +87,8 @@ const FLAT = ["#..", "#..", "###", "#.#", "###"];
 const flatAt = (x, y) => FLAT.every((row, r) => [...row].every((c, i) => fb[(y + r) * W + x + i] === (c === "#" ? 1 : 0)));
 const MINOR = [".....", ".....", "##.#.", "#.#.#", "#.#.#"];
 const minorAt = (x, y) => MINOR.every((row, r) => [...row].every((c, i) => fb[(y + r) * W + x + i] === (c === "#" ? 1 : 0)));
-/* Where the header's second chord starts, after "<first> > ". */
+/* The chord line's row, and where its second chord starts, after "<first> > ". */
+const R = 12;
 const secondX = (first) => 2 + fontWidth4x5(first) + 1 + fontWidth4x5(" > ") + 1;
 const valueX = 2 + Math.max(fontWidth4x5("SEC:"), fontWidth4x5("NEXT:")) + 4;
 
@@ -96,15 +98,16 @@ jog(-8); jog(2); click();     /* Perform */
 click();                      /* A Gig */
 tick(30);
 
-check(drawnAt(2, 1, "PERFORM"), "the header says Perform");
-const keyX = findOnRow(1, "KEY B");
-check(keyX > 40, "the header's right has the key: " + keyX);
-/* The flat one gap after the B; the battery icon from column 116. */
+check(drawnAt(2, 1, "YES HE LIVES"), "the header is the song");
+check(findOnRow(1, "PERFORM") < 0 && findOnRow(1, "KEY") < 0, "...no Perform title, no key there");
+const keyX = findOnRow(R, "KEY B");
+check(keyX > 40, "the line below has the key at its right: " + keyX);
+/* The flat one gap after the B, ending the line. */
 const flatX = keyX + fontWidth4x5("KEY B") + 1;
-check(keyX > 0 && flatAt(flatX, 1), "...Bb, its flat a small b (not BB)");
-check(keyX > 0 && flatX + 3 < 116, "...left of the battery");
-check(drawnAt(2, 12, "YES HE LIVES"), "the song on the line below, with no Now:");
-check(findOnRow(12, "NOW") < 0 && findOnRow(1, "NOW") < 0, "no Now: anywhere");
+check(keyX > 0 && flatAt(flatX, R), "...Bb, its flat a small b (not BB)");
+check(keyX > 0 && flatX + 2 === 126, "...right-aligned: " + (flatX + 2));
+check(findOnRow(R, "YES HE LIVES") < 0, "the song is no longer on that line");
+check(findOnRow(R, "NOW") < 0 && findOnRow(1, "NOW") < 0, "no Now: anywhere");
 check(drawnAt(2, 23, "SEC:") && drawnAt(valueX, 23, "INTRO > VERSE"), "one Sec line: Intro > Verse");
 check(findOnRow(34, "NSC") < 0, "no NSc line");
 check(drawnAt(2, 34, "NEXT:") && drawnAt(valueX, 34, "ANOTHER SONG"), "the next song below it, its name lined up with the section's");
@@ -115,35 +118,35 @@ cc(BACK, 127); cc(BACK, 0); tick(5);
 jog(-8); jog(2); click();     /* Perform */
 jog(1); click();              /* B Gig */
 tick(30);
-const ebX = findOnRow(1, "KEY E");
-check(ebX > 40 && flatAt(ebX + fontWidth4x5("KEY E") + 1, 1), "the setlist's key for the song: Eb (" + ebX + ")");
-check(findOnRow(1, "KEY B") < 0, "...not the song's own Bb");
+const ebX = findOnRow(R, "KEY E");
+check(ebX > 40 && flatAt(ebX + fontWidth4x5("KEY E") + 1, R), "the setlist's key for the song: Eb (" + ebX + ")");
+check(findOnRow(R, "KEY B") < 0, "...not the song's own Bb");
 
-/* ---- a song with chords: the header shows the chord and the next ---- */
+/* ---- a song with chords: the chord and the next, before the key ---- */
 cc(BACK, 127); cc(BACK, 0); tick(5);
 jog(-8); jog(2); click();     /* Perform */
 jog(2); click();              /* C Gig */
 tick(30);
-check(findOnRow(1, "PERFORM") < 0, "with chords, no Perform title");
-check(drawnAt(2, 1, "C > A"), "stopped: the chord the song starts on > the next (C > A...)");
-check(minorAt(secondX("C") + fontWidth4x5("A") + 1, 1), "...Am, its m drawn small (not AM)");
-check(findOnRow(1, "KEY C") > 40, "...the key still at the right");
-check(findOnRow(1, " 4") < 0 && findOnRow(1, " 1") < 0, "...no beat count while stopped");
+check(drawnAt(2, 1, "CHORDS"), "the header is the song (Chords)");
+check(drawnAt(2, R, "C > A"), "stopped: the chord the song starts on > the next (C > A...)");
+check(minorAt(secondX("C") + fontWidth4x5("A") + 1, R), "...Am, its m drawn small (not AM)");
+check(findOnRow(R, "KEY C") > 40, "...the key still at the right");
+check(findOnRow(R, " 4") < 0 && findOnRow(R, " 1") < 0, "...no beat count while stopped");
 
 const PLAY = 85;
 cc(PLAY, 127); cc(PLAY, 0); tick(20);
 barFrac = 0.25; tick(10);    /* the Intro's first bar, beat 2 */
-check(drawnAt(2, 1, "C > A") && drawnAt(secondX("C") + fontWidth4x5("A") + 1 + 5 + 1, 1, " 3"),
+check(drawnAt(2, R, "C > A") && drawnAt(secondX("C") + fontWidth4x5("A") + 1 + 5 + 1, R, " 3"),
       "playing beat 2: C > Am 3 (beats to the change)");
 barFrac = 1.5; tick(10);     /* the Intro's second bar, beat 3 */
-check(drawnAt(2, 1, "A") && minorAt(2 + fontWidth4x5("A") + 1, 1), "playing bar 2: Am first: " + running);
+check(drawnAt(2, R, "A") && minorAt(2 + fontWidth4x5("A") + 1, R), "playing bar 2: Am first: " + running);
 const afterAm = 2 + fontWidth4x5("A") + 1 + 5 + 1;
-check(drawnAt(afterAm, 1, " > F 2"), "...then the next section's first chord, F, 2 beats away");
+check(drawnAt(afterAm, R, " > F 2"), "...then the next section's first chord, F, 2 beats away");
 barFrac = 2.5; tick(10);     /* the Verse's first bar */
 const bbFlatX = secondX("F") + fontWidth4x5("B") + 1;
-check(drawnAt(2, 1, "F > B") && flatAt(bbFlatX, 1) && drawnAt(bbFlatX + 4, 1, "7"),
+check(drawnAt(2, R, "F > B") && flatAt(bbFlatX, R) && drawnAt(bbFlatX + 4, R, "7"),
       "the Verse: F > A#7, as the key spells it: Bb7, its flat small");
-check(drawnAt(bbFlatX + 4, 1, "7 2"), "...2 beats away");
+check(drawnAt(bbFlatX + 4, R, "7 2"), "...2 beats away");
 cc(PLAY, 127); cc(PLAY, 0); tick(10);
 
 /* ---- capo 2: the chords as Bb shapes, the key as it sounds ---- */
@@ -151,10 +154,10 @@ cc(BACK, 127); cc(BACK, 0); tick(5);
 jog(-8); jog(2); click();     /* Perform */
 jog(3); click();              /* D Gig */
 tick(30);
-check(drawnAt(2, 1, "B") && flatAt(2 + fontWidth4x5("B") + 1, 1), "capo 2: C shows as Bb");
+check(drawnAt(2, R, "B") && flatAt(2 + fontWidth4x5("B") + 1, R), "capo 2: C shows as Bb");
 const gX = 2 + fontWidth4x5("B") + 1 + 3 + 1 + fontWidth4x5(" > ") + 1;
-check(drawnAt(gX, 1, "G") && minorAt(gX + fontWidth4x5("G") + 1, 1), "...and Am as Gm");
-check(findOnRow(1, "KEY C") > 40, "...the key still the one it sounds in (C)");
+check(drawnAt(gX, R, "G") && minorAt(gX + fontWidth4x5("G") + 1, R), "...and Am as Gm");
+check(findOnRow(R, "KEY C") > 40, "...the key still the one it sounds in (C)");
 
 console.log(`perform display: ${passes} passed, ${failures} failed`);
 if (failures) process.exit(1);
