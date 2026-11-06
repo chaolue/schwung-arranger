@@ -10960,15 +10960,19 @@ function perfBigChord(x, y, label, s, measure) {
         return perfRunsWidth(runs, s + 1);
     }
     let cx = x;
-    const root = m[1] + (m[2] === "#" ? "#" : "");
     const big = s === 1 ? perfCtx : perfScaledCtx(s, x, y);
-    if (!measure) bigFontPrint(big, x, y, root, 1);
-    cx += bigFontWidth(root) * s + 2 * s;
-    if (m[2] === "b") {
-        /* the small flat, scaled to the root: (2s)x */
-        const f = 2 * s;
-        if (!measure) perfPrintRuns(cx, y + s, [null], f);
-        cx += (PERF_FLAT_W + 1) * f;
+    if (!measure) bigFontPrint(big, x, y, m[1], 1);
+    cx += bigFontWidth(m[1]) * s + 2 * s;
+    /* Its sharp or flat: the root's size at scale 1, half its size against
+     * its top at 2 (as written, and it leaves the rest room). */
+    const as = Math.max(1, s - 1);
+    if (m[2] === "#") {
+        if (!measure) bigFontPrint(as === 1 ? perfCtx : perfScaledCtx(as, cx, y), cx, y, "#", 1);
+        cx += bigFontWidth("#") * as + 2 * s;
+    } else if (m[2] === "b") {
+        const f = 2 * as;
+        if (!measure) perfPrintRuns(cx, y + as, [null], f);
+        cx += (PERF_FLAT_W + 1) * f + s;
     }
     let rest = m[3];
     if (rest[0] === "m" && rest[1] !== "a") {
@@ -10985,11 +10989,81 @@ function perfBigChord(x, y, label, s, measure) {
     return cx - x - s;
 }
 
-/* The biggest that fits `room` px: scale 2, then 1, then the small face
- * trimmed. */
-function perfFitBigChord(x, y, label, room, maxScale) {
+/* What follows a chord's root, as words to wrap: its atoms (a character,
+ * null for a flat, PERF_MINOR for a leading minor m), broken before "(",
+ * "/" and "#", before a flat after a number (m7|b5, not /B|b), and where
+ * letters follow a number (7|sus4) -- so maj7#11 wraps as MAJ7 / #11. */
+function perfChordWords(rest) {
+    const atoms = [];
+    let r = String(rest);
+    if (r[0] === "m" && r[1] !== "a") { atoms.push(PERF_MINOR); r = r.slice(1); }
+    for (const ch of r) atoms.push(ch === "b" ? null : ch);   /* every b here is a flat */
+    const digit = (a) => typeof a === "string" && /\d/.test(a);
+    const words = [];
+    let cur = [];
+    atoms.forEach((a, i) => {
+        const prev = atoms[i - 1];
+        const brk = cur.length > 0 && (a === "(" || a === "/" || a === "#" || (a === null && digit(prev)) ||
+            (typeof a === "string" && /[a-z]/i.test(a) && digit(prev)));
+        if (brk) { words.push(cur); cur = []; }
+        cur.push(a);
+    });
+    if (cur.length) words.push(cur);
+    return words;
+}
+
+/* Atoms as runs (characters joined). */
+function perfAtomRuns(atoms) {
+    const runs = [];
+    for (const a of atoms) {
+        if (typeof a === "string" && typeof runs[runs.length - 1] === "string") runs[runs.length - 1] += a;
+        else runs.push(a);
+    }
+    return runs;
+}
+
+/* Words packed into lines no wider than `room` at scale `s`; a word wider
+ * than that on its own is broken where it must be. */
+function perfPackLines(words, room, s) {
+    const fits = (atoms) => perfRunsWidth(perfAtomRuns(atoms), s) <= room;
+    const lines = [];
+    let cur = [];
+    for (const w of words) {
+        if (cur.length && !fits(cur.concat(w))) { lines.push(cur); cur = []; }
+        cur = cur.concat(w);
+        while (!fits(cur) && cur.length > 1) {
+            let n = cur.length - 1;
+            while (n > 1 && !fits(cur.slice(0, n))) n--;
+            lines.push(cur.slice(0, n));
+            cur = cur.slice(n);
+        }
+    }
+    if (cur.length) lines.push(cur);
+    return lines;
+}
+
+/* The biggest that fits `room` x `height` px. Root at scale 2, then 1: the
+ * chord on one line if it fits; else the root kept that size and the rest
+ * wrapped beside it, in lines of the same scale (then smaller) stacked from
+ * its top -- Bbm7b5's m7 over b5, not the whole chord shrunk. Then the small
+ * face, trimmed. */
+function perfFitBigChord(x, y, label, room, maxScale, height) {
+    const m = /^([A-G])([#b]?)(.*)$/.exec(String(label));
     for (let s = maxScale; s >= 1; s--) {
         if (perfBigChord(0, 0, label, s, true) <= room) { perfBigChord(x, y, label, s); return; }
+        if (!m || !m[3]) continue;
+        const root = m[1] + m[2];
+        const rx = perfBigChord(0, 0, root, s, true) + 2 * s;
+        const words = perfChordWords(m[3]);
+        for (let ls = s; ls >= 1; ls--) {
+            const lines = perfPackLines(words, room - rx, ls);
+            const pitch = 5 * ls + 1;
+            if (lines.length * pitch - 1 > height) continue;
+            if (lines.some(l => perfRunsWidth(perfAtomRuns(l), ls) > room - rx)) continue;
+            perfBigChord(x, y, root, s);
+            lines.forEach((l, i) => perfPrintRuns(x + rx, y + i * pitch, perfAtomRuns(l), ls));
+            return;
+        }
     }
     let runs = perfChordRuns(label);
     while (runs.length > 1 && perfRunsWidth(runs) > room) runs = runs.slice(0, -1);
@@ -11023,7 +11097,8 @@ function drawPerformanceBig(song, fullSong, secName, nextSecName, nextSongName) 
     const LEFT_W = 58, RX = 67, RIGHT_W = SCREEN_WIDTH - RX - 2;
 
     /* Left: the chord playing, its section. */
-    if (chords) perfFitBigChord(2, 2, chords.cur, LEFT_W, 2);
+    /* Its rest may wrap down to the section (y 31). */
+    if (chords) perfFitBigChord(2, 2, chords.cur, LEFT_W, 2, 28);
     perfFitText2(2, 31, secName || "—", LEFT_W);
     fill_rect(62, 0, 1, 44, 1);
 
@@ -11031,7 +11106,8 @@ function drawPerformanceBig(song, fullSong, secName, nextSecName, nextSongName) 
      * the battery beside Next (Move's own is hidden while Arranger is up). */
     perfPrint(RX, 0, "Next", 1);
     drawBatteryBadge(SCREEN_WIDTH - 3, 0);
-    if (chords && chords.next) perfFitBigChord(RX, 8, chords.next, RIGHT_W, 1);
+    /* ...down to the beat blocks (y 23). */
+    if (chords && chords.next) perfFitBigChord(RX, 8, chords.next, RIGHT_W, 1, 13);
     const bpb = song && song.time_sig_num > 0 ? song.time_sig_num : 4;
     if (chords && chords.beats) {
         const n = Math.min(8, bpb);

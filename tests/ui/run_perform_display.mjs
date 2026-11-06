@@ -7,6 +7,7 @@
  * compared with the face's own drawing of each expected line. */
 import * as H from './host_mock.mjs';
 import { fontPrint4x5, fontWidth4x5 } from './shared/param_pages/font4x5.mjs';
+import * as BIG from './shared/param_pages/font_big_num.mjs';
 
 const SONGS = "/data/UserData/UserLibrary/Arranger/Songs";
 const SETLISTS = "/data/UserData/UserLibrary/Arranger/Setlists";
@@ -34,6 +35,12 @@ H.files.set(SETLISTS + "/d_gig.json", JSON.stringify({ id: "s4", name: "D Gig",
 /* The same song after a 2-bar count-in. */
 H.files.set(SETLISTS + "/e_gig.json", JSON.stringify({ id: "s5", name: "E Gig",
     songs: [{ id: "e5", name: "Chords", path: SONGS + "/c.json", click_bars: 2 }] }));
+/* A song whose chord is long: Bbm7b5. */
+H.files.set(SONGS + "/l.json", JSON.stringify({ name: "Long", key: "Bb", tempo_bpm: 120, time_sig_num: 4, time_sig_den: 4,
+    sections: [{ name: "Verse", clips: [{ source: "Grooves/beat.mid", name: "beat", start_bar: 0, end_bar: 2 }],
+                 chords: [{ root: "A#", quality: "m7b5" }] }] }));
+H.files.set(SETLISTS + "/f_gig.json", JSON.stringify({ id: "s6", name: "F Gig",
+    songs: [{ id: "e6", name: "Long", path: SONGS + "/l.json", click_bars: 0 }] }));
 /* Its click file, as if written already (the mock's binary writes fail). */
 H.files.set("/data/UserData/UserLibrary/Arranger/.click-e5-0-4x240t240.mid", "MThd");
 
@@ -221,6 +228,24 @@ check(solid(67, 39, 12, 4) && hollow(81, 39, 12, 4), "...1 bar left");
 cc(PLAY, 127); cc(PLAY, 0); tick(10);
 click(); tick(5);             /* back */
 check(drawnAt(2, 1, "CHORDS") && M.footerHints() !== null, "jog click again: the usual display and its hints");
+
+/* A long chord keeps its root big and wraps the rest beside it: Bbm7b5's
+ * B at double size, m7 over b5. */
+const lit = (x0, y0, x1, y1) => { for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) if (fb[y * W + x]) return true; return false; };
+const big2At = (x, y, ch) => {
+    const want = new Uint8Array(W * 64);
+    BIG.fontPrint({ fillRect: (fx, fy, fw, fh) => { for (let yy = y + (fy - y) * 2; yy < y + (fy - y) * 2 + fh * 2; yy++) for (let xx = x + (fx - x) * 2; xx < x + (fx - x) * 2 + fw * 2; xx++) want[yy * W + xx] = 1; } }, x, y, ch, 1);
+    for (let yy = y; yy < y + 22; yy++) for (let xx = x; xx < x + BIG.fontWidth(ch) * 2; xx++) if (want[yy * W + xx] !== fb[yy * W + xx]) return false;
+    return true;
+};
+cc(BACK, 127); cc(BACK, 0); tick(5);
+jog(-8); jog(2); click();     /* Perform */
+jog(5); click();              /* F Gig */
+tick(30);
+click(); tick(5);             /* the big view */
+check(big2At(2, 2, "B"), "Bbm7b5: the B at double size");
+check(lit(30, 2, 60, 11) && lit(30, 14, 60, 23), "...the rest in two lines beside it (m7, b5)");
+check(!lit(2, 25, 60, 30), "...nothing below the chord's height");
 
 console.log(`perform display: ${passes} passed, ${failures} failed`);
 if (failures) process.exit(1);

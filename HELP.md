@@ -601,7 +601,9 @@ are the shapes played at that fret; the key stays the one the song sounds in.
 
 **The big view.** Press the jog click for a display made to read at a
 distance, and again to go back. The left half has the chord playing, large,
-with its section under it. The right half has **Next**: the next chord, a row
+with its section under it. A long chord keeps its root large and wraps the
+rest beside it (B♭m7♭5 as B♭ with m7 over ♭5), in smaller lines if it must;
+a sharp or flat beside a large root is drawn half its size, against its top. The right half has **Next**: the next chord, a row
 of blocks for the beats to it (one a beat of the bar; with the change more
 than a bar away, the count shows beside them), the next section, and a row of
 blocks for the bars to it (one a bar of the section, up to 8; the count
