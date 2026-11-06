@@ -599,6 +599,18 @@ and a flat are drawn small (the display's letters are all capitals), so Am
 doesn't read as AM. With a **Capo** set for the song in the setlist, the chords
 are the shapes played at that fret; the key stays the one the song sounds in.
 
+**The big view.** Press the jog click for a display made to read at a
+distance, and again to go back. The left half has the chord playing, large,
+with its section under it. The right half has **Next**: the next chord, a row
+of blocks for the beats to it (one a beat of the bar; with the change more
+than a bar away, the count shows beside them), the next section, and a row of
+blocks for the bars to it (one a bar of the section, up to 8; the count
+beside them past that). Both counts include the beat or bar you're in, so the
+change lands as the last block empties, and both show only while playing.
+The foot has the key (and the setlist's **Capo** for the song, if set), the
+song's time, and the next song as **Next:**. The battery sits beside Next. The
+button hints are left off to make room; Back stays lit and works as usual.
+
 ### While stopped
 
 | Control | Action |
@@ -608,6 +620,7 @@ are the shapes played at that fret; the key stays the one the song sounds in.
 | Up / Down | Scroll the pad window up / down one row (with Keys on: octave up / down) |
 | Capture | **Keys**: turn the pads into a keyboard, and back — see **Keys** below |
 | Jog wheel | Scroll the info display |
+| Jog click | Switch to the **big view** and back (see below) |
 | Track 1 / 2 / 3 | Turn Drums / Inst 1 / Inst 2 on or off (kept until you leave Perform) |
 | Track 4 | Turn the Pads on or off (lit teal while on) |
 | Shift + Track 4 | Turn the click on or off (Track 4 is lit orange while Shift is held and the click is on) |
@@ -631,6 +644,7 @@ are the shapes played at that fret; the key stays the one the song sounds in.
 | Shift + Track 4 | Turn the click on or off |
 | Record | Start or stop recording the Schwung mix to a WAV file (see below) |
 | Knobs 1–8 | Change the Schwung parameter mapped to that knob |
+| Jog click | Switch to the **big view** and back |
 | Play | Stop playback |
 | Back | Stop playback and return to Root Menu |
 

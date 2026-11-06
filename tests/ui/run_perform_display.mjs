@@ -190,5 +190,37 @@ barFrac = 0.3; tick(3);
 check(drawnAt(secondX("C") + fontWidth4x5("A") + 1 + 5 + 1, R, " 3"), "...then 3, from the song's own position");
 cc(PLAY, 127); cc(PLAY, 0); tick(10);
 
+/* ---- the big view (jog click): the chord playing big and its section on
+ * the left; the next chord, blocks for its beats, the next section, blocks
+ * for its bars on the right; the key and capo, the time and the next song
+ * at the foot; no button hints ---- */
+const M = await import('./ui_test.mjs');
+/* A block at (x, y), w x h: solid, or just its outline. */
+const solid = (x, y, w, h) => { for (let yy = y; yy < y + h; yy++) for (let xx = x; xx < x + w; xx++) if (!fb[yy * W + xx]) return false; return true; };
+const hollow = (x, y, w, h) => solid(x, y, w, 1) && solid(x, y + h - 1, w, 1) && !fb[(y + 2) * W + x + 3];
+cc(BACK, 127); cc(BACK, 0); tick(5);
+jog(-8); jog(2); click();     /* Perform */
+jog(3); click();              /* D Gig: capo 2 */
+tick(30);
+click(); tick(5);             /* the big view */
+check(M.footerHints() === null, "big view: no button hints");
+check(drawnAt(67, 0, "NEXT"), "...Next at the top of the right half");
+check(solid(118, 0, 1, 5) && solid(125, 1, 1, 3), "...the battery beside it");
+check(findOnRow(49, "KEY C  CAPO 2") === 2, "...the key and the capo at the foot");
+check(drawnAt(1, 58, "NEXT:"), "...the next song, as Next:");
+check(!solid(67, 23, 7, 5) && !solid(67, 39, 12, 4), "...stopped: no beat or bar blocks");
+cc(PLAY, 127); cc(PLAY, 0); tick(20);
+barFrac = 0.25; tick(10);     /* the Intro's first bar, beat 2: Gm (Am, capo 2) 3 beats away */
+check(solid(67, 23, 7, 5) && solid(76, 23, 7, 5) && solid(85, 23, 7, 5) && hollow(94, 23, 7, 5),
+      "playing: 3 of 4 beat blocks to the next chord");
+check(solid(67, 39, 12, 4) && solid(81, 39, 12, 4), "...and the Intro's 2 bars to the Verse, both left");
+check(drawnAt(2, 31, "I") && drawnAt(67, 32, "VERSE"), "...Intro big on the left, the Verse next");
+barFrac = 1.5; tick(10);      /* bar 2, beat 3: 2 beats to the Verse's F (Eb) */
+check(solid(67, 23, 7, 5) && solid(76, 23, 7, 5) && hollow(85, 23, 7, 5), "bar 2 beat 3: 2 beats left");
+check(solid(67, 39, 12, 4) && hollow(81, 39, 12, 4), "...1 bar left");
+cc(PLAY, 127); cc(PLAY, 0); tick(10);
+click(); tick(5);             /* back */
+check(drawnAt(2, 1, "CHORDS") && M.footerHints() !== null, "jog click again: the usual display and its hints");
+
 console.log(`perform display: ${passes} passed, ${failures} failed`);
 if (failures) process.exit(1);

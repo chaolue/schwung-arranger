@@ -96,6 +96,10 @@
 - **Capo** (Setlist Edit > a song): the fret a guitarist's capo is on.
   Perform's chord line shows the chords as the shapes played there; the key
   stays the one the song sounds in.
+- **Big view** (jog click in Perform, and again to go back): the chord
+  playing large with its section; the next chord with blocks counting the
+  beats to it, the next section with blocks counting the bars to it; the key
+  and capo, the time, the next song and the battery.
 - A knob on a module's own presets (its preset browser's parameter -- an
   SF2's programs, say) shows the preset's name in the popup and the Knobs
   list, not its number. Preset comes first in the knob's parameter list

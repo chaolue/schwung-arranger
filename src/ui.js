@@ -63,6 +63,11 @@ import {
     fontPrint4x5, fontWidth4x5
 } from '/data/UserData/schwung/shared/param_pages/font4x5.mjs';
 
+/* The big face (11px, digits and the note names): Perform's big view. */
+import {
+    fontPrint as bigFontPrint, fontWidth as bigFontWidth
+} from '/data/UserData/schwung/shared/param_pages/font_big_num.mjs';
+
 import {
     asciiFold
 } from '/data/UserData/schwung/shared/param_pages/render_page.mjs';
@@ -10580,42 +10585,76 @@ function perfChordRuns(label) {
     if (cur) runs.push(cur);
     return runs;
 }
-/* Pixel width, as perfTextWidth: the last glyph's trailing gap left out. */
-function perfRunsWidth(runs) {
+/* Pixel width, as perfTextWidth: the last glyph's trailing gap left out.
+ * `s` scales it (the big view's doubled text). */
+function perfRunsWidth(runs, s = 1) {
     let w = 0;
     runs.forEach((r, i) => {
         w += (r === null ? PERF_FLAT_W : r === PERF_MINOR ? PERF_MINOR_W : perfTextWidth(r)) + (i < runs.length - 1 ? 1 : 0);
     });
-    return w;
+    return w * s;
 }
 function perfKeyWidth(text) {
     return perfRunsWidth(perfKeyRuns(text));
 }
-function perfPrintRuns(x, y, runs) {
+/* `s` times bigger, every pixel an s x s block from (ox, oy). */
+function perfScaledCtx(s, ox, oy) {
+    return { fillRect: (x, y, w, h, c) => fill_rect(ox + (x - ox) * s, oy + (y - oy) * s, w * s, h * s, c) };
+}
+function perfPrintRuns(x, y, runs, s = 1) {
+    const ctx = s === 1 ? perfCtx : perfScaledCtx(s, x, y);
+    const px = (a, b, w, h) => ctx.fillRect(x + a, y + b, w, h, 1);
     for (const r of runs) {
         if (r === null) {
             /* #.. / #.. / ### / #.# / ### */
-            fill_rect(x, y, 1, 5, 1);
-            fill_rect(x + 1, y + 2, 2, 1, 1);
-            fill_rect(x + 1, y + 4, 2, 1, 1);
-            fill_rect(x + 2, y + 3, 1, 1, 1);
+            px(0, 0, 1, 5);
+            px(1, 2, 2, 1);
+            px(1, 4, 2, 1);
+            px(2, 3, 1, 1);
             x += PERF_FLAT_W + 1;
         } else if (r === PERF_MINOR) {
             /* (blank) / (blank) / ##.#. / #.#.# / #.#.# */
-            fill_rect(x, y + 2, 1, 3, 1);
-            fill_rect(x + 1, y + 2, 1, 1, 1);
-            fill_rect(x + 2, y + 3, 1, 2, 1);
-            fill_rect(x + 3, y + 2, 1, 1, 1);
-            fill_rect(x + 4, y + 3, 1, 2, 1);
+            px(0, 2, 1, 3);
+            px(1, 2, 1, 1);
+            px(2, 3, 1, 2);
+            px(3, 2, 1, 1);
+            px(4, 3, 1, 2);
             x += PERF_MINOR_W + 1;
         } else {
-            perfPrint(x, y, r, 1);
+            fontPrint4x5(ctx, x, y, asciiFold(String(r)).toUpperCase(), 1);
             x += perfTextWidth(r) + 1;
         }
     }
 }
 function perfPrintKey(x, y, text) {
     perfPrintRuns(x, y, perfKeyRuns(text));
+}
+
+/* Where in `song` Perform is: { si, pos, playing } -- the section and the
+ * bars into it while the song plays (the transport's position in the full
+ * song); stopped, or in the count-in, the start of the section about to
+ * play (pos 0, playing false). */
+function perfPosition(song) {
+    const n = song && Array.isArray(song.sections) ? song.sections.length : 0;
+    let si, pos = 0;
+    const playing = !!(perfPlaying && !perfClickPlaying && lastDspTransport && lastDspTransport.running);
+    if (playing && n) {
+        const frac = (perfTransportStillClick() ? 0 : typeof lastDspTransport.bar_frac === "number" ? lastDspTransport.bar_frac
+            : (lastDspTransport.bar || 1) - 1) + previewBarOffset;
+        let start = 0;
+        for (si = 0; si < n - 1; si++) {
+            const len = sectionBars(song.sections[si]);
+            if (frac < start + len) break;
+            start += len;
+        }
+        pos = frac - start;
+    } else if (perfClickPlaying) {
+        si = 0;
+    } else {
+        si = perfSelectedSection >= 0 ? perfSelectedSection : playbackSectionIndex;
+    }
+    si = Math.max(0, Math.min(n - 1, si || 0));
+    return { si, pos, playing };
 }
 
 /* The count-in just handed over to the song (the UI's timer, or the click
@@ -10667,23 +10706,7 @@ function perfChordLine(song, key, capo) {
     if (!events.some(e => e.length)) return null;
     const bpb = (song.time_sig_num > 0) ? song.time_sig_num : 4;
     const at = (e) => e.bar + (e.beat - 1) / bpb;
-    let si, pos = 0;
-    if (perfPlaying && !perfClickPlaying && lastDspTransport && lastDspTransport.running) {
-        const frac = (perfTransportStillClick() ? 0 : typeof lastDspTransport.bar_frac === "number" ? lastDspTransport.bar_frac
-            : (lastDspTransport.bar || 1) - 1) + previewBarOffset;
-        let start = 0;
-        for (si = 0; si < song.sections.length - 1; si++) {
-            const len = sectionBars(song.sections[si]);
-            if (frac < start + len) break;
-            start += len;
-        }
-        pos = frac - start;
-    } else if (perfClickPlaying) {
-        si = 0;
-    } else {
-        si = perfSelectedSection >= 0 ? perfSelectedSection : playbackSectionIndex;
-    }
-    si = Math.max(0, Math.min(song.sections.length - 1, si || 0));
+    const { si, pos } = perfPosition(song);
     const here = events[si];
     let cur = null;
     for (const e of here) if (at(e) <= pos + 1e-6) cur = e.chord;
@@ -10818,6 +10841,13 @@ function drawPerformance() {
             " perfSelected=" + perfSelectedSection + " playbackSection=" + playbackSectionIndex);
     }
 
+    if (perfBigView) {
+        drawPerformanceBig(displaySong, fullSong, secName, nextSecName, nextSongName);
+        drawOverlay();
+        drawPerfKnobFeedback();
+        return;
+    }
+
     /* The header: the song (scrolling when long) and the battery. */
     const battery = headerRightWithBattery("");
     drawMenuHeader(fitHeader(songName, battery), battery);
@@ -10873,12 +10903,23 @@ function drawPerformance() {
         if (perfPrefixes[i]) perfPrint(2, perfYs[i], perfPrefixes[i], 1);
         perfPrint(x, perfYs[i], text, 1);
     }
-    /* Song time as it progresses, plus the total song and set durations. The
-     * current position comes from the DSP transport's 0-based fractional bar
-     * (bar_frac) mapped against the full song; during the count-in click the
-     * song has not started, so it reads 0:00. */
-    const songTotal = fullSong ? songDurationSec(fullSong) : 0;
-    let curSec = 0;
+    const clock = perfSongClock(fullSong);
+    const timeLine = "Time: " + formatTime(clock.cur) + "/" + formatTime(clock.total) +
+        "  Set: " + formatTime(clock.set);
+    perfPrint(2, 45, perfFitText(timeLine, SCREEN_WIDTH - 3), 1);
+    /* Draw any active overlay (e.g. a missing-clip warning) on top of the
+     * performance display. */
+    drawOverlay();
+    drawPerfKnobFeedback();
+}
+
+/* Song time as it progresses, plus the total song and set durations, in
+ * seconds. The current position comes from the DSP transport's 0-based
+ * fractional bar (bar_frac) mapped against the full song; during the
+ * count-in click the song has not started, so it reads 0. */
+function perfSongClock(fullSong) {
+    const total = fullSong ? songDurationSec(fullSong) : 0;
+    let cur = 0;
     if (perfPlaying && !perfClickPlaying && lastDspTransport && lastDspTransport.running) {
         const dspBarFrac = perfTransportStillClick() ? 0 : (typeof lastDspTransport.bar_frac === "number")
             ? lastDspTransport.bar_frac : ((lastDspTransport.bar || 1) - 1);
@@ -10887,20 +10928,135 @@ function drawPerformance() {
         /* Quarter-note beats per bar, not time_sig_num: 6/8 has 3 quarter
          * notes per bar, so a bar lasts 3*(60/bpm) seconds. */
         const qbpb = qtrBeatsPerBar(fullSong || { time_sig_num: lastDspTransport.time_sig_num, time_sig_den: lastDspTransport.time_sig_den });
-        curSec = fullBarFrac * qbpb * (60 / bpm);
+        cur = fullBarFrac * qbpb * (60 / bpm);
     }
     const setKey = perfSetTotalKey();
     if (setKey !== perfSetTotalKeyCached) {
         perfSetTotalKeyCached = setKey;
         perfSetTotalSec = computeSetTotalSec();
     }
-    const timeLine = "Time: " + formatTime(curSec) + "/" + formatTime(songTotal) +
-        "  Set: " + formatTime(perfSetTotalSec);
-    perfPrint(2, 45, perfFitText(timeLine, SCREEN_WIDTH - 3), 1);
-    /* Draw any active overlay (e.g. a missing-clip warning) on top of the
-     * performance display. */
-    drawOverlay();
-    drawPerfKnobFeedback();
+    return { cur, total, set: perfSetTotalSec };
+}
+
+/* ── Perform's big view (jog click) ──────────────────────────────────
+ *
+ * Left: the chord playing, big, and its section. Right: the next chord,
+ * blocks for the beats to it, the next section, blocks for the bars to it
+ * (each count includes the beat or bar it's in, so the change lands as the
+ * last block empties). Foot: the key (and capo), the song's time, and the
+ * next song. No button-hint footer: the screen is the view's. */
+let perfBigView = false;
+
+/* Draw chord `label` big at (x, y): its root in the big face at scale `s`
+ * (1: 11px, 2: 22px), a flat drawn to match, a minor m on the baseline at
+ * s + 1, the rest raised beside the root's top in the small face at `s`
+ * (its flats small). A label that isn't a chord (N.C.) is the small face at
+ * s + 1. Draws nothing with `measure`; returns its width. */
+function perfBigChord(x, y, label, s, measure) {
+    const m = /^([A-G])([#b]?)(.*)$/.exec(String(label));
+    if (!m) {
+        const runs = perfChordRuns(label);
+        if (!measure) perfPrintRuns(x, y, runs, s + 1);
+        return perfRunsWidth(runs, s + 1);
+    }
+    let cx = x;
+    const root = m[1] + (m[2] === "#" ? "#" : "");
+    const big = s === 1 ? perfCtx : perfScaledCtx(s, x, y);
+    if (!measure) bigFontPrint(big, x, y, root, 1);
+    cx += bigFontWidth(root) * s + 2 * s;
+    if (m[2] === "b") {
+        /* the small flat, scaled to the root: (2s)x */
+        const f = 2 * s;
+        if (!measure) perfPrintRuns(cx, y + s, [null], f);
+        cx += (PERF_FLAT_W + 1) * f;
+    }
+    let rest = m[3];
+    if (rest[0] === "m" && rest[1] !== "a") {
+        const ms = s + 1;
+        if (!measure) perfPrintRuns(cx, y + 11 * s - 5 * ms, [PERF_MINOR], ms);
+        cx += (PERF_MINOR_W + 1) * ms;
+        rest = rest.slice(1);
+    }
+    if (rest) {
+        const runs = perfChordRuns("C" + rest).slice(1);    /* its flats small */
+        if (!measure) perfPrintRuns(cx, y, runs, s);
+        cx += perfRunsWidth(runs, s) + s;
+    }
+    return cx - x - s;
+}
+
+/* The biggest that fits `room` px: scale 2, then 1, then the small face
+ * trimmed. */
+function perfFitBigChord(x, y, label, room, maxScale) {
+    for (let s = maxScale; s >= 1; s--) {
+        if (perfBigChord(0, 0, label, s, true) <= room) { perfBigChord(x, y, label, s); return; }
+    }
+    let runs = perfChordRuns(label);
+    while (runs.length > 1 && perfRunsWidth(runs) > room) runs = runs.slice(0, -1);
+    perfPrintRuns(x, y, runs);
+}
+
+/* Text doubled if it fits `room`, else small, trimmed to fit. */
+function perfFitText2(x, y, text, room) {
+    const t = asciiFold(String(text)).toUpperCase();
+    if (perfTextWidth(t) * 2 <= room) { fontPrint4x5(perfScaledCtx(2, x, y), x, y, t, 1); return; }
+    perfPrint(x, y, perfFitText(t, room), 1);
+}
+
+/* A row of `n` blocks, `filled` of them solid from the left, in `room` px. */
+function perfBlocks(x, y, n, filled, room, h, maxPitch) {
+    const pitch = Math.max(3, Math.min(maxPitch, Math.floor((room + 2) / n)));
+    for (let i = 0; i < n; i++) {
+        const bx = x + i * pitch, w = pitch - 2;
+        if (i < filled) fill_rect(bx, y, w, h, 1);
+        else { fill_rect(bx, y, w, 1, 1); fill_rect(bx, y + h - 1, w, 1, 1); fill_rect(bx, y, 1, h, 1); fill_rect(bx + w - 1, y, 1, h, 1); }
+    }
+    return n * pitch - 2;
+}
+
+function drawPerformanceBig(song, fullSong, secName, nextSecName, nextSongName) {
+    const entry = currentSetlist && perfSongIndex >= 0 ? currentSetlist.songs[perfSongIndex] : null;
+    const playKey = entry && KEYS.indexOf(entry.key) >= 0 ? entry.key : ((song && song.key) || DEFAULT_KEY);
+    const capo = entry && entry.capo > 0 ? entry.capo : 0;
+    const chords = perfChordLine(song, playKey, capo);
+    const at = perfPosition(song);
+    const LEFT_W = 58, RX = 67, RIGHT_W = SCREEN_WIDTH - RX - 2;
+
+    /* Left: the chord playing, its section. */
+    if (chords) perfFitBigChord(2, 2, chords.cur, LEFT_W, 2);
+    perfFitText2(2, 31, secName || "—", LEFT_W);
+    fill_rect(62, 0, 1, 44, 1);
+
+    /* Right: the next chord and its beats; the next section and its bars;
+     * the battery beside Next (Move's own is hidden while Arranger is up). */
+    perfPrint(RX, 0, "Next", 1);
+    drawBatteryBadge(SCREEN_WIDTH - 3, 0);
+    if (chords && chords.next) perfFitBigChord(RX, 8, chords.next, RIGHT_W, 1);
+    const bpb = song && song.time_sig_num > 0 ? song.time_sig_num : 4;
+    if (chords && chords.beats) {
+        const n = Math.min(8, bpb);
+        const w = perfBlocks(RX, 23, n, Math.min(chords.beats, n), RIGHT_W - 10, 5, 9);
+        /* further off than a bar of blocks: the count beside them */
+        if (chords.beats > n) perfPrint(RX + w + 3, 23, String(chords.beats), 1);
+    }
+    perfPrint(RX, 32, perfFitText(nextSecName || "—", RIGHT_W), 1);
+    const sec = song && song.sections ? song.sections[at.si] : null;
+    if (at.playing && sec && nextSecName) {
+        const len = Math.max(1, Math.ceil(sectionBars(sec) - 1e-6));
+        const left = Math.max(1, Math.ceil(sectionBars(sec) - at.pos - 1e-6));
+        const n = Math.min(8, len);
+        const w = perfBlocks(RX, 39, n, Math.min(left, n), RIGHT_W - 10, 4, 14);
+        if (left > n) perfPrint(RX + w + 3, 39, String(left), 1);
+    }
+
+    /* Foot: the key (and capo), the song's time, the next song. */
+    fill_rect(0, 45, SCREEN_WIDTH, 1, 1);
+    const keyText = "Key " + keyLabel(playKey) + (capo ? "  Capo " + capo : "");
+    perfPrintKey(2, 49, keyText);
+    const clock = perfSongClock(fullSong);
+    const time = formatTime(clock.cur) + "/" + formatTime(clock.total);
+    perfPrint(SCREEN_WIDTH - 2 - perfTextWidth(time) + 1, 49, time, 1);
+    perfPrint(1, 58, perfFitText("Next: " + (nextSongName || "—"), SCREEN_WIDTH - 2), 1);
 }
 
 function drawPerfSetlist() {
@@ -12796,6 +12952,12 @@ function handleSetlistSectionPickInput(cc, value) {
 }
 
 function handlePerformanceInput(cc, value) {
+    /* The jog click switches between the display and its big view. */
+    if (cc === MoveMainButton && value > 0 && !shiftHeld) {
+        perfBigView = !perfBigView;
+        needsRedraw = true;
+        return;
+    }
     /* Main knob is intentionally unused in performance view: song/section
      * selection is done with pads, and the display uses plain print(). The
      * 8 knobs drive the setlist's Schwung parameters (see KNOB_COUNT). */
@@ -17084,6 +17246,8 @@ export function footerHints() {
         case VIEW_PERFORMANCE:
             /* The knob feedback panel covers the footer rows while it shows. */
             if (perfKnobFeedbackVisible()) return null;
+            /* The big view uses the whole screen (Back stays lit). */
+            if (perfBigView) return null;
             return [["PAD", perfPlaying ? "CUE" : "PICK"], ["TRK", "MUTE"], ["BACK", "OUT"]];
         case VIEW_JAM:
             if (shiftHeld) return [["JOG", "KEY"], ["TRK", "INST"]];
