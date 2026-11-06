@@ -100,6 +100,7 @@
   playing large with its section; the next chord with blocks counting the
   beats to it, the next section with blocks counting the bars to it; the key
   and capo, the time, the next song and the battery.
+- In 6/8 the step LEDs flash the first bar's six beats, not twelve.
 - A knob on a module's own presets (its preset browser's parameter -- an
   SF2's programs, say) shows the preset's name in the popup and the Knobs
   list, not its number. Preset comes first in the knob's parameter list

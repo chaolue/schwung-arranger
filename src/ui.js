@@ -6612,7 +6612,15 @@ function updateStepFlash(currentBar, currentBeat, bpm, beatsPerBar) {
     } else if (beatChanged) {
         maxBeatThisBar = Math.max(maxBeatThisBar, currentBeat);
     }
-    if (transportBeatsPerBar <= 0 && beatsPerBar > 0) {
+    /* How many beats a bar the transport counts, from its own ticks when it
+     * reports them -- exact from the first bar. Guessing (6/8 as three
+     * dotted-quarter beats) flashed a 6/8 song's first bar twelve times when
+     * the transport counted its six eighths, until a whole bar had played
+     * and taught it otherwise. */
+    const t = lastDspTransport;
+    if (t && t.ticks_per_beat > 0 && t.ticks_per_bar > 0) {
+        transportBeatsPerBar = Math.max(1, Math.round(t.ticks_per_bar / t.ticks_per_beat));
+    } else if (transportBeatsPerBar <= 0 && beatsPerBar > 0) {
         const isCompound = (beatsPerBar % 3) === 0 && beatsPerBar >= 6;
         transportBeatsPerBar = isCompound ? Math.round(beatsPerBar / 2) : beatsPerBar;
     }
