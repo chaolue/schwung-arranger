@@ -615,15 +615,17 @@ distance, with the chords, and again to go back.
   long chord keeps its root large and wraps the rest beside it (B♭m7♭5 as B♭
   with m7 over ♭5), in smaller lines if it must; a sharp or flat beside a
   large root is drawn half its size, against its top.
-- **Right half, Next:** the next chord, with a row of blocks for the beats to
-  it (one a beat of the bar; with the change more than a bar away, the count
-  shows beside them); then the next section, with a row of blocks for the bars
-  to it (one a bar of the section, up to 8; the count beside them past that).
-  Both counts include the beat or bar you're in, so the change lands as the
-  last block empties, and both show only while playing. The battery sits
-  beside Next.
+- **Right half:** the next chord, its root large too and the rest of its
+  name small (wrapping beside the root when it's long), with a row of blocks
+  for the beats to it (one a beat of the bar; with the change more than a bar
+  away, the count shows beside them); then the next section, with a row of
+  blocks for the bars to it (one a bar of the section, up to 8; the count
+  beside them past that). Both counts include the beat or bar you're in, so
+  the change lands as the last block empties, and both show only while
+  playing.
 - **Foot:** the key (and the setlist's **Capo** for the song, if set), the
-  song's time, and the next song as **Next:**.
+  battery and the song's time; under them, in turn every 3 seconds, **Now:**
+  the song playing (left) and **Next:** the next song (right).
 
 As the instruments play them, a chord lasts until the next one in its section,
 so a section with no chord on its first beat shows **N.C.** until its first.

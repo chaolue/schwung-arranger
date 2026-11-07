@@ -180,10 +180,10 @@ tick(30);
 check(drawnAt(2, 1, "PERFORM") && drawnAt(valueX, 12, "CHORDS"), "the usual display: Perform, then the song");
 check(!lit(valueX + fontWidth4x5("CHORDS") + 4, 12, 126, 16), "...and no chords beside it");
 click(); tick(5);             /* the big view */
-check(big2At(2, 2, "C") && bigAt(67, 8, "A"), "big view, stopped: C, next A(m)");
+check(big2At(2, 2, "C") && big2At(67, 1, "A"), "big view, stopped: C, next A(m), its root doubled too");
 cc(PLAY, 127); cc(PLAY, 0); tick(20);
 barFrac = 2.5; tick(10);      /* the Verse's first bar */
-check(big2At(2, 2, "F") && bigAt(67, 8, "B"), "the Verse: F, next A#7 spelt as the key writes it, Bb7");
+check(big2At(2, 2, "F") && big2At(67, 1, "B"), "the Verse: F, next A#7 spelt as the key writes it, Bb7");
 cc(PLAY, 127); cc(PLAY, 0); tick(10);
 click(); tick(5);             /* back */
 
@@ -200,9 +200,9 @@ cc(PLAY, 127); cc(PLAY, 0); tick(10);
 barFrac = 1.97;               /* the click's last beat, until the UI's count-in timer moves on */
 for (let i = 0; i < 400 && !drawn2At(2, 31, "INTRO"); i++) tick();
 tick(2);
-const beatBlocks = (n) => [0, 1, 2, 3].every(i => i < n ? solid(67 + i * 9, 23, 7, 5) : hollow(67 + i * 9, 23, 7, 5));
+const beatBlocks = (n) => [0, 1, 2, 3].every(i => i < n ? solid(67 + i * 9, 25, 7, 5) : hollow(67 + i * 9, 25, 7, 5));
 check(running && beatBlocks(4), "the song just started (the transport still the click's): 4 beats to Am, not bar 2's count");
-check(drawn2At(2, 31, "INTRO") && drawnAt(67, 32, "VERSE"), "...and the Intro, not the Verse");
+check(drawn2At(2, 31, "INTRO") && drawnAt(67, 31, "VERSE"), "...and the Intro, not the Verse");
 swaps++; barFrac = 0.05; tick(3);   /* the engine's swap shows */
 check(beatBlocks(4), "the swap shows: still 4");
 barFrac = 0.3; tick(3);
@@ -220,21 +220,23 @@ jog(3); click();              /* D Gig: capo 2 */
 tick(30);
 click(); tick(5);             /* the big view */
 check(M.footerHints() === null, "big view: no button hints");
-check(big2At(2, 2, "B") && bigAt(67, 8, "G"), "...capo 2: C shows as Bb, the next Am as Gm");
-check(drawnAt(67, 0, "NEXT"), "...Next at the top of the right half");
-check(solid(118, 0, 1, 5) && solid(125, 1, 1, 3), "...the battery beside it");
+check(big2At(2, 2, "B") && big2At(67, 1, "G"), "...capo 2: C shows as Bb, the next Am as Gm");
+check(findOnRow(0, "NEXT") < 0, "...no Next label on the right");
+/* The battery: its 9x5 body's left edge, and its 1x3 terminal 9 to the right. */
+const batteryAt = (y, x0) => { for (let x = x0; x < 118; x++) if (solid(x, y, 1, 5) && solid(x + 9, y + 1, 1, 3) && !fb[y * W + x + 9]) return x; return -1; };
+check(batteryAt(49, 40) > 50 && batteryAt(0, 105) < 0, "...the battery on the key line, left of the time, not at the top right: " + batteryAt(49, 40));
 check(findOnRow(49, "KEY C  CAPO 2") === 2, "...the key and the capo at the foot");
-check(drawnAt(1, 58, "NEXT:"), "...the next song, as Next:");
-check(!solid(67, 23, 7, 5) && !solid(67, 39, 12, 4), "...stopped: no beat or bar blocks");
+check(drawnAt(1, 58, "NOW: CHORDS"), "...the song playing at the foot (no next song to take turns with)");
+check(!solid(67, 25, 7, 5) && !solid(67, 37, 12, 4), "...stopped: no beat or bar blocks");
 cc(PLAY, 127); cc(PLAY, 0); tick(20);
 barFrac = 0.25; tick(10);     /* the Intro's first bar, beat 2: Gm (Am, capo 2) 3 beats away */
-check(solid(67, 23, 7, 5) && solid(76, 23, 7, 5) && solid(85, 23, 7, 5) && hollow(94, 23, 7, 5),
+check(solid(67, 25, 7, 5) && solid(76, 25, 7, 5) && solid(85, 25, 7, 5) && hollow(94, 25, 7, 5),
       "playing: 3 of 4 beat blocks to the next chord");
-check(solid(67, 39, 12, 4) && solid(81, 39, 12, 4), "...and the Intro's 2 bars to the Verse, both left");
-check(drawnAt(2, 31, "I") && drawnAt(67, 32, "VERSE"), "...Intro big on the left, the Verse next");
+check(solid(67, 37, 12, 4) && solid(81, 37, 12, 4), "...and the Intro's 2 bars to the Verse, both left");
+check(drawnAt(2, 31, "I") && drawnAt(67, 31, "VERSE"), "...Intro big on the left, the Verse next");
 barFrac = 1.5; tick(10);      /* bar 2, beat 3: 2 beats to the Verse's F (Eb) */
-check(solid(67, 23, 7, 5) && solid(76, 23, 7, 5) && hollow(85, 23, 7, 5), "bar 2 beat 3: 2 beats left");
-check(solid(67, 39, 12, 4) && hollow(81, 39, 12, 4), "...1 bar left");
+check(solid(67, 25, 7, 5) && solid(76, 25, 7, 5) && hollow(85, 25, 7, 5), "bar 2 beat 3: 2 beats left");
+check(solid(67, 37, 12, 4) && hollow(81, 37, 12, 4), "...1 bar left");
 cc(PLAY, 127); cc(PLAY, 0); tick(10);
 click(); tick(5);             /* back */
 check(drawnAt(2, 1, "PERFORM") && M.footerHints() !== null, "jog click again: the usual display and its hints");
@@ -249,6 +251,18 @@ click(); tick(5);             /* the big view */
 check(big2At(2, 2, "B"), "Bbm7b5: the B at double size");
 check(lit(30, 2, 60, 11) && lit(30, 14, 60, 23), "...the rest in two lines beside it (m7, b5)");
 check(!lit(2, 25, 60, 30), "...nothing below the chord's height");
+
+/* The big view's foot: Now: the song (left) and Next: the next one (right)
+ * in turn, 3 s each. */
+cc(BACK, 127); cc(BACK, 0); tick(5);
+jog(-8); jog(2); click();     /* Perform */
+jog(-8); click(); tick(30);   /* A Gig: Yes He Lives, then Another Song (the big view still on) */
+const phase = (p) => { while (Math.floor(H.clock / 3000) % 2 !== p) tick(); tick(2); };
+phase(0);
+check(drawnAt(1, 58, "NOW: YES HE LIVES"), "big view foot: Now: the song, left");
+phase(1);
+const nx = findOnRow(58, "NEXT: ANOTHER SONG");
+check(nx > 0 && nx + fontWidth4x5("NEXT: ANOTHER SONG") === 127 && findOnRow(58, "NOW:") < 0, "...then Next: the next song, right-aligned: " + nx);
 
 /* The big view's section: always doubled, shortened to fit the left half
  * (58 px), its number kept. */

@@ -11047,7 +11047,7 @@ function drawPerformance() {
     }
 
     if (perfBigView) {
-        drawPerformanceBig(displaySong, fullSong, secName, nextSecName, nextSongName);
+        drawPerformanceBig(displaySong, fullSong, secName, nextSecName, nextSongName, songName);
         drawOverlay();
         drawPerfKnobFeedback();
         return;
@@ -11138,15 +11138,16 @@ let perfBigView = false;
 
 /* Draw chord `label` big at (x, y): its root in the big face at scale `s`
  * (1: 11px, 2: 22px), a flat drawn to match, a minor m on the baseline at
- * s + 1, the rest raised beside the root's top in the small face at `s`
- * (its flats small). A label that isn't a chord (N.C.) is the small face at
- * s + 1. Draws nothing with `measure`; returns its width. */
-function perfBigChord(x, y, label, s, measure) {
+ * rs + 1, the rest raised beside the root's top in the small face at `rs`
+ * (its flats small; `rs` = s unless smaller is asked for). A label that
+ * isn't a chord (N.C.) is the small face at rs + 1. Draws nothing with
+ * `measure`; returns its width. */
+function perfBigChord(x, y, label, s, measure, rs = s) {
     const m = /^([A-G])([#b]?)(.*)$/.exec(String(label));
     if (!m) {
         const runs = perfChordRuns(label);
-        if (!measure) perfPrintRuns(x, y, runs, s + 1);
-        return perfRunsWidth(runs, s + 1);
+        if (!measure) perfPrintRuns(x, y, runs, rs + 1);
+        return perfRunsWidth(runs, rs + 1);
     }
     let cx = x;
     const big = s === 1 ? perfCtx : perfScaledCtx(s, x, y);
@@ -11165,17 +11166,17 @@ function perfBigChord(x, y, label, s, measure) {
     }
     let rest = m[3];
     if (rest[0] === "m" && rest[1] !== "a") {
-        const ms = s + 1;
+        const ms = rs + 1;
         if (!measure) perfPrintRuns(cx, y + 11 * s - 5 * ms, [PERF_MINOR], ms);
         cx += (PERF_MINOR_W + 1) * ms;
         rest = rest.slice(1);
     }
     if (rest) {
         const runs = perfChordRuns("C" + rest).slice(1);    /* its flats small */
-        if (!measure) perfPrintRuns(cx, y, runs, s);
-        cx += perfRunsWidth(runs, s) + s;
+        if (!measure) perfPrintRuns(cx, y, runs, rs);
+        cx += perfRunsWidth(runs, rs) + rs;
     }
-    return cx - x - s;
+    return cx - x - rs;
 }
 
 /* What follows a chord's root, as words to wrap: its atoms (a character,
@@ -11236,15 +11237,16 @@ function perfPackLines(words, room, s) {
  * wrapped beside it, in lines of the same scale (then smaller) stacked from
  * its top -- Bbm7b5's m7 over b5, not the whole chord shrunk. Then the small
  * face, trimmed. */
-function perfFitBigChord(x, y, label, room, maxScale, height) {
+function perfFitBigChord(x, y, label, room, maxScale, height, restScale = maxScale) {
     const m = /^([A-G])([#b]?)(.*)$/.exec(String(label));
     for (let s = maxScale; s >= 1; s--) {
-        if (perfBigChord(0, 0, label, s, true) <= room) { perfBigChord(x, y, label, s); return; }
+        const rs = Math.min(s, restScale);
+        if (perfBigChord(0, 0, label, s, true, rs) <= room) { perfBigChord(x, y, label, s, false, rs); return; }
         if (!m || !m[3]) continue;
         const root = m[1] + m[2];
         const rx = perfBigChord(0, 0, root, s, true) + 2 * s;
         const words = perfChordWords(m[3]);
-        for (let ls = s; ls >= 1; ls--) {
+        for (let ls = rs; ls >= 1; ls--) {
             const lines = perfPackLines(words, room - rx, ls);
             const pitch = 5 * ls + 1;
             if (lines.length * pitch - 1 > height) continue;
@@ -11330,7 +11332,10 @@ function perfBlocks(x, y, n, filled, room, h, maxPitch) {
     return n * pitch - 2;
 }
 
-function drawPerformanceBig(song, fullSong, secName, nextSecName, nextSongName) {
+/* The foot's song line: Now: (left) and Next: (right) in turn, this long each. */
+const PERF_BIG_SONG_SWAP_MS = 3000;
+
+function drawPerformanceBig(song, fullSong, secName, nextSecName, nextSongName, songName) {
     const entry = currentSetlist && perfSongIndex >= 0 ? currentSetlist.songs[perfSongIndex] : null;
     const playKey = entry && KEYS.indexOf(entry.key) >= 0 ? entry.key : ((song && song.key) || DEFAULT_KEY);
     const capo = entry && entry.capo > 0 ? entry.capo : 0;
@@ -11346,37 +11351,46 @@ function drawPerformanceBig(song, fullSong, secName, nextSecName, nextSongName) 
     fontPrint4x5(perfScaledCtx(2, 2, 31), 2, 31, perfFitText(secText, LEFT_W / 2), 1);
     fill_rect(62, 0, 1, 44, 1);
 
-    /* Right: the next chord and its beats; the next section and its bars;
-     * the battery beside Next (Move's own is hidden while Arranger is up). */
-    perfPrint(RX, 0, "Next", 1);
-    drawBatteryBadge(SCREEN_WIDTH - 3, 0);
-    /* ...down to the beat blocks (y 23). */
-    if (chords && chords.next) perfFitBigChord(RX, 8, chords.next, RIGHT_W, 1, 13);
+    /* Right: the next chord (its root doubled, the rest small, wrapping
+     * beside it) and its beats; the next section and its bars. */
+    const top = 1;
+    if (chords && chords.next) perfFitBigChord(RX, top, chords.next, RIGHT_W, 2, 22, 1);
     const bpb = song && song.time_sig_num > 0 ? song.time_sig_num : 4;
+    const beatY = top + 24, secY = beatY + 6, barY = secY + 6;
     if (chords && chords.beats) {
         const n = Math.min(8, bpb);
-        const w = perfBlocks(RX, 23, n, Math.min(chords.beats, n), RIGHT_W - 10, 5, 9);
+        const w = perfBlocks(RX, beatY, n, Math.min(chords.beats, n), RIGHT_W - 10, 5, 9);
         /* further off than a bar of blocks: the count beside them */
-        if (chords.beats > n) perfPrint(RX + w + 3, 23, String(chords.beats), 1);
+        if (chords.beats > n) perfPrint(RX + w + 3, beatY, String(chords.beats), 1);
     }
-    perfPrint(RX, 32, perfFitText(nextSecName || "—", RIGHT_W), 1);
+    perfPrint(RX, secY, perfFitText(nextSecName || "-", RIGHT_W), 1);
     const sec = song && song.sections ? song.sections[at.si] : null;
     if (at.playing && sec && nextSecName) {
         const len = Math.max(1, Math.ceil(sectionBars(sec) - 1e-6));
         const left = Math.max(1, Math.ceil(sectionBars(sec) - at.pos - 1e-6));
         const n = Math.min(8, len);
-        const w = perfBlocks(RX, 39, n, Math.min(left, n), RIGHT_W - 10, 4, 14);
-        if (left > n) perfPrint(RX + w + 3, 39, String(left), 1);
+        const w = perfBlocks(RX, barY, n, Math.min(left, n), RIGHT_W - 10, 4, 14);
+        if (left > n) perfPrint(RX + w + 3, barY, String(left), 1);
     }
 
-    /* Foot: the key (and capo), the song's time, the next song. */
+    /* Foot: the key (and capo), the battery (Move's own is hidden while
+     * Arranger is up) and the song's time; then the song playing (left) and
+     * the next (right), in turn. */
     fill_rect(0, 45, SCREEN_WIDTH, 1, 1);
     const keyText = "Key " + keyLabel(playKey) + (capo ? "  Capo " + capo : "");
     perfPrintKey(2, 49, keyText);
     const clock = perfSongClock(fullSong);
     const time = formatTime(clock.cur) + "/" + formatTime(clock.total);
-    perfPrint(SCREEN_WIDTH - 2 - perfTextWidth(time) + 1, 49, time, 1);
-    perfPrint(1, 58, perfFitText("Next: " + (nextSongName || "—"), SCREEN_WIDTH - 2), 1);
+    const timeX = SCREEN_WIDTH - 2 - perfTextWidth(time) + 1;
+    perfPrint(timeX, 49, time, 1);
+    drawBatteryBadge(timeX - 5, 49);
+    const showNext = nextSongName && Math.floor(Date.now() / PERF_BIG_SONG_SWAP_MS) % 2 === 1;
+    if (showNext) {
+        const t = perfFitText("Next: " + nextSongName, SCREEN_WIDTH - 2);
+        perfPrint(SCREEN_WIDTH - 1 - perfTextWidth(t), 58, t, 1);
+    } else {
+        perfPrint(1, 58, perfFitText("Now: " + (songName || "-"), SCREEN_WIDTH - 2), 1);
+    }
 }
 
 function drawPerfSetlist() {
