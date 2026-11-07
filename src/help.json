@@ -186,15 +186,19 @@
           "title": "Click Track",
           "lines": [
             "Track 4 twice shows",
-            "it. On/off: Song",
-            "Settings > Click.",
-            "Items set the click",
-            "volume from a bar/",
-            "beat; 0% = silent.",
+            "it. Items set the",
+            "click volume from a",
+            "bar/beat; 0% =",
+            "silent.",
             "",
-            "Each section starts",
-            "at Options > Click",
-            "> Volume."
+            "Menu: the song's",
+            "Click Settings --",
+            "Enabled (saved, set",
+            "as the song opens),",
+            "Volume each section",
+            "starts at, Accent/",
+            "Normal notes. Unset:",
+            "Options > Click's."
           ]
         },
         {

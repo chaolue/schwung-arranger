@@ -133,6 +133,8 @@ const VIEW_TRIM = "trim";
 /* Song Builder's Similar list (Shift+Record, or a clip's Edit > Find
  * Similar), and Record's list of the folders the song's clips come from. */
 const VIEW_SIMILAR = "similar";
+/* Song Builder's Click track settings (Menu on the Click track). */
+const VIEW_CLICK_SETTINGS = "click_settings";
 const VIEW_SONG_FOLDERS = "song_folders";
 const VIEW_SONG_BANK = "song_bank";
 const VIEW_PERFORMANCE = "performance_view";
@@ -2677,7 +2679,7 @@ const SCROLLABLE_MENU_VIEWS = new Set([
     VIEW_SETLIST_BANK, VIEW_SETLIST_EDIT,
     VIEW_SETLIST_PICK, VIEW_SETLIST_CLICK, VIEW_SETLIST_SECTIONS, VIEW_SETLIST_SECTION_PICK, VIEW_COPY_TRACK_PICK,
     VIEW_PERF_SETLIST, VIEW_PERFORMANCE,
-    VIEW_JAM_FOLDER, VIEW_JAM, VIEW_SECTION_PICK, VIEW_CHORD_PICK, VIEW_INSTRUMENT
+    VIEW_JAM_FOLDER, VIEW_JAM, VIEW_SECTION_PICK, VIEW_CHORD_PICK, VIEW_INSTRUMENT, VIEW_CLICK_SETTINGS
 ]);
 const MENU_SCROLL_TICK_MS = 30; /* ~25fps redraw for marquee animation (halves the ~2s scroll-start delay) */
 let lastMenuScrollTick = 0;
@@ -3901,6 +3903,21 @@ export function toEngineSongJson(song) {
     });
 }
 
+/* A song's own Click Settings, as saved: only what it sets (On/Off,
+ * Volume 0-100, Accent/Normal Note 0-127), else none -- the rest are
+ * Options > Click's. */
+export function songClickSettings(cs) {
+    if (!cs || typeof cs !== "object") return undefined;
+    const out = {};
+    if (typeof cs.enabled === "boolean") out.enabled = cs.enabled;
+    const int = (v, lo, hi) => typeof v === "number" && isFinite(v) ? Math.max(lo, Math.min(hi, Math.round(v))) : undefined;
+    const vol = int(cs.volume, 0, 100), acc = int(cs.accent_note, 0, 127), nor = int(cs.normal_note, 0, 127);
+    if (vol !== undefined) out.volume = vol;
+    if (acc !== undefined) out.accent_note = acc;
+    if (nor !== undefined) out.normal_note = nor;
+    return Object.keys(out).length ? out : undefined;
+}
+
 export function toUiSong(engineLike) {
     const s = engineLike || {};
     const songFolder = s.source_folder || "";
@@ -3913,6 +3930,7 @@ export function toUiSong(engineLike) {
         time_sig_den: s.time_sig_den || (s.time_signature ? s.time_signature[1] : 4),
         locked: !!(s.locked),
         key: s.key || DEFAULT_KEY,
+        click_settings: songClickSettings(s.click_settings),
         created: s.created || new Date().toISOString(),
         modified: s.modified || new Date().toISOString(),
         sections: (s.sections || []).map(sec => ({
@@ -4410,19 +4428,47 @@ function activeOutputChannel() {
     return outputChannel;
 }
 
-/* Push the click track's route, notes and on/off to the DSP. */
+/* The song whose Click Settings apply: the one Song Builder or Perform
+ * has open (Perform's as its setlist plays it); none in Jam. */
+function clickSettingsSong() {
+    if (currentMode === MODE_PERFORMANCE) return perfFullSong || currentSong;
+    return currentMode === MODE_BUILDER ? currentSong : null;
+}
+
+/* A click setting as it plays: the song's own (its Click Settings), else
+ * Options > Click's. key: "volume", "accent_note" or "normal_note". */
+function clickSetting(key, song) {
+    const own = song && song.click_settings ? song.click_settings[key] : undefined;
+    if (typeof own === "number") return own;
+    return key === "volume" ? clickVolume : key === "accent_note" ? clickAccentNote : clickNormalNote;
+}
+
+/* Push the click track's route, notes and on/off to the DSP -- the notes
+ * and volume the open song's, where it sets them. */
 function pushClickToDsp() {
     if (typeof host_module_set_param !== "function" &&
         typeof host_module_set_param_blocking !== "function") return;
     const block = typeof host_module_set_param_blocking === "function";
     const set = block ? host_module_set_param_blocking : host_module_set_param;
     const t = block ? 100 : undefined;
+    const song = clickSettingsSong();
     set("click_output", clickOutput, t);
     set("click_channel", String(clickMidiChannel - 1), t); /* DSP wants 0-based */
-    set("click_accent_note", String(clickAccentNote), t);
-    set("click_normal_note", String(clickNormalNote), t);
-    set("click_volume", String(clickVolume), t);
+    set("click_accent_note", String(clickSetting("accent_note", song)), t);
+    set("click_normal_note", String(clickSetting("normal_note", song)), t);
+    set("click_volume", String(clickSetting("volume", song)), t);
     set("click_enabled", clickOn ? "1" : "0", t);
+}
+
+/* A song opened (Song Builder) or switched to (Perform): its click on or
+ * off, if it saved one, and its notes and volume. */
+function applySongClick() {
+    const song = clickSettingsSong();
+    if (song && song.click_settings && typeof song.click_settings.enabled === "boolean") {
+        clickOn = song.click_settings.enabled;
+        ledDirtyAll = true;
+    }
+    pushClickToDsp();
 }
 
 /* Track 4, in every mode: turn the click on or off. */
@@ -6005,6 +6051,7 @@ function updateButtonLEDs() {
             case VIEW_INSTRUMENT:
             case VIEW_INSTRUMENT_BAR:
             case VIEW_JAM_INSTRUMENT:
+            case VIEW_CLICK_SETTINGS:
                 active.set(MoveBack, WhiteLedFull);
                 active.set(MoveMainButton, WhiteLedFull);
                 break;
@@ -8470,6 +8517,99 @@ function handleChordPickInput(cc, value) {
 
 /* ── Instrument track menu ──────────────────────────────────────────── */
 
+/* ── Click Settings (Menu on the Click track) ──────────────────────────
+ *
+ * The song's own click: Enabled (saved, and set when the song opens --
+ * Track 4 and Song Settings turn it on or off for now), the Volume each
+ * section starts at (the Click track's items change it from there), and the
+ * Accent/Normal notes. A value the song doesn't set is Options > Click's,
+ * shown as "Options (...)"; turning back to it clears the song's own. */
+let songClickFocus = 0;
+let songClickEditing = false;
+const SONG_CLICK_KEYS = ["enabled", "volume", "accent_note", "normal_note"];
+
+function openSongClick() {
+    songClickFocus = 0;
+    songClickEditing = false;
+    currentView = VIEW_CLICK_SETTINGS;
+    menuStack.push({ title: "Click", selectedIndex: 0 });
+    needsRedraw = true;
+}
+
+function songClickRows(song) {
+    const cs = (song && song.click_settings) || {};
+    const val = (k, fmt) => typeof cs[k] === "number" ? fmt(cs[k]) : "Options (" + fmt(clickSetting(k, null)) + ")";
+    return [
+        { key: "enabled", label: "Enabled", value: clickOn ? "On" : "Off" },
+        { key: "volume", label: "Volume", value: val("volume", v => v + "%") },
+        { key: "accent_note", label: "Accent Note", value: val("accent_note", midiNoteLabel) },
+        { key: "normal_note", label: "Normal Note", value: val("normal_note", midiNoteLabel) }
+    ];
+}
+
+/* The click on or off now, and saved as the song's (not a locked song's). */
+function setSongClickEnabled(on) {
+    clickOn = on;
+    if (currentSong && !songIsLocked()) {
+        currentSong.click_settings = songClickSettings(Object.assign({}, currentSong.click_settings, { enabled: on }));
+        unsavedChanges = true;
+    }
+    if (typeof host_module_set_param === "function") host_module_set_param("click_enabled", on ? "1" : "0");
+    ledDirtyAll = true;
+    needsRedraw = true;
+}
+
+/* Turn the song's Volume (5% steps) or a note; landing on Options > Click's
+ * value clears the song's own. */
+function stepSongClick(key, delta) {
+    if (!currentSong) return;
+    const volume = key === "volume";
+    const next = Math.max(0, Math.min(volume ? 100 : 127, clickSetting(key, currentSong) + delta * (volume ? 5 : 1)));
+    const cs = Object.assign({}, currentSong.click_settings);
+    if (next === clickSetting(key, null)) delete cs[key]; else cs[key] = next;
+    currentSong.click_settings = songClickSettings(cs);
+    unsavedChanges = true;
+    const param = volume ? "click_volume" : key === "accent_note" ? "click_accent_note" : "click_normal_note";
+    if (typeof host_module_set_param === "function") host_module_set_param(param, String(next));
+}
+
+function drawSongClick() {
+    drawMenuHeader("Click", clickOn ? "ON" : "OFF");
+    drawMenuList({
+        ...LIST_ROW_FIT,
+        labelX: 3,
+        items: songClickRows(currentSong),
+        selectedIndex: songClickFocus,
+        getLabel: (item) => item.label,
+        getValue: (item) => item.value,
+        valueAlignRight: true,
+        editMode: songClickEditing,
+        labelGap: 2,
+        prioritizeSelectedValue: true,
+        selectedMinLabelChars: 6,
+        listArea: { topY: LIST_TOP_Y, bottomY: LIST_INDICATOR_BOTTOM_Y }
+    });
+}
+
+function handleSongClickInput(cc, value) {
+    const key = SONG_CLICK_KEYS[songClickFocus];
+    if (cc === MoveMainKnob) {
+        const delta = decodeDelta(value);
+        if (songClickEditing) stepSongClick(key, delta);
+        else songClickFocus = Math.max(0, Math.min(SONG_CLICK_KEYS.length - 1, songClickFocus + delta));
+        needsRedraw = true;
+    } else if (cc === MoveMainButton && value > 0) {
+        if (key === "enabled") { setSongClickEnabled(!clickOn); return; }
+        if (songIsLocked()) { lockedNotice(); return; }
+        songClickEditing = !songClickEditing;
+        needsRedraw = true;
+    } else if (cc === MoveBack && value > 0) {
+        if (songClickEditing) songClickEditing = false;
+        else { menuStack.pop(); currentView = VIEW_BUILDER; }
+        needsRedraw = true;
+    }
+}
+
 function openInstrumentMenu(track) {
     instrumentEditTrack = track;
     instrumentFocus = 0;
@@ -9804,9 +9944,9 @@ function handleSongSettingsInput(cc, value) {
         needsRedraw = true;
     } else if (cc === MoveMainButton && value > 0) {
         if (songSettingsFocus === SONG_SETTINGS_CLICK_ROW) {
-            /* The click on or off (it was Track 4 on the Click track). Not
-             * part of the song, so a locked song allows it too. */
-            toggleClick();
+            /* The click on or off, saved with the song as Click Settings'
+             * Enabled is (a locked song: only for now). */
+            setSongClickEnabled(!clickOn);
             return;
         }
         if (songSettingsFocus === SONG_SETTINGS_RESTORE_ROW) {
@@ -11382,6 +11522,7 @@ function handleRootInput(cc, value) {
             needsRedraw = true;
         } else if (idx === 3) {
             currentMode = MODE_JAM;
+            pushClickToDsp();   /* Options > Click's notes and volume, not a song's */
             currentView = VIEW_JAM_FOLDER;
             menuStack.push({ title: "Jam Folder", selectedIndex: 0 });
             loadLibraryFolders();
@@ -11450,6 +11591,7 @@ function handleFolderListInput(cc, value) {
                 currentSong = newSong(folder);
                 activeSongObj = currentSong;
                 currentSong.name = songName;
+                applySongClick();   /* the last song's notes and volume go */
                 unsavedChanges = false;
                 currentSectionIndex = 0;
                 builderCursor = 0;
@@ -11876,6 +12018,8 @@ function handleBuilderInput(cc, value) {
     } else if (cc === MoveMenu && value > 0) {
         if (isInstTrack(builderTrack)) {
             openInstrumentMenu(builderTrack);
+        } else if (builderTrack === TRACK_CLICK) {
+            openSongClick();
         } else {
             openSongSettings();
         }
@@ -12043,7 +12187,7 @@ function builderPlayPress() {
 
 /* Song Builder's settings pages, where Play works as in Song Builder. */
 const SONG_BUILDER_SUBVIEWS = new Set([VIEW_CHORD_PICK, VIEW_INSTRUMENT_BAR, VIEW_INSTRUMENT,
-    VIEW_TRIM, VIEW_SONG_SETTINGS, VIEW_SONG_BACKUPS]);
+    VIEW_TRIM, VIEW_SONG_SETTINGS, VIEW_SONG_BACKUPS, VIEW_CLICK_SETTINGS]);
 
 /* Before Play starts from a settings page, save what the page is editing --
  * without leaving it -- so you hear it. The chord and item pages then carry
@@ -12310,6 +12454,7 @@ function loadSelectedSongIntoBuilder() {
     }
     currentMode = MODE_BUILDER;
     currentView = VIEW_BUILDER;
+    applySongClick();
     menuStack.push({ title: "Arrange", selectedIndex: 0 });
     builderPage = 0;
     builderCursor = 0;
@@ -15806,6 +15951,7 @@ function perfLoadSong(index, resetToggles) {
     perfSongLoaded = true;
     perfFullSong = JSON.parse(JSON.stringify(currentSong));
     perfFullSongLoaded = false; /* DSP gets it on the next playCurrentSong */
+    applySongClick();
     /* Live mute toggles are a per-session performance control, not a saved
      * preference: they're set to this song's own authored instrument enabled
      * flags (drums always on; an instrument slot the song never configured
@@ -17305,6 +17451,7 @@ export function footerHints() {
              * with it don't fit. */
             return similarResults && similarResults.length ? [["CLK", "LOAD"], ["PLAY", "HEAR"]] : [["BACK", "OUT"]];
         case VIEW_INSTRUMENT: return editMenuHints(instrumentEditing);
+        case VIEW_CLICK_SETTINGS: return editMenuHints(songClickEditing);
         case VIEW_INSTRUMENT_BAR: return editMenuHints(itemEditing);
         case VIEW_CHORD_PICK: return editMenuHints(chordPickEditing);
         case VIEW_SETLIST_CLICK:
@@ -17770,6 +17917,7 @@ globalThis.tick = function() {
                 case VIEW_JAM: drawJam(); break;
                 case VIEW_CHORD_PICK: drawChordPick(); break;
                 case VIEW_INSTRUMENT: drawInstrument(); break;
+                case VIEW_CLICK_SETTINGS: drawSongClick(); break;
                 case VIEW_INSTRUMENT_BAR: drawInstrumentBarMenu(); break;
                 case VIEW_JAM_INSTRUMENT: drawJamInstrumentMenu(); break;
             }
@@ -17870,6 +18018,7 @@ function routeCcInput(rawData, cc, value) {
         case VIEW_JAM: handleJamInput(cc, value); break;
         case VIEW_CHORD_PICK: handleChordPickInput(cc, value); break;
         case VIEW_INSTRUMENT: handleInstrumentInput(cc, value); break;
+        case VIEW_CLICK_SETTINGS: handleSongClickInput(cc, value); break;
         case VIEW_INSTRUMENT_BAR: handleInstrumentBarMenuInput(cc, value); break;
         case VIEW_JAM_INSTRUMENT: handleJamInstrumentMenuInput(cc, value); break;
     }

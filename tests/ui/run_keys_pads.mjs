@@ -87,16 +87,16 @@ const p3 = eng.instruments[2];
 check(p3 && p3.voicing === "chord" && p3.follow_note === 0 && p3.enabled === true && p3.output === "external" && p3.channel === 1,
       "the engine gets Pads as a third chord instrument on its route: " + JSON.stringify(p3));
 
-/* ---- the Click: on Track 4 again, on/off in Song Settings ---- */
+/* ---- the Click: on Track 4 again, on/off in its Click Settings ---- */
 jog(1); click();               /* P again */
 press(C.MoveRow4); if (!has(["T4", "PADS"])) press(C.MoveRow4);
 check(has(["T4", "PADS"]), "the Click track on Track 4: " + JSON.stringify(M.footerHints()));
-press(C.MoveMenu);             /* Song Settings */
+press(C.MoveMenu);             /* Click Settings */
 t = menuText();
-check(/Click/.test(t) && /Off/.test(t), "Song Settings has Click, Off: " + t);
-jog(30); click();              /* the last row: Click */
+check(/Enabled/.test(t) && /Off/.test(t), "Click Settings: Enabled, Off: " + t);
+jog(-30); click();             /* the first row: Enabled */
 t = menuText();
-check(H.dspSets.some(x => x[0] === "click_enabled" && x[1] === "1"), "Click row: click on");
+check(H.dspSets.some(x => x[0] === "click_enabled" && x[1] === "1"), "Enabled: click on");
 back(); back();
 
 /* ---- Keys in Perform ---- */

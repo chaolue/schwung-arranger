@@ -3,6 +3,11 @@
 ## Unreleased
 
 ### Song Builder
+- **Click Settings** (Menu on the Click track), saved with the song as an
+  instrument's are: Enabled (opening the song, or switching to it in
+  Perform, turns the click on or off to match), the Volume each section
+  starts at, and the Accent and Normal notes. What a song doesn't set is
+  Options > Click's. Song Settings' Click row is the same saved Enabled.
 - **Similar clips**: Shift+Record on the Drum track, or **Find Similar** at
   the bottom of a clip's Trim Clip screen, lists clips from other folders
   with a rhythm like the selected clip's -- same meter, and grooves for a

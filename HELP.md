@@ -311,12 +311,29 @@ a muted bar dimmed, and the selected item's bar white.
 ### Click Track
 
 Set how loud the click is through the song. Press **Track 4** twice to show it
-(the first press shows the Pads). Turn the click on or off with **Click** in
-Song Settings (**Menu** on this track). Each section starts at the click volume set
-in **Options: Click**; a **click item** changes it from a bar and beat until the
-section's next item — louder in a chorus, **0%** for silence. Controls are the
-same as the Chord Track's; an item's fields are Bar, Beat, Advanced, **Volume**
-(0–100%) and Delete.
+(the first press shows the Pads). Each section starts at the song's click
+**Volume** (Click Settings, below); a **click item** changes it from a bar and
+beat until the section's next item — louder in a chorus, **0%** for silence.
+Controls are the same as the Chord Track's; an item's fields are Bar, Beat,
+Advanced, **Volume** (0–100%) and Delete.
+
+#### Click Settings
+
+**Menu** on the Click track opens the song's own click settings, as Menu on an
+Inst track opens its Instrument Settings. They're saved with the song.
+
+| Setting | Meaning |
+|---------|---------|
+| Enabled | The click on or off (jog click toggles it). Saved with the song: opening it in Song Builder, or switching to it in Perform, turns the click on or off to match. **Track 4** in Perform (Shift + Track 4) turns it on or off for now without saving |
+| Volume | Where each section's click starts (0–100%); the Click track's items change it from there |
+| Accent Note | The note for beat 1 of each bar |
+| Normal Note | The note for the other beats |
+
+A setting the song hasn't set is **Options: Click**'s, shown as e.g.
+**Options (100%)**; turning back to that value clears the song's own, so it
+follows Options again. Output and MIDI channel are always Options'. A locked
+song's settings are read-only; Enabled still turns the click on or off, without
+saving. Jam uses Options' settings.
 
 **Button LED hints:** Track 4 is bright orange while it shows (dim while the
 click is off). Bars where an item starts are in orange.
@@ -451,7 +468,7 @@ key and the song lock, or restore an earlier version of the song.
 | Key | The song's key — changing it transposes every existing chord to the same relative harmony in the new key |
 | Lock Song | When On, the song cannot be renamed, deleted, or edited — clips, chords and items included. The footer then offers Menu (to reach this setting) in place of the click, and a click or pad that would edit shows **Song locked** |
 | Restore Backup | Opens the list of saved versions of this song (the value is how many there are) |
-| Click | The click on or off (jog click) — for every song, as in Perform; allowed on a locked song |
+| Click | The click on or off (jog click), saved with the song as Click Settings' **Enabled** is; on a locked song, for now only |
 
 #### Restore Backup
 
@@ -967,7 +984,7 @@ Output routing for one track, opened from the Options list.
 The click track: a metronome that plays a note on every beat while the
 Arranger plays — the accent note on beat 1 of each bar, the normal note on the
 others (the time signature's beat, so eighths in 6/8). Turn it on or off with
-**Shift + Track 4** in Perform, and with the **Click** row in Song Settings. It also plays each Perform song's
+**Shift + Track 4** in Perform, and in a song's **Click Settings** (Menu on the Click track), which also give a song its own volume and notes. It also plays each Perform song's
 count-in, when that song's **Sound** is on (see **Setlist Song Settings**), and
 it stays quiet during a count-in so the two don't double up.
 
@@ -983,9 +1000,9 @@ it stays quiet during a count-in so the two don't double up.
 |-------|---------|
 | Output | Where the click goes: External (MIDI_OUT), Move (Move tracks), or Schwung (the synth chain). Default **Schwung** |
 | MIDI Channel | MIDI channel (1–16) for the click. Default **10** |
-| Accent Note | Note for beat 1 of each bar. Default **76** (GM Hi Wood Block) |
-| Normal Note | Note for the other beats. Default **77** (GM Low Wood Block) |
-| Volume | How loud the click is (0–100%, scaling its velocity), where a song's Click track doesn't say otherwise; every song section starts here. Always used for count-ins. Default **100%** |
+| Accent Note | Note for beat 1 of each bar (unless a song's Click Settings set one). Default **76** (GM Hi Wood Block) |
+| Normal Note | Note for the other beats (likewise). Default **77** (GM Low Wood Block) |
+| Volume | How loud the click is (0–100%, scaling its velocity), for a song whose Click Settings don't set their own; every section starts here, and its Click track's items change it. Count-ins use the same. Default **100%** |
 
 **Button LED hints:** Back and Main are lit.
 
