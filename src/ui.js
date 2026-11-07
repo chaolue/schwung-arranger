@@ -1712,9 +1712,9 @@ function chainSlotName(slot) {
 }
 
 /* `pre` + `name` + `post` in `maxPx`, shortening the name (with "..") rather
- * than losing the end of the line. */
-function fitWithName(pre, name, post, maxPx) {
-    const measure = (t) => (typeof text_width === "function" ? text_width(t) : t.length * 6);
+ * than losing the end of the line. `measure`: the face's text width (Move's
+ * print font by default). */
+function fitWithName(pre, name, post, maxPx, measure = (t) => (typeof text_width === "function" ? text_width(t) : t.length * 6)) {
     if (measure(pre + name + post) <= maxPx) return pre + name + post;
     for (let n = name.length - 1; n > 0; n--) {
         const t = pre + name.substring(0, n).trimEnd() + ".." + post;
@@ -1743,8 +1743,10 @@ function drawPerfKnobFeedback() {
          * "C1 Lead Pad - Settings". */
         const slotName = m.comp === SETTINGS_COMP && !isBusSlot(m.slot) ? chainSlotName(m.slot) : "";
         fitted = !!slotName;
-        /* Drawn from x=1, so the line has 127 px: Move's spaces are 5 px wide. */
-        where = slotName ? fitWithName(pre, slotName, " - " + compLabel(m.comp), 127)
+        /* Drawn from x=1, so the line has 127 px: Move's spaces are 5 px wide.
+         * The big view draws it in its own small face (perfTextWidth). */
+        where = slotName ? fitWithName(pre, slotName, " - " + compLabel(m.comp), perfBigView ? 125 : 127,
+                                       perfBigView ? perfTextWidth : undefined)
             : pre + compLabel(m.comp) + (m.moduleName ? " " + m.moduleName : "");
         if (k.status === "missing") what = m.label + ": not loaded";
         else if (k.status === "unknown") what = m.label + ": no answer";
@@ -1753,6 +1755,14 @@ function drawPerfKnobFeedback() {
             /* A preset's name alone when the label would crowd it out. */
             what = presetNameFor(k.meta, k.value) && (m.label + " " + v).length > 21 ? v : m.label + " " + v;
         }
+    }
+    if (perfBigView) {
+        /* The big view: below its rule, on the key and Now/Next lines, in
+         * their small face -- the chords and counts above stay in view. */
+        fill_rect(0, 46, 128, 18, 0);
+        perfPrint(2, 49, perfFitText(where, SCREEN_WIDTH - 4), 1);
+        perfPrint(2, 58, perfFitText(what, SCREEN_WIDTH - 4), 1);
+        return;
     }
     fill_rect(0, 40, 128, 24, 0);
     fill_rect(0, 40, 128, 1, 1);

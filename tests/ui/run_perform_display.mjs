@@ -263,6 +263,14 @@ check(drawnAt(1, 58, "NOW: YES HE LIVES"), "big view foot: Now: the song, left")
 phase(1);
 const nx = findOnRow(58, "NEXT: ANOTHER SONG");
 check(nx > 0 && nx + fontWidth4x5("NEXT: ANOTHER SONG") === 127 && findOnRow(58, "NOW:") < 0, "...then Next: the next song, right-aligned: " + nx);
+/* A knob touched: its overlay takes the foot's two lines (below the rule),
+ * in their small face; the rest of the view stays. */
+g.onMidiMessageInternal([0x90, 0, 127]); tick(5);            /* touch knob 1 (unassigned) */
+check(drawnAt(2, 49, "BANK 1 KNOB 1") && drawnAt(2, 58, "UNASSIGNED"), "a knob touched: its overlay on the foot's two lines");
+check(solid(0, 45, W, 1) && findOnRow(58, "NEXT:") < 0 && findOnRow(49, "KEY") < 0, "...below the rule, in place of the key and songs");
+check(drawn2At(2, 31, "INTRO"), "...the section (and the chords) still in view");
+g.onMidiMessageInternal([0x90, 0, 0]); tick(100);            /* released, and the overlay's time out */
+check(findOnRow(49, "KEY") === 2, "released: the key line back");
 
 /* The big view's section: always doubled, shortened to fit the left half
  * (58 px), its number kept. */

@@ -626,6 +626,8 @@ distance, with the chords, and again to go back.
 - **Foot:** the key (and the setlist's **Capo** for the song, if set), the
   battery and the song's time; under them, in turn every 3 seconds, **Now:**
   the song playing (left) and **Next:** the next song (right).
+  Touching or turning a knob shows what it controls on these two lines
+  instead, so the chords and sections above stay in view.
 
 As the instruments play them, a chord lasts until the next one in its section,
 so a section with no chord on its first beat shows **N.C.** until its first.
