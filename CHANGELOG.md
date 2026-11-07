@@ -85,21 +85,18 @@
 - Setlist Edit: Left/Right no longer move songs (Shift + jog does).
 
 ### Perform
-- The display is rearranged: the song is in the header, beside the battery
-  (without "Now:"); below it the chords and the song's key (the setlist's,
-  if it sets one); then one Sec line (the section playing > the next one,
-  replacing Sec and NSc), the next song and the time.
-- The chord line shows the chord playing and the next one, and while playing
-  the beats to it, counting down (**C > Am 3**); stopped, the chord the
-  section about to play starts on and the one after. Minor's m is drawn
-  small, as a flat is, so Am doesn't read AM.
-- **Capo** (Setlist Edit > a song): the fret a guitarist's capo is on.
-  Perform's chord line shows the chords as the shapes played there; the key
-  stays the one the song sounds in.
+- The display has a **Perform** header with the song's key (the setlist's,
+  if it sets one) beside the battery. The song moves to the line below,
+  without "Now:", and Sec and NSc are one line: the section playing > the
+  next one.
 - **Big view** (jog click in Perform, and again to go back): the chord
   playing large with its section; the next chord with blocks counting the
   beats to it, the next section with blocks counting the bars to it; the key
-  and capo, the time, the next song and the battery.
+  and capo, the time, the next song and the battery. Minor's m and a flat
+  are drawn small, so Am doesn't read AM.
+- **Capo** (Setlist Edit > a song): the fret a guitarist's capo is on.
+  Perform's big view shows the chords as the shapes played there; the key
+  stays the one the song sounds in.
 - In 6/8 the step LEDs flash the first bar's six beats, not twelve.
 - A knob on a module's own presets (its preset browser's parameter -- an
   SF2's programs, say) shows the preset's name in the popup and the Knobs

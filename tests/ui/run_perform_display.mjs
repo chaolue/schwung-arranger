@@ -1,9 +1,11 @@
-/* Perform's display: the song in the header (beside the battery), then the
- * chords -- the one playing > the next, and the beats to it -- with the key
- * the song plays in at the right, one Sec line with the section playing >
- * the next one, the next song, and the time. The key is the setlist's own
- * for the song when it sets one, and a flat and minor's m are drawn small
- * (the face has capitals only). Pixels are read back from fill_rect and
+/* Perform's display: a "Perform" header with the key the song plays in at
+ * its right (beside the battery), then the song (no "Now:"), one Sec line
+ * with the section playing > the next one, the next song, and the time.
+ * The key is the setlist's own for the song when it sets one, and a flat is
+ * drawn as a small b (the face has capitals only). Its big view (jog click)
+ * has the chords: the one playing, big, and its section; the next chord and
+ * section with blocks counting the beats and bars to them; the key and
+ * capo, the time and the next song. Pixels are read back from fill_rect and
  * compared with the face's own drawing of each expected line. */
 import * as H from './host_mock.mjs';
 import { fontPrint4x5, fontWidth4x5 } from './shared/param_pages/font4x5.mjs';
@@ -102,12 +104,30 @@ function findOnRow(y, text) {
 }
 const FLAT = ["#..", "#..", "###", "#.#", "###"];
 const flatAt = (x, y) => FLAT.every((row, r) => [...row].every((c, i) => fb[(y + r) * W + x + i] === (c === "#" ? 1 : 0)));
-const MINOR = [".....", ".....", "##.#.", "#.#.#", "#.#.#"];
-const minorAt = (x, y) => MINOR.every((row, r) => [...row].every((c, i) => fb[(y + r) * W + x + i] === (c === "#" ? 1 : 0)));
-/* The chord line's row, and where its second chord starts, after "<first> > ". */
-const R = 12;
-const secondX = (first) => 2 + fontWidth4x5(first) + 1 + fontWidth4x5(" > ") + 1;
 const valueX = 2 + Math.max(fontWidth4x5("SEC:"), fontWidth4x5("NEXT:")) + 4;
+const M = await import('./ui_test.mjs');
+const PLAY = 85;
+/* A block at (x, y), w x h: solid, or just its outline. */
+const solid = (x, y, w, h) => { for (let yy = y; yy < y + h; yy++) for (let xx = x; xx < x + w; xx++) if (!fb[yy * W + xx]) return false; return true; };
+const hollow = (x, y, w, h) => solid(x, y, w, 1) && solid(x, y + h - 1, w, 1) && !fb[(y + 2) * W + x + 3];
+const lit = (x0, y0, x1, y1) => { for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) if (fb[y * W + x]) return true; return false; };
+/* `ch` in the big face at (x, y), at scale `s`. */
+const bigAt = (x, y, ch, s = 1) => {
+    const want = new Uint8Array(W * 64);
+    BIG.fontPrint({ fillRect: (fx, fy, fw, fh) => { for (let yy = y + (fy - y) * s; yy < y + (fy - y) * s + fh * s; yy++) for (let xx = x + (fx - x) * s; xx < x + (fx - x) * s + fw * s; xx++) want[yy * W + xx] = 1; } }, x, y, ch, 1);
+    for (let yy = y; yy < y + 11 * s; yy++) for (let xx = x; xx < x + BIG.fontWidth(ch) * s; xx++) if (want[yy * W + xx] !== fb[yy * W + xx]) return false;
+    return true;
+};
+const big2At = (x, y, ch) => bigAt(x, y, ch, 2);
+/* `text` in the small face doubled, at (x, y). */
+function drawn2At(x, y, text) {
+    const want = new Uint8Array(W * 64);
+    fontPrint4x5({ fillRect: (fx, fy, fw, fh) => {
+        for (let yy = y + (fy - y) * 2; yy < y + (fy - y) * 2 + fh * 2; yy++) for (let xx = x + (fx - x) * 2; xx < x + (fx - x) * 2 + fw * 2; xx++) want[yy * W + xx] = 1;
+    } }, x, y, text, 1);
+    for (let yy = y; yy < y + 10; yy++) for (let xx = x; xx < x + fontWidth4x5(text) * 2; xx++) if (want[yy * W + xx] !== fb[yy * W + xx]) return false;
+    return true;
+}
 
 g.init();
 tick(100);
@@ -115,16 +135,15 @@ jog(-8); jog(2); click();     /* Perform */
 click();                      /* A Gig */
 tick(30);
 
-check(drawnAt(2, 1, "YES HE LIVES"), "the header is the song");
-check(findOnRow(1, "PERFORM") < 0 && findOnRow(1, "KEY") < 0, "...no Perform title, no key there");
-const keyX = findOnRow(R, "KEY B");
-check(keyX > 40, "the line below has the key at its right: " + keyX);
-/* The flat one gap after the B, ending the line. */
+check(drawnAt(2, 1, "PERFORM"), "the header says Perform");
+const keyX = findOnRow(1, "KEY B");
+check(keyX > 40, "the header's right has the key: " + keyX);
+/* The flat one gap after the B; the battery icon from column 116. */
 const flatX = keyX + fontWidth4x5("KEY B") + 1;
-check(keyX > 0 && flatAt(flatX, R), "...Bb, its flat a small b (not BB)");
-check(keyX > 0 && flatX + 2 === 126, "...right-aligned: " + (flatX + 2));
-check(findOnRow(R, "YES HE LIVES") < 0, "the song is no longer on that line");
-check(findOnRow(R, "NOW") < 0 && findOnRow(1, "NOW") < 0, "no Now: anywhere");
+check(keyX > 0 && flatAt(flatX, 1), "...Bb, its flat a small b (not BB)");
+check(keyX > 0 && flatX + 3 < 116, "...left of the battery");
+check(drawnAt(2, 12, "YES HE LIVES"), "the song on the line below, with no Now:");
+check(findOnRow(12, "NOW") < 0 && findOnRow(1, "NOW") < 0, "no Now: anywhere");
 check(drawnAt(2, 23, "SEC:") && drawnAt(valueX, 23, "INTRO > VERSE"), "one Sec line: Intro > Verse");
 check(findOnRow(34, "NSC") < 0, "no NSc line");
 check(drawnAt(2, 34, "NEXT:") && drawnAt(valueX, 34, "ANOTHER SONG"), "the next song below it, its name lined up with the section's");
@@ -135,46 +154,25 @@ cc(BACK, 127); cc(BACK, 0); tick(5);
 jog(-8); jog(2); click();     /* Perform */
 jog(1); click();              /* B Gig */
 tick(30);
-const ebX = findOnRow(R, "KEY E");
-check(ebX > 40 && flatAt(ebX + fontWidth4x5("KEY E") + 1, R), "the setlist's key for the song: Eb (" + ebX + ")");
-check(findOnRow(R, "KEY B") < 0, "...not the song's own Bb");
+const ebX = findOnRow(1, "KEY E");
+check(ebX > 40 && flatAt(ebX + fontWidth4x5("KEY E") + 1, 1), "the setlist's key for the song: Eb (" + ebX + ")");
+check(findOnRow(1, "KEY B") < 0, "...not the song's own Bb");
 
-/* ---- a song with chords: the chord and the next, before the key ---- */
+/* ---- a song with chords: none on the usual display; in the big view, the
+ * chord playing and the next, spelt for the key ---- */
 cc(BACK, 127); cc(BACK, 0); tick(5);
 jog(-8); jog(2); click();     /* Perform */
 jog(2); click();              /* C Gig */
 tick(30);
-check(drawnAt(2, 1, "CHORDS"), "the header is the song (Chords)");
-check(drawnAt(2, R, "C > A"), "stopped: the chord the song starts on > the next (C > A...)");
-check(minorAt(secondX("C") + fontWidth4x5("A") + 1, R), "...Am, its m drawn small (not AM)");
-check(findOnRow(R, "KEY C") > 40, "...the key still at the right");
-check(findOnRow(R, " 4") < 0 && findOnRow(R, " 1") < 0, "...no beat count while stopped");
-
-const PLAY = 85;
+check(drawnAt(2, 1, "PERFORM") && drawnAt(2, 12, "CHORDS"), "the usual display: Perform, then the song");
+check(!lit(fontWidth4x5("CHORDS") + 4, 12, 126, 16), "...and no chords beside it");
+click(); tick(5);             /* the big view */
+check(big2At(2, 2, "C") && bigAt(67, 8, "A"), "big view, stopped: C, next A(m)");
 cc(PLAY, 127); cc(PLAY, 0); tick(20);
-barFrac = 0.25; tick(10);    /* the Intro's first bar, beat 2 */
-check(drawnAt(2, R, "C > A") && drawnAt(secondX("C") + fontWidth4x5("A") + 1 + 5 + 1, R, " 3"),
-      "playing beat 2: C > Am 3 (beats to the change)");
-barFrac = 1.5; tick(10);     /* the Intro's second bar, beat 3 */
-check(drawnAt(2, R, "A") && minorAt(2 + fontWidth4x5("A") + 1, R), "playing bar 2: Am first: " + running);
-const afterAm = 2 + fontWidth4x5("A") + 1 + 5 + 1;
-check(drawnAt(afterAm, R, " > F 2"), "...then the next section's first chord, F, 2 beats away");
-barFrac = 2.5; tick(10);     /* the Verse's first bar */
-const bbFlatX = secondX("F") + fontWidth4x5("B") + 1;
-check(drawnAt(2, R, "F > B") && flatAt(bbFlatX, R) && drawnAt(bbFlatX + 4, R, "7"),
-      "the Verse: F > A#7, as the key spells it: Bb7, its flat small");
-check(drawnAt(bbFlatX + 4, R, "7 2"), "...2 beats away");
+barFrac = 2.5; tick(10);      /* the Verse's first bar */
+check(big2At(2, 2, "F") && bigAt(67, 8, "B"), "the Verse: F, next A#7 spelt as the key writes it, Bb7");
 cc(PLAY, 127); cc(PLAY, 0); tick(10);
-
-/* ---- capo 2: the chords as Bb shapes, the key as it sounds ---- */
-cc(BACK, 127); cc(BACK, 0); tick(5);
-jog(-8); jog(2); click();     /* Perform */
-jog(3); click();              /* D Gig */
-tick(30);
-check(drawnAt(2, R, "B") && flatAt(2 + fontWidth4x5("B") + 1, R), "capo 2: C shows as Bb");
-const gX = 2 + fontWidth4x5("B") + 1 + 3 + 1 + fontWidth4x5(" > ") + 1;
-check(drawnAt(gX, R, "G") && minorAt(gX + fontWidth4x5("G") + 1, R), "...and Am as Gm");
-check(findOnRow(R, "KEY C") > 40, "...the key still the one it sounds in (C)");
+click(); tick(5);             /* back */
 
 /* ---- a count-in: as the song takes over, the transport is still the
  * click's for a moment (at its end, bar 2) -- the count is the song's
@@ -183,34 +181,33 @@ cc(BACK, 127); cc(BACK, 0); tick(5);
 jog(-8); jog(2); click();     /* Perform */
 jog(4); click();              /* E Gig */
 tick(30);
+click(); tick(5);             /* the big view */
 barFrac = 0;
 cc(PLAY, 127); cc(PLAY, 0); tick(10);
 barFrac = 1.97;               /* the click's last beat, until the UI's count-in timer moves on */
-for (let i = 0; i < 400 && findOnRow(23, "CLICK") >= 0; i++) tick();
+for (let i = 0; i < 400 && !drawn2At(2, 31, "INTRO"); i++) tick();
 tick(2);
-check(running && drawnAt(2, R, "C > A") && drawnAt(secondX("C") + fontWidth4x5("A") + 1 + 5 + 1, R, " 4"),
-      "the song just started (the transport still the click's): C > Am 4, not bar 2's count");
-check(drawnAt(2, 23, "SEC:") && drawnAt(valueX, 23, "INTRO > VERSE"), "...and the Intro, not the Verse");
+const beatBlocks = (n) => [0, 1, 2, 3].every(i => i < n ? solid(67 + i * 9, 23, 7, 5) : hollow(67 + i * 9, 23, 7, 5));
+check(running && beatBlocks(4), "the song just started (the transport still the click's): 4 beats to Am, not bar 2's count");
+check(drawn2At(2, 31, "INTRO") && drawnAt(67, 32, "VERSE"), "...and the Intro, not the Verse");
 swaps++; barFrac = 0.05; tick(3);   /* the engine's swap shows */
-check(drawnAt(secondX("C") + fontWidth4x5("A") + 1 + 5 + 1, R, " 4"), "the swap shows: still 4");
+check(beatBlocks(4), "the swap shows: still 4");
 barFrac = 0.3; tick(3);
-check(drawnAt(secondX("C") + fontWidth4x5("A") + 1 + 5 + 1, R, " 3"), "...then 3, from the song's own position");
+check(beatBlocks(3), "...then 3, from the song's own position");
 cc(PLAY, 127); cc(PLAY, 0); tick(10);
+click(); tick(5);             /* back */
 
 /* ---- the big view (jog click): the chord playing big and its section on
  * the left; the next chord, blocks for its beats, the next section, blocks
  * for its bars on the right; the key and capo, the time and the next song
  * at the foot; no button hints ---- */
-const M = await import('./ui_test.mjs');
-/* A block at (x, y), w x h: solid, or just its outline. */
-const solid = (x, y, w, h) => { for (let yy = y; yy < y + h; yy++) for (let xx = x; xx < x + w; xx++) if (!fb[yy * W + xx]) return false; return true; };
-const hollow = (x, y, w, h) => solid(x, y, w, 1) && solid(x, y + h - 1, w, 1) && !fb[(y + 2) * W + x + 3];
 cc(BACK, 127); cc(BACK, 0); tick(5);
 jog(-8); jog(2); click();     /* Perform */
 jog(3); click();              /* D Gig: capo 2 */
 tick(30);
 click(); tick(5);             /* the big view */
 check(M.footerHints() === null, "big view: no button hints");
+check(big2At(2, 2, "B") && bigAt(67, 8, "G"), "...capo 2: C shows as Bb, the next Am as Gm");
 check(drawnAt(67, 0, "NEXT"), "...Next at the top of the right half");
 check(solid(118, 0, 1, 5) && solid(125, 1, 1, 3), "...the battery beside it");
 check(findOnRow(49, "KEY C  CAPO 2") === 2, "...the key and the capo at the foot");
@@ -227,17 +224,10 @@ check(solid(67, 23, 7, 5) && solid(76, 23, 7, 5) && hollow(85, 23, 7, 5), "bar 2
 check(solid(67, 39, 12, 4) && hollow(81, 39, 12, 4), "...1 bar left");
 cc(PLAY, 127); cc(PLAY, 0); tick(10);
 click(); tick(5);             /* back */
-check(drawnAt(2, 1, "CHORDS") && M.footerHints() !== null, "jog click again: the usual display and its hints");
+check(drawnAt(2, 1, "PERFORM") && M.footerHints() !== null, "jog click again: the usual display and its hints");
 
 /* A long chord keeps its root big and wraps the rest beside it: Bbm7b5's
  * B at double size, m7 over b5. */
-const lit = (x0, y0, x1, y1) => { for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) if (fb[y * W + x]) return true; return false; };
-const big2At = (x, y, ch) => {
-    const want = new Uint8Array(W * 64);
-    BIG.fontPrint({ fillRect: (fx, fy, fw, fh) => { for (let yy = y + (fy - y) * 2; yy < y + (fy - y) * 2 + fh * 2; yy++) for (let xx = x + (fx - x) * 2; xx < x + (fx - x) * 2 + fw * 2; xx++) want[yy * W + xx] = 1; } }, x, y, ch, 1);
-    for (let yy = y; yy < y + 22; yy++) for (let xx = x; xx < x + BIG.fontWidth(ch) * 2; xx++) if (want[yy * W + xx] !== fb[yy * W + xx]) return false;
-    return true;
-};
 cc(BACK, 127); cc(BACK, 0); tick(5);
 jog(-8); jog(2); click();     /* Perform */
 jog(5); click();              /* F Gig */

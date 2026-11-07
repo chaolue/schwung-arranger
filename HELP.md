@@ -546,7 +546,7 @@ Perform plays the setlist's version.
 | Sound | **On**: the click track plays the count-in, on its output, channel and notes (see **Options: Click**). **Off**: a silent count-in (pad flashes only) |
 | Stop On End | If Yes, playback stops when this song finishes and the next song is selected |
 | Key | **Song (x)** plays the song's own key; any other key transposes its chords (and instrument parts) for this setlist. Turning back to the song's key clears it |
-| Capo | **Off**, or the fret (1–11) a guitarist puts a capo on: Perform's chord line then shows the chords as the shapes played there (capo 2 on a song in A shows G, C, D...). It changes only what's shown, not what plays; the key beside them stays the key the song sounds in |
+| Capo | **Off**, or the fret (1–11) a guitarist puts a capo on: Perform's big view then shows the chords as the shapes played there (capo 2 on a song in A shows G, C, D...). It changes only what's shown, not what plays; the key stays the key the song sounds in |
 | Tempo | **Song (x)** plays the song's own tempo; or a tempo of its own, 20–300. Turning back to the song's tempo clears it |
 | Sections | **Song** plays the sections in the song's order; **N set** is this setlist's own order (see below) |
 | Knobs | This song's own knob mappings: **Setlist** while it uses the setlist's, or how many it overrides |
@@ -577,40 +577,39 @@ is skipped.
 
 Play through a setlist.
 
-The display shows the current song in the header (scrolling when it is long),
-beside the battery, and below it:
+The display shows, under a **Perform** header that carries the song's key
+(the setlist's key for it, if set) and the battery:
 
 | Line | Shows |
 |------|-------|
-| Chords | The chord playing > the next one, and the beats to it, e.g. **C > Am 3**; at the right, the key the song plays in (the setlist's key for it, if set) |
+| 1 | The current song |
 | Sec | The section playing (or selected) > the one after it — "Next song" at the end of a song |
 | Next | The next song in the setlist |
 | Time | The song's position and length, and the whole set's length |
 
-**The chord line.** While playing, the number after the next chord counts the
-beats to the change down, counting the beat you're in: across a bar of 4/4 it
-reads 4, 3, 2, 1, and the change lands as the 1 ends. Stopped, or in the
-count-in, the line shows the chord the section about to play starts on and the
-one after, with no count. As the instruments play them, a chord lasts until the
-next one in its section, so a section with no chord on its first beat shows
-**N.C.** until its first. When it all doesn't fit before the key, the count goes
-first, then the next chord. A song without chords shows only the key. Minor's m
-and a flat are drawn small (the display's letters are all capitals), so Am
-doesn't read as AM. With a **Capo** set for the song in the setlist, the chords
-are the shapes played at that fret; the key stays the one the song sounds in.
-
 **The big view.** Press the jog click for a display made to read at a
-distance, and again to go back. The left half has the chord playing, large,
-with its section under it. A long chord keeps its root large and wraps the
-rest beside it (B♭m7♭5 as B♭ with m7 over ♭5), in smaller lines if it must;
-a sharp or flat beside a large root is drawn half its size, against its top. The right half has **Next**: the next chord, a row
-of blocks for the beats to it (one a beat of the bar; with the change more
-than a bar away, the count shows beside them), the next section, and a row of
-blocks for the bars to it (one a bar of the section, up to 8; the count
-beside them past that). Both counts include the beat or bar you're in, so the
-change lands as the last block empties, and both show only while playing.
-The foot has the key (and the setlist's **Capo** for the song, if set), the
-song's time, and the next song as **Next:**. The battery sits beside Next. The
+distance, with the chords, and again to go back.
+
+- **Left half:** the chord playing, large, with its section under it. Stopped,
+  or in the count-in, it's the chord the section about to play starts on. A
+  long chord keeps its root large and wraps the rest beside it (B♭m7♭5 as B♭
+  with m7 over ♭5), in smaller lines if it must; a sharp or flat beside a
+  large root is drawn half its size, against its top.
+- **Right half, Next:** the next chord, with a row of blocks for the beats to
+  it (one a beat of the bar; with the change more than a bar away, the count
+  shows beside them); then the next section, with a row of blocks for the bars
+  to it (one a bar of the section, up to 8; the count beside them past that).
+  Both counts include the beat or bar you're in, so the change lands as the
+  last block empties, and both show only while playing. The battery sits
+  beside Next.
+- **Foot:** the key (and the setlist's **Capo** for the song, if set), the
+  song's time, and the next song as **Next:**.
+
+As the instruments play them, a chord lasts until the next one in its section,
+so a section with no chord on its first beat shows **N.C.** until its first.
+Minor's m and a flat are drawn as small letters (the display's letters are
+all capitals), so Am doesn't read as AM. With a **Capo** set, the chords are
+the shapes played at that fret; the key stays the one the song sounds in. The
 button hints are left off to make room; Back stays lit and works as usual.
 
 ### While stopped
