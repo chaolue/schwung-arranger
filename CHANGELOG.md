@@ -3,6 +3,10 @@
 ## Unreleased
 
 ### Song Builder
+- A shortened clip can be lengthened again: Trim Clip's End reaches the
+  clip's whole length, found in its own folder. A clip from a folder other
+  than the one on the pads used its shortened end as its length (or a
+  same-named clip's from the pads' folder).
 - **Click Settings** (Menu on the Click track), saved with the song as an
   instrument's are: Enabled (opening the song, or switching to it in
   Perform, turns the click on or off to match), the Volume each section

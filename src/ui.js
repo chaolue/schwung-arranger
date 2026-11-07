@@ -3083,10 +3083,46 @@ function clipDisplayBars(path) {
     return 1;
 }
 
+/* Each library folder's clip lengths in bars, by path, as the engine's scan
+ * found them: read once per folder (folder_clips_json_N), forgotten when
+ * the library is read again. */
+const folderBarsCache = new Map();
+function folderClipBars(folderIndex) {
+    if (folderIndex < 0) return null;
+    if (folderBarsCache.has(folderIndex)) return folderBarsCache.get(folderIndex);
+    let bars = null;
+    if (typeof host_module_get_param === "function") {
+        try {
+            const raw = JSON.parse(host_module_get_param("folder_clips_json_" + folderIndex) || "null");
+            if (Array.isArray(raw)) {
+                bars = new Map();
+                for (const c of raw) if (c && typeof c === "object" && c.source && c.bars > 0) bars.set(c.source, c.bars);
+            }
+        } catch (e) {}
+    }
+    if (bars) folderBarsCache.set(folderIndex, bars);
+    return bars;
+}
+
+/* A clip's whole length in bars (Trim Clip's End reaches it): its file's,
+ * from the clip's OWN folder -- its source_folder, else the song's. Looked
+ * up only among the pads' clips, a clip from another folder found nothing
+ * and fell back to its stored end (shortened once, never lengthened again)
+ * or found a same-named clip of the pads' folder, of another length. */
 function clipTrueBars(clip) {
     if (!clip) return 1;
     const src = clip.source || clip.path || "";
-    if (src && folderClips.length > 0) {
+    const folder = clip.source_folder || (currentSong ? currentSong.source_folder : "");
+    const own = folder && src ? folderClipBars(folderIndexForPath(folder)) : null;
+    if (own) {
+        const want = resolveClipSource(src, "");
+        if (own.has(src)) return own.get(src);
+        if (own.has(want)) return own.get(want);
+        const leaf = clipDisplayName(want).toLowerCase();
+        for (const [path, bars] of own) if (clipDisplayName(path).toLowerCase() === leaf) return bars;
+    }
+    /* The clip's folder isn't in the library (yet): the pads' clips. */
+    if (!own && src && folderClips.length > 0) {
         /* Match by exact source path first, then by leaf name. */
         for (const c of folderClips) {
             if (c.path === src && c.bars > 0) return c.bars;
@@ -16775,6 +16811,7 @@ function loadLibraryFolders() {
     libraryFolders = [];
     libraryFolderCategories = [];
     libraryCategoryTree = makeCategoryTree();
+    folderBarsCache.clear();
     if (typeof host_module_get_param !== "function") return;
     /* One "folders_json" read in place of folder_count + folder_name_N +
      * folder_category_N (2N+1 round trips) -- see readDspList. */
