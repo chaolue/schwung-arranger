@@ -607,16 +607,13 @@ The display shows, under a **Perform** header that carries the song's key
 **The big view.** Press the jog click for a display made to read at a
 distance, with the chords, and again to go back.
 
-- **Left half:** the chord playing, large, with its section under it. The
-  section is always large: a name too long for it is shortened (Chorus 2 →
-  CHOR 2, Prechorus → PRE, Instrumental → INSTR, Down Bridge → DN BR), its
-  number kept on the end. Stopped,
+- **Left half:** the chord playing, large, with its section under it (large
+  when its name fits, else small). Stopped,
   or in the count-in, it's the chord the section about to play starts on. A
   long chord keeps its root large and wraps the rest beside it (B♭m7♭5 as B♭
   with m7 over ♭5), in smaller lines if it must; a sharp or flat beside a
   large root is drawn half its size, against its top.
-- **Right half:** the next chord, its root large too and the rest of its
-  name small (wrapping beside the root when it's long), with a row of blocks
+- **Right half:** the next chord, drawn as the one playing is, with a row of blocks
   for the beats to it (one a beat of the bar; with the change more than a bar
   away, the count shows beside them); then the next section, with a row of
   blocks for the bars to it (one a bar of the section, up to 8; the count

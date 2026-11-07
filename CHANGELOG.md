@@ -103,12 +103,11 @@
   name, now renames it in the setlists that play it, and Perform takes each
   song's name from its file.
 - **Big view** (jog click in Perform, and again to go back): the chord
-  playing large with its section; the next chord (its root large, the rest
-  small) with blocks counting the beats to it, the next section with blocks
+  playing large with its section; the next chord, as large, with blocks
+  counting the beats to it, the next section with blocks
   counting the bars to it; the key and capo, the battery and the time; and
   Now: the song and Next: the next one, in turn. Minor's m and a flat
-  are drawn small, so Am doesn't read AM. The section is always large,
-  a long name shortened (Chorus 2 -> CHOR 2), its number kept.
+  are drawn small, so Am doesn't read AM.
 - **Capo** (Setlist Edit > a song): the fret a guitarist's capo is on.
   Perform's big view shows the chords as the shapes played there; the key
   stays the one the song sounds in.

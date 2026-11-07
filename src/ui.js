@@ -11271,65 +11271,12 @@ function perfFitBigChord(x, y, label, room, maxScale, height, restScale = maxSca
     perfPrintRuns(x, y, runs);
 }
 
-/* Shorter forms of section names, longest first: tried in turn until the
- * name fits the big view's doubled text. Keys are lower case, without
- * spaces or hyphens. */
-const SECTION_SHORT = {
-    intro: ["INTRO", "INT", "IN"], verse: ["VERSE", "VRS", "VS", "V"],
-    prechorus: ["PRE", "PC"], chorus: ["CHORUS", "CHOR", "CH", "C"],
-    postchorus: ["POST", "PST"], bridge: ["BRIDGE", "BRDG", "BR", "B"],
-    outro: ["OUTRO", "OUT", "O"], interlude: ["INTER", "INTL", "IL"],
-    instrumental: ["INSTR", "INST", "INS"], turn: ["TURN", "TRN", "T"],
-    turnaround: ["TURN", "TRN", "T"], break: ["BREAK", "BRK", "BK"],
-    breakdown: ["BKDN", "BD"], down: ["DOWN", "DN", "D"], tag: ["TAG"],
-    ending: ["ENDING", "END"], refrain: ["REFRAIN", "REF"], solo: ["SOLO"],
-    click: ["CLICK"]
-};
-
-/* A word's shorter forms: its own (above), else itself, its consonants
- * (CHORUS -> CHRS), then its first three, two and one letters. */
-function sectionWordForms(word) {
-    const w = String(word).toUpperCase();
-    const known = SECTION_SHORT[w.toLowerCase().replace(/[\s-]/g, "")];
-    if (known) return known;
-    const forms = [w, (w[0] + w.slice(1).replace(/[AEIOU]/g, "")).slice(0, 4), w.slice(0, 3), w.slice(0, 2), w.slice(0, 1)];
-    return forms.filter((f, i) => f && forms.indexOf(f) === i && (i === 0 || f.length < w.length));
+/* Text doubled if it fits `room`, else small, trimmed to fit. */
+function perfFitText2(x, y, text, room) {
+    const t = asciiFold(String(text)).toUpperCase();
+    if (perfTextWidth(t) * 2 <= room) { fontPrint4x5(perfScaledCtx(2, x, y), x, y, t, 1); return; }
+    perfPrint(x, y, perfFitText(t, room), 1);
 }
-
-/* `name` as the biggest view's doubled text can hold in `room` px: whole
- * if it fits, else shortened -- a known name its own way (Prechorus 2 ->
- * PRE 2), several words the longest first -- its number kept on the end
- * (with a space if there's room). */
-export function perfSectionShort(name, room) {
-    const t = asciiFold(String(name || "")).trim();
-    const m = /^(.*?)\s*(\d+)$/.exec(t);
-    const base = m && m[1] ? m[1] : t, num = m && m[1] ? m[2] : "";
-    const fits = (txt) => perfTextWidth(txt) * 2 <= room;
-    const full = t.toUpperCase();
-    if (fits(full)) return full;
-    /* The whole name as one known word (Pre-Chorus), else word by word. */
-    const whole = SECTION_SHORT[base.toLowerCase().replace(/[\s-]/g, "")];
-    const words = whole ? [base] : base.split(/[\s-]+/).filter(Boolean);
-    const ladders = words.map(w => whole ? whole : sectionWordForms(w));
-    /* Shorter and shorter, the longest word first; the number spaced off
-     * (OUT 2) unless no shortening makes room for that (then DN CH2). */
-    const tryAll = (sep) => {
-        const at = ladders.map(() => 0);
-        for (;;) {
-            const b = ladders.map((l, i) => l[at[i]]).join(" ");
-            const c = num ? b + sep + num : b;
-            if (fits(c)) return c;
-            let k = -1;
-            ladders.forEach((l, i) => { if (at[i] < l.length - 1 && (k < 0 || l[at[i]].length > ladders[k][at[k]].length)) k = i; });
-            if (k < 0) return null;
-            at[k]++;
-        }
-    };
-    const spaced = tryAll(" ");
-    if (spaced || !num) return spaced || ladders.map(l => l[l.length - 1]).join(" ");
-    return tryAll("") || ladders.map(l => l[l.length - 1]).join(" ") + num;
-}
-
 
 /* A row of `n` blocks, `filled` of them solid from the left, in `room` px. */
 function perfBlocks(x, y, n, filled, room, h, maxPitch) {
@@ -11356,15 +11303,14 @@ function drawPerformanceBig(song, fullSong, secName, nextSecName, nextSongName, 
     /* Left: the chord playing, its section. */
     /* Its rest may wrap down to the section (y 31). */
     if (chords) perfFitBigChord(2, 2, chords.cur, LEFT_W, 2, 28);
-    /* The section always doubled, shortened to fit (its number kept). */
-    const secText = perfSectionShort(secName || "-", LEFT_W);
-    fontPrint4x5(perfScaledCtx(2, 2, 31), 2, 31, perfFitText(secText, LEFT_W / 2), 1);
+    /* The section, whole: doubled if it fits, else small. */
+    perfFitText2(2, 31, secName || "-", LEFT_W);
     fill_rect(62, 0, 1, 44, 1);
 
-    /* Right: the next chord (its root doubled, the rest small, wrapping
-     * beside it) and its beats; the next section and its bars. */
+    /* Right: the next chord (drawn as the one playing is, its rest wrapping
+     * down to the beat blocks) and its beats; the next section and its bars. */
     const top = 1;
-    if (chords && chords.next) perfFitBigChord(RX, top, chords.next, RIGHT_W, 2, 22, 1);
+    if (chords && chords.next) perfFitBigChord(RX, top, chords.next, RIGHT_W, 2, 22);
     const bpb = song && song.time_sig_num > 0 ? song.time_sig_num : 4;
     const beatY = top + 24, secY = beatY + 6, barY = secY + 6;
     if (chords && chords.beats) {

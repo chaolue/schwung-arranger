@@ -41,7 +41,7 @@ H.files.set(SETLISTS + "/e_gig.json", JSON.stringify({ id: "s5", name: "E Gig",
     songs: [{ id: "e5", name: "Chords", path: SONGS + "/c.json", click_bars: 2 }] }));
 /* A song whose chord is long: Bbm7b5. */
 H.files.set(SONGS + "/l.json", JSON.stringify({ name: "Long", key: "Bb", tempo_bpm: 120, time_sig_num: 4, time_sig_den: 4,
-    sections: [{ name: "Verse", clips: [{ source: "Grooves/beat.mid", name: "beat", start_bar: 0, end_bar: 2 }],
+    sections: [{ name: "Prechorus 2", clips: [{ source: "Grooves/beat.mid", name: "beat", start_bar: 0, end_bar: 2 }],
                  chords: [{ root: "A#", quality: "m7b5" }] }] }));
 H.files.set(SETLISTS + "/f_gig.json", JSON.stringify({ id: "s6", name: "F Gig",
     songs: [{ id: "e6", name: "Long", path: SONGS + "/l.json", click_bars: 0 }] }));
@@ -184,6 +184,8 @@ check(big2At(2, 2, "C") && big2At(67, 1, "A"), "big view, stopped: C, next A(m),
 cc(PLAY, 127); cc(PLAY, 0); tick(20);
 barFrac = 2.5; tick(10);      /* the Verse's first bar */
 check(big2At(2, 2, "F") && big2At(67, 1, "B"), "the Verse: F, next A#7 spelt as the key writes it, Bb7");
+/* Its 7 as big as the playing chord's would be: doubled (rows 1-10), not small (1-5). */
+check(lit(97, 7, 112, 10), "...its 7 doubled, as the playing chord's additions are");
 cc(PLAY, 127); cc(PLAY, 0); tick(10);
 click(); tick(5);             /* back */
 
@@ -272,16 +274,11 @@ check(drawn2At(2, 31, "INTRO"), "...the section (and the chords) still in view")
 g.onMidiMessageInternal([0x90, 0, 0]); tick(100);            /* released, and the overlay's time out */
 check(findOnRow(49, "KEY") === 2, "released: the key line back");
 
-/* The big view's section: always doubled, shortened to fit the left half
- * (58 px), its number kept. */
-const short = (n) => M.perfSectionShort(n, 58);
-check(short("Chorus") === "CHORUS" && short("Intro 2") === "INTRO 2", "a name that fits stays whole");
-check(short("Chorus 2") === "CHOR 2" && short("Prechorus 2") === "PRE 2" && short("Outro 2") === "OUT 2",
-      "known names shorten their own way, the number kept: " + [short("Chorus 2"), short("Prechorus 2"), short("Outro 2")]);
-check(short("Instrumental") === "INSTR" && short("Down Bridge") === "DN BR", "...a long one, and two words");
-check(short("Section 3") === "SCTN 3", "an unknown word: its consonants: " + short("Section 3"));
-check(["Verse 12", "Down Chorus 2", "Instrumental 2", "Big Finish 2"].every(n => fontWidth4x5(short(n)) * 2 <= 58),
-      "...every result fits doubled");
+/* The big view's section, whole: doubled when it fits, else small. */
+cc(BACK, 127); cc(BACK, 0); tick(5);
+jog(-8); jog(2); click();     /* Perform */
+jog(5); click(); tick(30);    /* F Gig: Long, its section Prechorus 2 (the big view still on) */
+check(drawnAt(2, 31, "PRECHORUS 2") && !drawn2At(2, 31, "PRE"), "a long section name whole, small: PRECHORUS 2");
 
 console.log(`perform display: ${passes} passed, ${failures} failed`);
 if (failures) process.exit(1);
