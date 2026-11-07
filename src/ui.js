@@ -3928,6 +3928,10 @@ export function toEngineSongJson(song) {
         /* A Perform count-in: the click track plays it -- see clickSoundOn. */
         count_in: song.count_in ? 1 : 0,
         count_in_sound: song.count_in_sound ? 1 : 0,
+        /* The song's own click volume (Click Settings), where its sections'
+         * click starts; without it, Options > Click's. -1 = none. A count-in
+         * plays at Options' whatever this says. */
+        song_click_volume: song.click_settings && typeof song.click_settings.volume === "number" ? song.click_settings.volume : -1,
         /* Click volume changes (the Click track's items). */
         click_items: (song.sections || []).flatMap((sec, si) => (Array.isArray(sec.click) ? sec.click : []).map(it => {
             const o = { section: si, bar: it.bar, volume: typeof it.volume === "number" ? it.volume : 100 };
@@ -4479,8 +4483,10 @@ function clickSetting(key, song) {
     return key === "volume" ? clickVolume : key === "accent_note" ? clickAccentNote : clickNormalNote;
 }
 
-/* Push the click track's route, notes and on/off to the DSP -- the notes
- * and volume the open song's, where it sets them. */
+/* Push the click track's route, notes, volume and on/off to the DSP -- the
+ * notes the open song's, where it sets them. The volume is always Options'
+ * (count-ins play at it); a song's own goes with its song JSON
+ * (song_click_volume). */
 function pushClickToDsp() {
     if (typeof host_module_set_param !== "function" &&
         typeof host_module_set_param_blocking !== "function") return;
@@ -4492,7 +4498,7 @@ function pushClickToDsp() {
     set("click_channel", String(clickMidiChannel - 1), t); /* DSP wants 0-based */
     set("click_accent_note", String(clickSetting("accent_note", song)), t);
     set("click_normal_note", String(clickSetting("normal_note", song)), t);
-    set("click_volume", String(clickSetting("volume", song)), t);
+    set("click_volume", String(clickVolume), t);
     set("click_enabled", clickOn ? "1" : "0", t);
 }
 
@@ -8605,8 +8611,12 @@ function stepSongClick(key, delta) {
     if (next === clickSetting(key, null)) delete cs[key]; else cs[key] = next;
     currentSong.click_settings = songClickSettings(cs);
     unsavedChanges = true;
-    const param = volume ? "click_volume" : key === "accent_note" ? "click_accent_note" : "click_normal_note";
-    if (typeof host_module_set_param === "function") host_module_set_param(param, String(next));
+    /* Heard at once: the playing song's volume (the next build carries it
+     * too), or the note. */
+    const param = volume ? "song_click_volume" : key === "accent_note" ? "click_accent_note" : "click_normal_note";
+    const own = currentSong.click_settings && currentSong.click_settings.volume;
+    const sent = volume ? (typeof own === "number" ? own : -1) : next;
+    if (typeof host_module_set_param === "function") host_module_set_param(param, String(sent));
 }
 
 function drawSongClick() {

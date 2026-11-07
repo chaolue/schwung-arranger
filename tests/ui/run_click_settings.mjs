@@ -2,6 +2,8 @@
  * Enabled, Volume and Accent/Normal notes, saved with the song.
  *  - a value the song doesn't set shows Options > Click's ("Options (...)");
  *    turning back to it clears the song's own;
+ *  - the song's Volume goes with its song JSON (song_click_volume), so the
+ *    engine's own click volume -- what a count-in plays at -- stays Options';
  *  - Enabled turns the click on or off now and saves it; opening the song
  *    (Song Builder) or switching to it (Perform) sets the click to it, and
  *    sends its notes and volume; Jam goes back to Options > Click's;
@@ -63,7 +65,7 @@ check((H.buttonLeds.get(C.MoveBack) || 0) > 0, "Back lit");
 click();                      /* Enabled: on */
 check(lastSet("click_enabled") === "1" && shown().includes("On"), "Enabled: the click on now");
 jog(1); click(); jog(-4);     /* Volume: 80 */
-check(lastSet("click_volume") === "80", "Volume 80 sent: " + lastSet("click_volume"));
+check(lastSet("song_click_volume") === "80", "Volume 80 sent as the playing song's: " + lastSet("song_click_volume"));
 click();
 jog(1); click(); jog(1); click();   /* Accent Note: 77 */
 check(lastSet("click_accent_note") === "77", "Accent Note 77 sent");
@@ -98,8 +100,12 @@ check(file(PLAIN).click_settings.enabled === false, "...and saved");
 /* ---- a locked song: read-only, Enabled only for now ---- */
 openClick(1);                 /* Locked */
 check(shown().includes("60%"), "Locked: its own volume shown");
+check(lastSet("click_volume") === "100", "...the engine's click volume stays Options' (a count-in plays at it)");
+check(JSON.parse(M.toEngineSongJson(Object.assign({ source_folder: "" }, file(LOCKED), { click_settings: { volume: 60 } }))).song_click_volume === 60,
+      "...the song's own goes with its song JSON");
+check(JSON.parse(M.toEngineSongJson(Object.assign({ source_folder: "" }, file(OTHER)))).song_click_volume === -1, "...none for a song without");
 jog(1); click(); jog(1);      /* Volume: refused, the jog moves on */
-check(lastSet("click_volume") !== "65", "...Volume doesn't edit");
+check(lastSet("song_click_volume") !== "65", "...Volume doesn't edit");
 jog(-5); click();             /* Enabled */
 check(lastSet("click_enabled") === "1", "...Enabled turns it on now");
 backToRoot();

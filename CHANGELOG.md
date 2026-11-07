@@ -12,6 +12,7 @@
   Perform, turns the click on or off to match), the Volume each section
   starts at, and the Accent and Normal notes. What a song doesn't set is
   Options > Click's. Song Settings' Click row is the same saved Enabled.
+  Perform's count-ins always play at Options' volume.
 - **Similar clips**: Shift+Record on the Drum track, or **Find Similar** at
   the bottom of a clip's Trim Clip screen, lists clips from other folders
   with a rhythm like the selected clip's -- same meter, and grooves for a

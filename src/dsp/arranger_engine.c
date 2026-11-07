@@ -507,6 +507,12 @@ typedef struct {
      * plays it instead when count_in_sound is set. See update_click. */
     uint8_t count_in;
     uint8_t count_in_sound;
+    /* The song's own click volume (its Click Settings), where its sections'
+     * click starts: click_volume_set 1 with click_volume 0-100, else (0, as
+     * a zeroed song has) the engine's click_volume. A count-in never uses
+     * it: it plays at the engine's (Options > Click's). */
+    uint8_t click_volume_set;
+    uint8_t click_volume;
     /* Chords that start after a bar's first beat (a bar can hold several,
      * each on its own beat), sorted by section, bar and position. A bar's
      * beat-1 chord stays in its section's chords[]. See chord_at_song_tick. */
@@ -941,9 +947,10 @@ typedef struct engine {
     uint8_t click_enabled;
     inst_voice_t click_voice;      /* only output_target/channel are used */
     uint8_t click_accent_note, click_normal_note;
-    /* Click loudness, percent of its normal velocity: where a song's click
-     * items don't say otherwise (each section starts here), and always for
-     * a count-in. */
+    /* Click loudness, percent of its normal velocity (Options > Click's):
+     * where a song neither sets its own (song_t.click_volume) nor has a
+     * click item saying otherwise -- each section starts here -- and always
+     * for a count-in. */
     uint8_t click_volume;
     uint8_t click_sounding, click_sounding_note;
     uint32_t click_on_tick, click_off_tick, click_last_tick;
@@ -3914,6 +3921,14 @@ static int parse_song_json(engine_t *e, const char *json, song_t *song,
         json_get_int_at(json, "count_in_sound", &cs);
         song->count_in = ci ? 1 : 0;
         song->count_in_sound = cs ? 1 : 0;
+        int cv = -1;
+        if (json_get_int_at(json, "song_click_volume", &cv) && cv >= 0) {
+            song->click_volume_set = 1;
+            song->click_volume = (uint8_t)(cv > 100 ? 100 : cv);
+        } else {
+            song->click_volume_set = 0;
+            song->click_volume = 0;
+        }
     }
     double tmp_d = 120.0;
     json_get_double_at(json, "tempo_bpm", &tmp_d);
@@ -5425,6 +5440,8 @@ static void copy_song_used(song_t *dst, const song_t *src) {
     memcpy(dst->key, src->key, sizeof dst->key);
     dst->count_in = src->count_in;
     dst->count_in_sound = src->count_in_sound;
+    dst->click_volume_set = src->click_volume_set;
+    dst->click_volume = src->click_volume;
 
     int ns = clamp_count(src->section_count, MAX_SONG_SECTIONS);
     dst->section_count = src->section_count;
@@ -6725,12 +6742,12 @@ static void click_release(engine_t *e) {
  * beat only clicks if the block lands in its first half, so turning the
  * click on mid-beat waits for the next one. */
 /* The click volume at a tick: the section's latest click item at or before
- * it, else the engine default. */
+ * it, else the song's own (its Click Settings), else the engine default. */
 static int click_volume_at(const engine_t *e, uint32_t tick) {
     const song_t *song = &e->live_slot.song;
     uint32_t bar = 0, bar_start = 0;
     int sec = song_bar_at_tick(song, tick, e->ticks_per_bar, &bar, &bar_start, NULL);
-    int vol = e->click_volume;
+    int vol = song->click_volume_set ? song->click_volume : e->click_volume;
     if (sec < 0) return vol;
     uint32_t off = tick - bar_start;
     int n = song->click_item_count > MAX_CLICK_ITEMS ? MAX_CLICK_ITEMS : song->click_item_count;
@@ -7099,6 +7116,16 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
     if (strcmp(key, "click_volume") == 0) {
         int v = atoi(val);
         e->click_volume = (uint8_t)(v < 0 ? 0 : (v > 100 ? 100 : v));
+        return;
+    }
+    if (strcmp(key, "song_click_volume") == 0) {
+        /* The playing song's own click volume, changed live (Song Builder's
+         * Click Settings while playing); -1 = none, the engine's. The next
+         * build carries it in the song JSON. A scalar in live_slot, which
+         * this (audio) thread owns. */
+        int v = atoi(val);
+        e->live_slot.song.click_volume_set = v >= 0 ? 1 : 0;
+        e->live_slot.song.click_volume = (uint8_t)(v < 0 ? 0 : (v > 100 ? 100 : v));
         return;
     }
     if (strcmp(key, "click_enabled") == 0) {
