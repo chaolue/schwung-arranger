@@ -1,12 +1,14 @@
 /* Perform's display: a "Perform" header with the key the song plays in at
- * its right (beside the battery), then the song (no "Now:"), one Sec line
+ * its right (beside the battery), then Now: the song, one Sec line
  * with the section playing > the next one, the next song, and the time.
  * The key is the setlist's own for the song when it sets one, and a flat is
  * drawn as a small b (the face has capitals only). Its big view (jog click)
  * has the chords: the one playing, big, and its section; the next chord and
  * section with blocks counting the beats and bars to them; the key and
  * capo, the time and the next song. Pixels are read back from fill_rect and
- * compared with the face's own drawing of each expected line. */
+ * compared with the face's own drawing of each expected line. The names are
+ * the songs' own: one renamed since the setlist was saved shows (and the
+ * setlist takes) its new name. */
 import * as H from './host_mock.mjs';
 import { fontPrint4x5, fontWidth4x5 } from './shared/param_pages/font4x5.mjs';
 import * as BIG from './shared/param_pages/font_big_num.mjs';
@@ -45,6 +47,10 @@ H.files.set(SETLISTS + "/f_gig.json", JSON.stringify({ id: "s6", name: "F Gig",
     songs: [{ id: "e6", name: "Long", path: SONGS + "/l.json", click_bars: 0 }] }));
 /* Its click file, as if written already (the mock's binary writes fail). */
 H.files.set("/data/UserData/UserLibrary/Arranger/.click-e5-0-4x240t240.mid", "MThd");
+/* A setlist saved before Another Song was renamed (it was Old Name). */
+H.files.set(SETLISTS + "/g_gig.json", JSON.stringify({ id: "s7", name: "G Gig", songs: [
+    { id: "e1", name: "Yes He Lives", path: SONGS + "/a.json", click_bars: 0 },
+    { id: "e2", name: "Old Name", path: SONGS + "/b.json", click_bars: 0 }] }));
 
 /* The engine, for playing: builds confirm at once, and the transport is at
  * `barFrac` while running. */
@@ -104,7 +110,7 @@ function findOnRow(y, text) {
 }
 const FLAT = ["#..", "#..", "###", "#.#", "###"];
 const flatAt = (x, y) => FLAT.every((row, r) => [...row].every((c, i) => fb[(y + r) * W + x + i] === (c === "#" ? 1 : 0)));
-const valueX = 2 + Math.max(fontWidth4x5("SEC:"), fontWidth4x5("NEXT:")) + 4;
+const valueX = 2 + Math.max(fontWidth4x5("NOW:"), fontWidth4x5("SEC:"), fontWidth4x5("NEXT:")) + 4;
 const M = await import('./ui_test.mjs');
 const PLAY = 85;
 /* A block at (x, y), w x h: solid, or just its outline. */
@@ -142,8 +148,7 @@ check(keyX > 40, "the header's right has the key: " + keyX);
 const flatX = keyX + fontWidth4x5("KEY B") + 1;
 check(keyX > 0 && flatAt(flatX, 1), "...Bb, its flat a small b (not BB)");
 check(keyX > 0 && flatX + 3 < 116, "...left of the battery");
-check(drawnAt(2, 12, "YES HE LIVES"), "the song on the line below, with no Now:");
-check(findOnRow(12, "NOW") < 0 && findOnRow(1, "NOW") < 0, "no Now: anywhere");
+check(drawnAt(2, 12, "NOW:") && drawnAt(valueX, 12, "YES HE LIVES"), "Now: the song on the line below, lined up with the others");
 check(drawnAt(2, 23, "SEC:") && drawnAt(valueX, 23, "INTRO > VERSE"), "one Sec line: Intro > Verse");
 check(findOnRow(34, "NSC") < 0, "no NSc line");
 check(drawnAt(2, 34, "NEXT:") && drawnAt(valueX, 34, "ANOTHER SONG"), "the next song below it, its name lined up with the section's");
@@ -158,14 +163,22 @@ const ebX = findOnRow(1, "KEY E");
 check(ebX > 40 && flatAt(ebX + fontWidth4x5("KEY E") + 1, 1), "the setlist's key for the song: Eb (" + ebX + ")");
 check(findOnRow(1, "KEY B") < 0, "...not the song's own Bb");
 
+/* ---- a song renamed since the setlist was saved: its new name ---- */
+cc(BACK, 127); cc(BACK, 0); tick(5);
+jog(-8); jog(2); click();     /* Perform */
+jog(6); click();              /* G Gig */
+tick(30);
+check(drawnAt(valueX, 34, "ANOTHER SONG") && findOnRow(34, "OLD NAME") < 0, "Next: the song's own name, not the setlist's old copy");
+check(JSON.parse(H.files.get(SETLISTS + "/g_gig.json")).songs[1].name === "Another Song", "...and the setlist takes it");
+
 /* ---- a song with chords: none on the usual display; in the big view, the
  * chord playing and the next, spelt for the key ---- */
 cc(BACK, 127); cc(BACK, 0); tick(5);
 jog(-8); jog(2); click();     /* Perform */
 jog(2); click();              /* C Gig */
 tick(30);
-check(drawnAt(2, 1, "PERFORM") && drawnAt(2, 12, "CHORDS"), "the usual display: Perform, then the song");
-check(!lit(fontWidth4x5("CHORDS") + 4, 12, 126, 16), "...and no chords beside it");
+check(drawnAt(2, 1, "PERFORM") && drawnAt(valueX, 12, "CHORDS"), "the usual display: Perform, then the song");
+check(!lit(valueX + fontWidth4x5("CHORDS") + 4, 12, 126, 16), "...and no chords beside it");
 click(); tick(5);             /* the big view */
 check(big2At(2, 2, "C") && bigAt(67, 8, "A"), "big view, stopped: C, next A(m)");
 cc(PLAY, 127); cc(PLAY, 0); tick(20);

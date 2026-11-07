@@ -86,9 +86,12 @@
 
 ### Perform
 - The display has a **Perform** header with the song's key (the setlist's,
-  if it sets one) beside the battery. The song moves to the line below,
-  without "Now:", and Sec and NSc are one line: the section playing > the
-  next one.
+  if it sets one) beside the battery. Now: the song moves to the line below,
+  and Sec and NSc are one line: the section playing > the next one.
+- A renamed song shows its new name in Perform and Setlist Edit: renaming
+  it in Song Settings, or in the Song Bank to a name with the same file
+  name, now renames it in the setlists that play it, and Perform takes each
+  song's name from its file.
 - **Big view** (jog click in Perform, and again to go back): the chord
   playing large with its section; the next chord with blocks counting the
   beats to it, the next section with blocks counting the bars to it; the key

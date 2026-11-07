@@ -582,7 +582,7 @@ The display shows, under a **Perform** header that carries the song's key
 
 | Line | Shows |
 |------|-------|
-| 1 | The current song |
+| Now | The current song (its own name: a song renamed since the setlist was made shows its new name) |
 | Sec | The section playing (or selected) > the one after it — "Next song" at the end of a song |
 | Next | The next song in the setlist |
 | Time | The song's position and length, and the whole set's length |

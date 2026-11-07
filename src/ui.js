@@ -4640,6 +4640,14 @@ function removeSongFromAllSetlists(songPath) {
  * repointed rather than dropped. */
 function renameSongInAllSetlists(oldPath, newPath, newName) {
     if (!oldPath || !newPath) return;
+    /* The setlist open in Perform or Setlist Edit too: it's a copy read
+     * before the rename, and would show (and save back) the old name. */
+    for (const s of (currentSetlist && currentSetlist.songs) || []) {
+        if (s && s.path === oldPath) {
+            s.path = newPath;
+            if (newName) s.name = newName;
+        }
+    }
     forEachSetlistFile((obj, path) => {
         let changed = false;
         for (const s of obj.songs) {
@@ -9830,6 +9838,9 @@ function handleSongSettingsInput(cc, value) {
                         unsavedChanges = true;
                     }
                     saveCurrentSong();
+                    /* The setlists playing it show its name too (their
+                     * Next: line, Setlist Edit). */
+                    if (activeSongFile) renameSongInAllSetlists(activeSongFile, activeSongFile, trimmed);
                     needsRedraw = true;
                 },
                 onCancel: () => { needsRedraw = true; }
@@ -10866,14 +10877,14 @@ function drawPerformance() {
     const keyRight = SCREEN_WIDTH - 3 - (batteryLevel !== null ? batteryBadgeWidth() + 4 : 0);
     perfPrintKey(keyRight - perfKeyWidth(keyText) + 1, 1, keyText);
 
-    /* Below it the song; the section playing > the next one; the next song.
+    /* Below it Now: the song; the section playing > the next one; the next song.
      * Each line scrolls on its own so long names marquee instead of being
      * hard-truncated, and the values line up after their labels. (The
      * chords are the big view's: jog click.) */
     const secLine = secName && nextSecName ? secName + " > " + nextSecName : (secName || nextSecName || "—");
     const perfLines = [songName, secLine, nextSongName || "—"];
-    const perfPrefixes = ["", "Sec:", "Next:"];
-    const valueX = 2 + Math.max(perfTextWidth("Sec:"), perfTextWidth("Next:")) + 4;
+    const perfPrefixes = ["Now:", "Sec:", "Next:"];
+    const valueX = 2 + Math.max(...perfPrefixes.map(perfTextWidth)) + 4;
     /* 11px line pitch: the header's text on row 1, then rows 12-45, leaving
      * a clear gap above the button-hint footer (rows 57-63). */
     const perfYs = [12, 23, 34];
@@ -12138,11 +12149,12 @@ function startRenameSelectedSong() {
                 } catch (e) {
                     logDebug("startRenameSelectedSong: failed to remove old file " + entry.path + " " + e);
                 }
-                /* Repoint any setlist entries at the new path/name -- the
-                 * song still exists, just moved, so unlike a delete these
-                 * are updated in place rather than dropped. */
-                renameSongInAllSetlists(entry.path, newPath, trimmed);
             }
+            /* Repoint any setlist entries at the new path/name -- the song
+             * still exists, just moved, so unlike a delete these are updated
+             * in place rather than dropped. A new name with the same file
+             * name (only its punctuation changed) renames them too. */
+            renameSongInAllSetlists(entry.path, newPath, trimmed);
             writeJson(newPath, obj);
             if (activeSongFile === entry.path) activeSongFile = newPath;
             /* Request a DSP rescan and poll until the renamed path actually
@@ -15749,9 +15761,14 @@ function previewClipAtCursor() {
 function buildPerfLayout() {
     const layout = [];
     if (!currentSetlist) return layout;
+    let renamed = false;
     for (let s = 0; s < currentSetlist.songs.length; s++) {
         const entry = currentSetlist.songs[s];
-        const song = applySetlistEdits(readJson(entry.path), entry);
+        const file = readJson(entry.path);
+        /* The entry keeps a copy of the song's name; a song renamed since
+         * (or before renames reached setlists) takes its file's name. */
+        if (file && file.name && file.name !== entry.name) { entry.name = file.name; renamed = true; }
+        const song = applySetlistEdits(file, entry);
         const sections = (song && song.sections) ? song.sections : [];
         if (entry.click_bars > 0) {
             layout.push({ kind: "click", songIndex: s, sectionIndex: -1 });
@@ -15769,6 +15786,7 @@ function buildPerfLayout() {
             });
         }
     }
+    if (renamed) saveSetlist(currentSetlist);
     return layout;
 }
 
