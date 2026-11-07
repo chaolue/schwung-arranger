@@ -101,7 +101,8 @@
   playing large with its section; the next chord with blocks counting the
   beats to it, the next section with blocks counting the bars to it; the key
   and capo, the time, the next song and the battery. Minor's m and a flat
-  are drawn small, so Am doesn't read AM.
+  are drawn small, so Am doesn't read AM. The section is always large,
+  a long name shortened (Chorus 2 -> CHOR 2), its number kept.
 - **Capo** (Setlist Edit > a song): the fret a guitarist's capo is on.
   Perform's big view shows the chords as the shapes played there; the key
   stays the one the song sounds in.

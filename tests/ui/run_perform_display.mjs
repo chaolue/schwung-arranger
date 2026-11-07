@@ -250,5 +250,16 @@ check(big2At(2, 2, "B"), "Bbm7b5: the B at double size");
 check(lit(30, 2, 60, 11) && lit(30, 14, 60, 23), "...the rest in two lines beside it (m7, b5)");
 check(!lit(2, 25, 60, 30), "...nothing below the chord's height");
 
+/* The big view's section: always doubled, shortened to fit the left half
+ * (58 px), its number kept. */
+const short = (n) => M.perfSectionShort(n, 58);
+check(short("Chorus") === "CHORUS" && short("Intro 2") === "INTRO 2", "a name that fits stays whole");
+check(short("Chorus 2") === "CHOR 2" && short("Prechorus 2") === "PRE 2" && short("Outro 2") === "OUT 2",
+      "known names shorten their own way, the number kept: " + [short("Chorus 2"), short("Prechorus 2"), short("Outro 2")]);
+check(short("Instrumental") === "INSTR" && short("Down Bridge") === "DN BR", "...a long one, and two words");
+check(short("Section 3") === "SCTN 3", "an unknown word: its consonants: " + short("Section 3"));
+check(["Verse 12", "Down Chorus 2", "Instrumental 2", "Big Finish 2"].every(n => fontWidth4x5(short(n)) * 2 <= 58),
+      "...every result fits doubled");
+
 console.log(`perform display: ${passes} passed, ${failures} failed`);
 if (failures) process.exit(1);
