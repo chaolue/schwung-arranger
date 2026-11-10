@@ -58,7 +58,7 @@ Browse, rename, delete, and load songs.
 | Delete (on existing song) | Delete the selected song |
 | Back | Return to Root Menu |
 
-**Button LED hints:** Back, Main and Delete are lit; Shift is dim and brightens when held for renaming.
+**Button LED hints:** Back and Delete are lit; Shift is dim and brightens when held for renaming.
 
 ---
 
@@ -75,7 +75,7 @@ When the song's clips come from two or more folders, **Record** first lists thos
 | Jog click (on a folder) | Select it (new song: name it; change-folder: apply it) |
 | Back | Return to the parent category, then to the previous screen |
 
-**Button LED hints:** Back and Main are lit.
+**Button LED hints:** Back is lit.
 
 ---
 
@@ -143,7 +143,7 @@ is named like a duplicate (Verse → Verse 2).
 
 Playback keeps running while you browse: moving the cursor with the jog wheel, changing the palette page (Up/Down), or moving sections (Left/Right) does not stop playback. While playing, the display and step LEDs follow the section you navigate to, then resume following the playhead on the next section change.
 
-**Button LED hints:** Back, Copy, arrows, Delete, Play and Record are lit, and Main where the jog click does something (not on a locked song). Shift is dim; hold it to see Main, Copy, Loop, Delete, Left/Right and Play brighten for their alternate functions. Track 1 is lit white for the Drum track.
+**Button LED hints:** Back, Copy, arrows, Delete, Play and Record are lit (not on a locked song). Shift is dim; hold it to see Copy, Loop, Delete, Left/Right and Play brighten for their alternate functions. Track 1 is lit white for the Drum track.
 
 ---
 
@@ -245,7 +245,7 @@ change is kept exactly as it was, even one whose root is outside the key.
 The line under the fields shows the chord as it stands and where it starts
 (e.g. `= Cm7 b1`); the footer is below it.
 
-**Button LED hints:** Back and Main are lit.
+**Button LED hints:** Back is lit.
 
 ---
 
@@ -387,7 +387,7 @@ stop.
 Output routing and MIDI channel for each instrument are set globally in
 **Options**, not here — see Options below.
 
-**Button LED hints:** Back and Main are lit.
+**Button LED hints:** Back is lit.
 
 ---
 
@@ -424,7 +424,7 @@ The top line shows the clip's **source folder** (read-only), so you can see whic
 | Find Similar | The last row: list clips like this one (see **Similar Clips**) |
 
 
-**Button LED hints:** Back and Main are lit.
+**Button LED hints:** Back is lit.
 
 ---
 
@@ -486,7 +486,7 @@ locked.
 | Jog click | Restore the selected backup (asks to confirm) |
 | Back | Return to Song Settings |
 
-**Button LED hints:** Back and Main are lit.
+**Button LED hints:** Back is lit.
 
 ---
 
@@ -506,7 +506,7 @@ Browse, create, rename, copy and delete setlists.
 | Delete (on existing setlist) | Delete the selected setlist |
 | Back | Return to Root Menu |
 
-**Button LED hints:** Back, Main, Copy and Delete are lit; Shift is dim and brightens when held for renaming.
+**Button LED hints:** Back, Copy and Delete are lit; Shift is dim and brightens when held for renaming.
 
 ---
 
@@ -524,7 +524,7 @@ Add, reorder, remove songs, and configure per-song options.
 | Delete | Remove the selected song from the setlist |
 | Back | Return to Setlist Bank |
 
-**Button LED hints:** Back, Main and Delete are lit; Shift is dim and brightens when held for moving songs.
+**Button LED hints:** Back and Delete are lit; Shift is dim and brightens when held for moving songs.
 
 ---
 
@@ -538,7 +538,7 @@ Choose a song from the Song Bank to insert into the setlist.
 | Jog click | Add the selected song to the setlist and return to Setlist Edit |
 | Back | Return to Setlist Edit without adding |
 
-**Button LED hints:** Back and Main are lit.
+**Button LED hints:** Back is lit.
 
 ---
 
@@ -764,7 +764,7 @@ Choose a setlist to perform.
 | Jog click | Load the setlist and enter Performance Mode |
 | Back | Return to Root Menu |
 
-**Button LED hints:** Back and Main (green) are lit.
+**Button LED hints:** Back is lit.
 
 ---
 
@@ -782,7 +782,7 @@ Choose which folder of clips to jam with. The folder's name (BPM / time signatur
 | Jog click (on a folder) | Enter Jam mode with the selected folder |
 | Back | Return to the parent category, then to the Root Menu |
 
-**Button LED hints:** Back and Main are lit.
+**Button LED hints:** Back is lit.
 
 ---
 
@@ -944,7 +944,7 @@ routing — opened as a sub-screen from here.
 
 Settings are saved to file and restored when the module restarts.
 
-**Button LED hints:** Back and Main are lit.
+**Button LED hints:** Back is lit.
 
 ---
 
@@ -979,7 +979,7 @@ Output routing for one track, opened from the Options list.
 | Output | Where this track sends MIDI: External (MIDI_OUT), Move (Move tracks), or Schwung (the synth chain) |
 | MIDI Channel | MIDI channel (1–16) used by the selected output |
 
-**Button LED hints:** Back and Main are lit.
+**Button LED hints:** Back is lit.
 
 ---
 
@@ -1008,7 +1008,7 @@ it stays quiet during a count-in so the two don't double up.
 | Normal Note | Note for the other beats (likewise). Default **77** (GM Low Wood Block) |
 | Volume | How loud the click is (0–100%, scaling its velocity), for a song whose Click Settings don't set their own; every section starts here, and its Click track's items change it. Perform's count-ins always play at this volume, whatever a song's Click Settings say. Default **100%** |
 
-**Button LED hints:** Back and Main are lit.
+**Button LED hints:** Back is lit.
 
 ---
 
@@ -1039,7 +1039,7 @@ change here shows up there too, and is saved with the set.
 
 A **—** means Schwung did not answer; jog click on MIDI Channel to ask again.
 
-**Button LED hints:** Back and Main are lit.
+**Button LED hints:** Back is lit.
 
 ---
 

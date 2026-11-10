@@ -59,9 +59,10 @@ and perform live — all from Move's pads, step buttons and jog wheel.
 ## Prerequisites
 
 - [Schwung](https://github.com/charlesvestal/schwung) installed on your
-  Ableton Move. Editing chains alongside the Arranger uses Schwung's co-run,
-  which needs Schwung 1.6.2 or newer. Chains 5–8 need a Schwung with the four
-  aux chain slots; with 4 slots the Arranger offers Chain 1–4 only.
+  Ableton Move, **1.8.0 or newer** (the module's screens use shared parts
+  that arrived then; the module store won't install it on an older one).
+  Chains 5–8 need a Schwung with the four aux chain slots; with 4 slots the
+  Arranger offers Chain 1–4 only.
 - A library of GM-style MIDI drum clips organised into folders
   (e.g. `Grooves/`, `Fills/`). Song folders may be laid out with part
   subfolders (`Grooves/`, `Fills/`, `Clap/`, `Snare/`, `Stick/`). The default
