@@ -40,7 +40,7 @@ static char g_root[256];
 /* Play 2 bars of C then G, the bass at octave 0 with `low` as its Lowest
  * Note (or none); the lowest and highest note-ons it sent, and whether every
  * note-on had its note-off by the end. */
-static int run(plugin_api_v2_t *api, int low, int *lo, int *hi, int *balanced) {
+static int run(plugin_api_v2_t *api, int low, int pattern, int *lo, int *hi, int *balanced, int *distinct) {
     void *inst = api->create_instance("/tmp/test_low_note", NULL);
     if (!inst) return 0;
     api->set_param(inst, "library_root", g_root);
@@ -57,7 +57,7 @@ static int run(plugin_api_v2_t *api, int low, int *lo, int *hi, int *balanced) {
         "\"sections\":[{\"name\":\"A\",\"clips\":[{\"source\":\"Beat.mid\",\"start_bar\":0,\"end_bar\":2,\"guard_fraction\":0}],"
         "\"chords\":[{\"root\":\"C\",\"quality\":\"maj\",\"bass\":\"\"},{\"root\":\"G\",\"quality\":\"maj\",\"bass\":\"\"}]}],"
         "\"instruments\":[{\"enabled\":true,\"output\":\"schwung\",\"channel\":2,\"octave\":0,\"follow_note\":36,"
-        "\"voicing\":\"bass\",\"note_gap\":0.125,\"velocity\":100,\"pattern\":1%s}]}", lowf);
+        "\"voicing\":\"bass\",\"note_gap\":0.125,\"velocity\":100,\"pattern\":%d%s}]}", pattern, lowf);
     uint32_t base = state_u32(api, inst, "primary_published_gen");
     api->set_param(inst, "loop", "0");
     api->set_param(inst, "song_json", json);
@@ -83,6 +83,10 @@ static int run(plugin_api_v2_t *api, int low, int *lo, int *hi, int *balanced) {
     }
     *balanced = 1;
     for (int n = 0; n < 128; n++) if (on[n]) *balanced = 0;
+    int seen[128] = { 0 };
+    *distinct = 0;
+    for (int i = 0; i < g_captured_count; i++)
+        if (g_captured[i].status == 0x90 && g_captured[i].vel > 0 && !seen[g_captured[i].note]++) (*distinct)++;
     api->destroy_instance(inst);
     return count;
 }
@@ -96,16 +100,24 @@ int main(void) {
 
     host_api_v1_t host = make_test_host();
     plugin_api_v2_t *api = move_plugin_init_v2(&host);
-    int lo, hi, bal, n;
+    int lo, hi, bal, n, d;
 
-    n = run(api, 0, &lo, &hi, &bal);
-    printf("  no Lowest Note: %d notes, %d-%d\n", n, lo, hi);
+    n = run(api, 0, 1, &lo, &hi, &bal, &d);
+    printf("  no Lowest Note, 1-5: %d notes, %d-%d\n", n, lo, hi);
     CHECK(n > 4 && lo < 28, "without a Lowest Note, the bass plays below 28");
 
-    n = run(api, 28, &lo, &hi, &bal);
-    printf("  Lowest Note 28: %d notes, %d-%d\n", n, lo, hi);
-    CHECK(n > 4 && lo >= 28 && hi < 40, "Lowest Note 28: every note lifted into 28-39");
+    n = run(api, 28, 1, &lo, &hi, &bal, &d);
+    printf("  Lowest Note 28, 1-5: %d notes, %d-%d, %d distinct\n", n, lo, hi, d);
+    CHECK(n > 4 && lo >= 28, "Lowest Note 28: every note at or above 28");
     CHECK(bal, "...and every note-on has its note-off (nothing hangs)");
+
+    /* 1-8 (root, then its octave): the whole pattern lifts, so the 8 stays
+     * an octave above the 1 -- lifting note by note put a low root onto
+     * its own octave and only the 1 was heard. C and G: 36/48 and 31/43. */
+    n = run(api, 28, 2, &lo, &hi, &bal, &d);
+    printf("  Lowest Note 28, 1-8: %d notes, %d-%d, %d distinct\n", n, lo, hi, d);
+    CHECK(n > 4 && lo >= 28 && hi - lo >= 12 && d == 4, "1-8 keeps its octave: root and octave, both chords (4 notes)");
+    CHECK(bal, "...nothing hangs");
 
     char cmd[300];
     snprintf(cmd, sizeof cmd, "rm -rf '%s'", g_root);

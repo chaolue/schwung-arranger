@@ -2706,6 +2706,21 @@ static int chord_voiced_notes(const inst_voice_t *inst, const chord_t *ch, int *
         }
         n = 1;
     }
+    /* The Lowest Note: the whole voicing up whole octaves until its lowest
+     * note is at or above it, so what's built on it keeps its shape -- a
+     * bass pattern's 8 stays an octave above its 1, an arp's tones their
+     * order. Lifted note by note (emit_instrument_event, still the backstop
+     * for an approach note or 1-5 Low's fifth below), a low root landed on
+     * its own octave and 1-8 played only the 1. */
+    if (inst->low_note > 0 && n > 0) {
+        int lo = notes[0], hi = notes[0];
+        for (int i = 1; i < n; i++) { if (notes[i] < lo) lo = notes[i]; if (notes[i] > hi) hi = notes[i]; }
+        while (lo < inst->low_note && hi + 12 <= 127) {
+            for (int i = 0; i < n; i++) notes[i] += 12;
+            lo += 12;
+            hi += 12;
+        }
+    }
     for (int i = 0; i < n; i++) {
         if (notes[i] < 0) notes[i] = 0;
         if (notes[i] > 127) notes[i] = 127;
