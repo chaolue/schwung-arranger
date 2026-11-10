@@ -345,6 +345,12 @@ click is off). Bars where an item starts are in orange.
 Configure how an instrument track plays. Opened with **Menu** from that
 Instrument track (or the Pads track).
 
+A new song's instruments start off, set up as: **Inst 1** a bass on the kick
+(Bass, Follow Note 36, octave 3); **Inst 2** keys — an Arp an octave up
+(octave 4) at its own **1/16** Rate; both with a **1/16** Note Gap. The
+**Pads** play a full chord at octave 4. Jam's instruments start the same way
+(and on).
+
 **Play** works here as in the Song Builder (start from the cursor; Play again
 stops), and **while playing, every change is heard at once** — the instrument
 re-strikes with the new setting — so you can try settings against the song.

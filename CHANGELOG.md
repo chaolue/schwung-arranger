@@ -3,6 +3,9 @@
 ## 1.0.0 (2026-11-10)
 
 ### Song Builder
+- New instrument defaults, in Song Builder and Jam: **Inst 1** a bass on
+  the kick (Follow Note 36); **Inst 2** keys -- an Arp an octave up at its
+  own 1/16 Rate; both with a 1/16 Note Gap. Existing songs keep theirs.
 - A shortened clip can be lengthened again: Trim Clip's End reaches the
   clip's whole length, found in its own folder. A clip from a folder other
   than the one on the pads used its shortened end as its length (or a

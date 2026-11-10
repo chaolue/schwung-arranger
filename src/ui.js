@@ -2565,18 +2565,18 @@ let jamLastSwapCounterForChord = -1; /* last-seen swap_counter -- a groove/fill 
  * openJamInstrumentMenu). Mirrors the fields pushed to the DSP's jam_inst[]
  * via jam_inst<N>_* set_param keys (arranger_engine.c), each applied
  * immediately, no rebuild. Inst 1 defaults to follow_note 36 (kick) with
- * bass voicing, a low root note driven by the beat. Inst 2 defaults to
- * follow_note "off" (0) with chord voicing -- it instead uses the
- * "trigger once per bar" fallback (emit_jam_instruments_at_tick), giving a
- * sustained chordal pad by default rather than a second beat-driven bass.
+ * bass voicing, a low root note driven by the beat. Inst 2 defaults to an
+ * arp an octave up with follow_note "off" (0), so it runs at its own Arp
+ * Rate (1/16) rather than a second beat-driven bass.
  * Not persisted -- resets to these defaults each session. */
 let jamInstConfig = jamInstDefaults();
-/* Jam's instruments as they start: Inst 1 a bass on the kick, Inst 2 a chord
- * each bar, the Pads (3) a chord held until it changes, an octave up. */
+/* Jam's instruments as they start, as a new song's (defaultInstrument): Inst
+ * 1 a bass on the kick, Inst 2 keys -- an arp an octave up at 1/16 -- the
+ * Pads (3) a chord held until it changes, an octave up. */
 function jamInstDefaults() {
     return [
-        { octave: 3, voicing: "bass", inversion: INVERSION_AUTO, note_gap: 0.25, follow_note: 36, velocity: 100 },
-        { octave: 3, voicing: "chord", inversion: INVERSION_AUTO, note_gap: 0.25, follow_note: 0, velocity: 100 },
+        { octave: 3, voicing: "bass", inversion: INVERSION_AUTO, note_gap: 0.0625, follow_note: 36, velocity: 100 },
+        { octave: 4, voicing: "arp", inversion: INVERSION_AUTO, note_gap: 0.0625, follow_note: 0, velocity: 100, arp_rate: 4 },
         { octave: 4, voicing: "chord", inversion: INVERSION_AUTO, note_gap: 0.125, follow_note: 0, velocity: 80 }
     ];
 }
@@ -3701,21 +3701,25 @@ function flushInstrumentLive() {
     }
 }
 
-/* A new song's instrument `idx`: Inst 1/2 as they always were; Pads a
- * chord an octave up, voice-led (Auto), off until switched on. */
+/* A new song's instrument `idx`, off until switched on: Inst 1 a bass on
+ * the kick (Follow Note 36); Inst 2 keys -- an arp an octave up, at its own
+ * 1/16 rate; both a 1/16 Note Gap. Pads a chord an octave up, voice-led
+ * (Auto). Jam's start the same way (jamInstDefaults). */
 export function defaultInstrument(idx) {
-    const pads = idx === 2;
-    return {
+    const keys = idx === 1, pads = idx === 2;
+    const inst = {
         enabled: false,
-        octave: pads ? 4 : 3,
-        follow_note: 0,
-        voicing: pads ? "chord" : "bass",
+        octave: keys || pads ? 4 : 3,
+        follow_note: idx === 0 ? 36 : 0,
+        voicing: pads ? "chord" : keys ? "arp" : "bass",
         inversion: INVERSION_AUTO,
-        note_gap: pads ? 0.125 : 0.25,
+        note_gap: pads ? 0.125 : 0.0625,    /* the menu's 1/16 (of a beat) */
         velocity: pads ? 80 : 100,
         bars: [],
         overrides: []
     };
+    if (keys) inst.arp_rate = 4;    /* 1/16 */
+    return inst;
 }
 
 /* "Play from section N"/"play from cursor" build a temporary song whose

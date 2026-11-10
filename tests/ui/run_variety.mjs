@@ -16,7 +16,7 @@ globalThis.host_module_get_param = (k) => {
     return null;
 };
 
-await import('./ui_test.mjs');
+const M = await import('./ui_test.mjs');
 const C = await import('./shared/constants.mjs');
 const g = globalThis;
 let failures = 0, passes = 0;
@@ -106,6 +106,17 @@ back(); back();
 const items = (saved().sections[0].inst || [])[0] || [];
 check(items.length === 1 && items[0].pattern === 2 && items[0].chance === 50,
       "the item's Pattern (Up-Down) and Chance are saved: " + JSON.stringify(items));
+
+/* A new song's instruments: Inst 1 a bass on the kick, Inst 2 keys (an arp
+ * an octave up at its own 1/16 rate), both a 1/16 Note Gap and off; the
+ * Pads a chord an octave up. */
+const d1 = M.defaultInstrument(0), d2 = M.defaultInstrument(1), d3 = M.defaultInstrument(2);
+check(d1.voicing === "bass" && d1.follow_note === 36 && d1.octave === 3 && d1.note_gap === 0.0625 && !d1.enabled,
+      "Inst 1 default: bass on the kick, 1/16 gap, off: " + JSON.stringify(d1));
+check(d2.voicing === "arp" && d2.follow_note === 0 && d2.octave === 4 && M.instVariety(d2).arp_rate === 4 &&
+      d2.note_gap === 0.0625 && !d2.enabled && M.noteGapLabel(d2.note_gap) === "1/16",
+      "Inst 2 default: an arp an octave up at 1/16, Note Gap 1/16, off: " + JSON.stringify(d2));
+check(d3.voicing === "chord" && d3.octave === 4 && d3.note_gap === 0.125, "Pads unchanged");
 
 console.log(`${passes} passed, ${failures} failed`);
 process.exit(failures ? 1 : 0);
