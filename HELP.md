@@ -346,10 +346,12 @@ Configure how an instrument track plays. Opened with **Menu** from that
 Instrument track (or the Pads track).
 
 A new song's instruments start off, set up as: **Inst 1** a bass on the kick
-(Bass, Follow Note 36, octave 3); **Inst 2** keys — an Arp an octave up
-(octave 4) at its own **1/16** Rate; both with a **1/16** Note Gap. The
+(Bass, Follow Note 36, octave 3, Lowest Note a bass guitar's low E); **Inst
+2** keys — an Up-Down Arp over 2 octaves, an octave up (octave 4), at its
+own **1/16** Rate and velocity 80; both with a **1/16** Note Gap. The
 **Pads** play a full chord at octave 4. Jam's instruments start the same way
-(and on).
+(and on). Each plays on its own Schwung chain by default — Inst 1 channel 2,
+Inst 2 channel 3, the Pads channel 4 (Options).
 
 **Play** works here as in the Song Builder (start from the cursor; Play again
 stops), and **while playing, every change is heard at once** — the instrument
@@ -372,6 +374,7 @@ stop.
 | Field | Meaning |
 |-------|---------|
 | Enabled | On/Off for this instrument track |
+| Lowest Note | **Off**, or a note: anything below it plays whole octaves up until it isn't — patterns, approach notes and arp steps included — for a bass synth that can't go lower (a bass guitar's low E is 28, where turning up from Off starts). Not for the Pads |
 | Octave | Which octave it plays in (-1 to 8). With **Bass** voicing the octave runs up from the song key's root, so the tonic is the bass's lowest, home note and the other roots sit above it: in B♭ at Octave 3 the bass plays B♭2, with F3 and E♭3 above. (The key's root is kept near the octave's C — on or above it for keys C to F, just below it for F♯ to B.) Chord and Arp voicings with Auto inversion are likewise placed around the key's root |
 | Follow Note | When set (1–127), the instrument fires alongside that drum note instead of on the chord/bar grid (e.g. a bass that follows the kick). 0 = off, follows the bar grid instead. With Bass voicing, turning up from Off jumps straight to 36 (the kick) |
 | Voicing | **Bass** plays the chord's root/bass note; **Chord** plays the full chord; **Arp** plays the chord's notes one at a time — on each Follow Note hit, or with Follow Note Off at its **Rate** |
@@ -938,9 +941,9 @@ routing — opened as a sub-screen from here.
 | Field | Meaning |
 |-------|---------|
 | Drums | Drum track's output + MIDI channel (opens a sub-screen — see below) |
-| Inst 1 | Instrument 1's output + MIDI channel (opens a sub-screen — see below) |
-| Inst 2 | Instrument 2's output + MIDI channel (opens a sub-screen — see below) |
-| Pads | The Pads track's output + MIDI channel (opens a sub-screen — see below) |
+| Inst 1 | Instrument 1's output + MIDI channel (opens a sub-screen — see below). Default Schwung, channel 2 |
+| Inst 2 | Instrument 2's output + MIDI channel (opens a sub-screen — see below). Default Schwung, channel 3 |
+| Pads | The Pads track's output + MIDI channel (opens a sub-screen — see below). Default Schwung, channel 4 |
 | Click | The click track's output, MIDI channel and notes (opens a sub-screen — see below) |
 | Keys | Where Keys (Perform/Jam's playable pads) send, and their layout (opens a sub-screen — see below) |
 | Chains | Schwung's chains (4, or 8 with the aux slots): each one's MIDI channel, and a way into its editor (opens a sub-screen — see below) |

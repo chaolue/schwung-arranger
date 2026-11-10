@@ -20,7 +20,7 @@ cc -O0 -Wall -Wextra -I"$REPO_ROOT/src/dsp" -o "$TMP/test_clock" \
     "$REPO_ROOT/tests/dsp/test_clock.c" -ldl
 "$TMP/test_clock" "$TMP/dsp.so"
 # These write their own small library, so they always run.
-SELF_CONTAINED="test_similar test_click_song_volume"
+SELF_CONTAINED="test_similar test_click_song_volume test_low_note"
 for name in $SELF_CONTAINED; do
     cc -Wall -Wextra -Werror -g -pthread -I"$REPO_ROOT/src/dsp" -I"$REPO_ROOT/tests/dsp" -o "$TMP/$name" \
         "$REPO_ROOT/tests/dsp/$name.c" "$REPO_ROOT/src/dsp/arranger_engine.c" -ldl -lm

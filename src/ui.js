@@ -422,14 +422,16 @@ let clickNormalNote = 77;   /* GM Low Wood Block */
 let clickVolume = 100;
 let clickOn = false;
 /* Instrument track output/channel, shared globally across all songs and set
- * from the Options menu (Instrument 1 / Instrument 2 submenus), not per-song. */
-let inst1Output = "external";
-let inst1Channel = 1;
-let inst2Output = "external";
-let inst2Channel = 1;
+ * from the Options menu (Instrument 1 / Instrument 2 submenus), not per-song.
+ * Defaults: a Schwung chain each -- channel 2 the bass, 3 the keys, 4 the
+ * Pads (Keys play on 1, the click on 10). */
+let inst1Output = "schwung";
+let inst1Channel = 2;
+let inst2Output = "schwung";
+let inst2Channel = 3;
 /* Pads (Inst 3) and Keys (Perform/Jam's playable pads) routing. */
-let inst3Output = "external";
-let inst3Channel = 1;
+let inst3Output = "schwung";
+let inst3Channel = 4;
 let keysOutput = "schwung";
 let keysChannel = 1;
 let keysLayout = 0;          /* index into KEYS_LAYOUTS */
@@ -2575,8 +2577,9 @@ let jamInstConfig = jamInstDefaults();
  * Pads (3) a chord held until it changes, an octave up. */
 function jamInstDefaults() {
     return [
-        { octave: 3, voicing: "bass", inversion: INVERSION_AUTO, note_gap: 0.0625, follow_note: 36, velocity: 100 },
-        { octave: 4, voicing: "arp", inversion: INVERSION_AUTO, note_gap: 0.0625, follow_note: 0, velocity: 100, arp_rate: 4 },
+        { octave: 3, voicing: "bass", inversion: INVERSION_AUTO, note_gap: 0.0625, follow_note: 36, velocity: 100, low_note: 28 },
+        { octave: 4, voicing: "arp", inversion: INVERSION_AUTO, note_gap: 0.0625, follow_note: 0, velocity: 80,
+          arp_rate: 4, pattern: 2, arp_range: 2 },
         { octave: 4, voicing: "chord", inversion: INVERSION_AUTO, note_gap: 0.125, follow_note: 0, velocity: 80 }
     ];
 }
@@ -3468,7 +3471,10 @@ export function instVariety(inst) {
         vel_follow: !!o.vel_follow,
         arp_rate: ARP_RATES.includes(o.arp_rate) ? o.arp_rate : 2,
         arp_range: int(o.arp_range, 1, 3, 1),
-        arp_vel: int(o.arp_vel, 0, 90, 0)
+        arp_vel: int(o.arp_vel, 0, 90, 0),
+        /* Lowest Note: a note below it plays octaves up (a bass synth that
+         * can't go lower); 0 = off. */
+        low_note: int(o.low_note, 0, 127, 0)
     };
 }
 
@@ -3492,6 +3498,11 @@ function stepInstVariety(inst, key, delta) {
     else if (key === "strum_dir") inst.strum_dir = Math.max(0, Math.min(2, v.strum_dir + delta));
     else if (key === "chance") inst.chance = Math.max(5, Math.min(100, v.chance + delta * 5));
     else if (key === "vel_follow") inst.vel_follow = delta > 0;
+    else if (key === "low_note") {
+        /* Off, then up from a bass guitar's low E (28); below 12 is Off. */
+        const n = v.low_note === 0 ? (delta > 0 ? 28 : 0) : v.low_note + delta;
+        inst.low_note = n < 12 ? 0 : Math.min(72, n);
+    }
     else if (key === "arp_rate") {
         const i = ARP_RATES.indexOf(v.arp_rate);
         inst.arp_rate = ARP_RATES[Math.max(0, Math.min(ARP_RATES.length - 1, i + delta))];
@@ -3702,9 +3713,10 @@ function flushInstrumentLive() {
 }
 
 /* A new song's instrument `idx`, off until switched on: Inst 1 a bass on
- * the kick (Follow Note 36); Inst 2 keys -- an arp an octave up, at its own
- * 1/16 rate; both a 1/16 Note Gap. Pads a chord an octave up, voice-led
- * (Auto). Jam's start the same way (jamInstDefaults). */
+ * the kick (Follow Note 36), its Lowest Note a bass guitar's low E; Inst 2
+ * keys -- an Up-Down arp over two octaves an octave up, at its own 1/16
+ * rate, velocity 80; both a 1/16 Note Gap. Pads a chord an octave up,
+ * voice-led (Auto). Jam's start the same way (jamInstDefaults). */
 export function defaultInstrument(idx) {
     const keys = idx === 1, pads = idx === 2;
     const inst = {
@@ -3718,7 +3730,10 @@ export function defaultInstrument(idx) {
         bars: [],
         overrides: []
     };
-    if (keys) inst.arp_rate = 4;    /* 1/16 */
+    /* Inst 1's bass no lower than a bass guitar's low E (MIDI 28). */
+    if (idx === 0) inst.low_note = 28;
+    /* The keys: 1/16, up and down over two octaves, softer than the bass. */
+    if (keys) Object.assign(inst, { arp_rate: 4, pattern: 2, arp_range: 2, velocity: 80 });
     return inst;
 }
 
@@ -4372,10 +4387,10 @@ function loadSettings() {
     if (inst1Channel > 16) inst1Channel = 16;
     if (inst2Channel < 1) inst2Channel = 1;
     if (inst2Channel > 16) inst2Channel = 16;
-    if (OUTPUT_TARGETS.indexOf(inst1Output) < 0) inst1Output = "external";
-    if (OUTPUT_TARGETS.indexOf(inst2Output) < 0) inst2Output = "external";
-    inst3Channel = Math.max(1, Math.min(16, Math.round(inst3Channel) || 1));
-    if (OUTPUT_TARGETS.indexOf(inst3Output) < 0) inst3Output = "external";
+    if (OUTPUT_TARGETS.indexOf(inst1Output) < 0) inst1Output = "schwung";
+    if (OUTPUT_TARGETS.indexOf(inst2Output) < 0) inst2Output = "schwung";
+    inst3Channel = Math.max(1, Math.min(16, Math.round(inst3Channel) || 4));
+    if (OUTPUT_TARGETS.indexOf(inst3Output) < 0) inst3Output = "schwung";
     keysChannel = Math.max(1, Math.min(16, Math.round(keysChannel) || 1));
     if (OUTPUT_TARGETS.indexOf(keysOutput) < 0) keysOutput = "schwung";
     keysLayout = Math.max(0, Math.min(KEYS_LAYOUTS.length - 1, Math.round(keysLayout) || 0));
@@ -8697,6 +8712,7 @@ function instrumentRowsFor(inst) {
     return [
         { key: "enabled", label: "Enabled", value: inst && inst.enabled ? "On" : "Off" },
         { key: "octave", label: "Octave", value: String(inst ? inst.octave : 3) },
+        { key: "low_note", label: "Lowest Note", value: instVariety(inst).low_note > 0 ? midiNoteLabel(instVariety(inst).low_note) : "Off" },
         { key: "follow", label: "Follow Note", value: inst && inst.follow_note > 0 ? String(inst.follow_note) : "Off" },
         { key: "voicing", label: "Voicing", value: voicingLabel(voicing) },
         ...instVarietyRows(voicing, "pattern", () => patternLabel(voicing, instVariety(inst).pattern)),
@@ -9422,7 +9438,7 @@ function pushJamInstrumentRouting(idx) {
 
 /* The variety settings Jam's instruments carry, as Song Builder's do. */
 const JAM_VARIETY_FIELDS = ["pattern", "approach", "strum", "strum_dir", "chance", "vel_follow",
-    "arp_rate", "arp_range", "arp_vel"];
+    "arp_rate", "arp_range", "arp_vel", "low_note"];
 
 /* A Jam instrument's setting `field` (a menu row key) as the engine's
  * jam_inst<N>_<param> and its value. */

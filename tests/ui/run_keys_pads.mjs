@@ -84,7 +84,7 @@ check(Array.isArray(song.sections[0].inst) && (song.sections[0].inst[2] || []).l
       "the Pads item is saved as the section's third instrument: " + JSON.stringify(song.sections[0].inst));
 const eng = JSON.parse(M.toEngineSongJson(Object.assign({ source_folder: "F" }, song)));
 const p3 = eng.instruments[2];
-check(p3 && p3.voicing === "chord" && p3.follow_note === 0 && p3.enabled === true && p3.output === "external" && p3.channel === 1,
+check(p3 && p3.voicing === "chord" && p3.follow_note === 0 && p3.enabled === true && p3.output === "schwung" && p3.channel === 4,
       "the engine gets Pads as a third chord instrument on its route: " + JSON.stringify(p3));
 
 /* ---- the Click: on Track 4 again, on/off in its Click Settings ---- */

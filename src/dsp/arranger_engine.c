@@ -353,6 +353,11 @@ typedef struct {
      * quieter (up to, %) its non-base notes play, at random; 0 = off. */
     uint8_t arp_range;
     uint8_t arp_vel;
+    /* Lowest Note: a note below it plays whole octaves up until it isn't --
+     * for a bass synth that can't go lower. 0 = off. Applied where notes go
+     * out (emit_instrument_event), so every pattern, approach note, arp step
+     * and Follow Note hit is lifted, its note-off alike. */
+    uint8_t low_note;
     /* Per-section per-bar on/off map: 1 = send, 0 = muted. */
     uint8_t bars[MAX_SONG_SECTIONS][MAX_SECTION_BARS];
     /* Sparse per-bar overrides of octave/follow_note/voicing/inversion. */
@@ -383,6 +388,7 @@ typedef struct {
     double note_gap;
     uint8_t velocity;        /* 0 = the default -- see voice_velocity */
     uint8_t pattern, approach, strum_ms, strum_dir, chance, vel_follow, arp_rate, arp_range, arp_vel; /* see instrument_t */
+    uint8_t low_note;        /* see instrument_t */
     /* What the attack that this voice was stored for ACTUALLY played (set by
      * instrument_attack), so its note-off releases exactly those notes:
      * a pattern, an arpeggio or an approach note is not a function of the
@@ -453,6 +459,7 @@ static void inst_voice_from(const instrument_t *inst, inst_voice_t *out) {
     out->arp_rate = inst->arp_rate;
     out->arp_range = inst->arp_range;
     out->arp_vel = inst->arp_vel;
+    out->low_note = inst->low_note;
     out->played_valid = 0;
     out->played_n = 0;
     out->played_sent = 0;
@@ -2608,6 +2615,8 @@ static void emit_instrument_event(engine_t *e, const inst_voice_t *inst,
     int target = (inst->output_target >= 0 && inst->output_target <= 2) ? inst->output_target : 0;
     uint8_t ch = (uint8_t)(inst->channel & 0x0F);
     uint8_t n = note & 0x7F;
+    /* Below the Lowest Note: up whole octaves until it isn't. */
+    if (inst->low_note > 0) while (n < inst->low_note && n + 12 <= 127) n = (uint8_t)(n + 12);
     /* Count what's sounding, so stopping can release anything a lost
      * note-off left behind -- see emit_instrument_notes_release. */
     if (high == 0x90 && vel > 0) {
@@ -2745,7 +2754,8 @@ static void instrument_state_at(engine_t *e, int i, uint32_t tick, inst_voice_t 
 static int voice_same_now(const inst_voice_t *a, const inst_voice_t *b) {
     return voice_equal(a, b) && a->follow_note == b->follow_note && a->note_gap == b->note_gap &&
            a->approach == b->approach && a->chance == b->chance && a->vel_follow == b->vel_follow &&
-           a->arp_rate == b->arp_rate && a->arp_range == b->arp_range && a->arp_vel == b->arp_vel;
+           a->arp_rate == b->arp_rate && a->arp_range == b->arp_range && a->arp_vel == b->arp_vel &&
+           a->low_note == b->low_note;
 }
 
 static int chord_equal(const chord_t *a, const chord_t *b);
@@ -4224,6 +4234,8 @@ static int parse_instruments_array(const char *inst_arr, instrument_t *insts, in
                     int v; if (json_get_int_at(p, "arp_range", &v)) inst->arp_range = (uint8_t)clampi(v, 1, 3);
                 } else if (strncmp(p + 1, "arp_vel\"", 8) == 0) {
                     int v; if (json_get_int_at(p, "arp_vel", &v)) inst->arp_vel = (uint8_t)clampi(v, 0, 90);
+                } else if (strncmp(p + 1, "low_note\"", 9) == 0) {
+                    int v; if (json_get_int_at(p, "low_note", &v)) inst->low_note = (uint8_t)clampi(v, 0, 127);
                 } else if (strncmp(p + 1, "bars", 4) == 0) {
                     /* "bars": [[1,0,...], [1,1,...], ...] — per-section arrays. */
                     const char *bars_arr = strchr(p + 4, '[');
@@ -5490,6 +5502,7 @@ static void copy_song_used(song_t *dst, const song_t *src) {
         di->arp_rate = si->arp_rate;
         di->arp_range = si->arp_range;
         di->arp_vel = si->arp_vel;
+        di->low_note = si->low_note;
         memcpy(di->bars, si->bars, (size_t)ns * sizeof di->bars[0]);
         di->override_count = si->override_count;
         memcpy(di->overrides, si->overrides,
@@ -7293,6 +7306,8 @@ static void arr_set_param(void *instance, const char *key, const char *val) {
             ji->arp_range = (uint8_t)clampi(atoi(val), 1, 3);
         } else if (strcmp(k, "arp_vel") == 0) {
             ji->arp_vel = (uint8_t)clampi(atoi(val), 0, 90);
+        } else if (strcmp(k, "low_note") == 0) {
+            ji->low_note = (uint8_t)clampi(atoi(val), 0, 127);
         }
         return;
     }

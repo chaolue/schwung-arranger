@@ -4,8 +4,14 @@
 
 ### Song Builder
 - New instrument defaults, in Song Builder and Jam: **Inst 1** a bass on
-  the kick (Follow Note 36); **Inst 2** keys -- an Arp an octave up at its
-  own 1/16 Rate; both with a 1/16 Note Gap. Existing songs keep theirs.
+  the kick (Follow Note 36); **Inst 2** keys -- an Up-Down Arp over 2
+  octaves, an octave up, at its own 1/16 Rate, velocity 80; both with a
+  1/16 Note Gap. Existing songs keep theirs. Options routes each to its own
+  Schwung chain by default: Inst 1 channel 2, Inst 2 channel 3, the Pads
+  channel 4 (saved Options are kept).
+- **Lowest Note** (Instrument Settings): a note below it plays whole
+  octaves up -- for a bass synth that can't go lower. New songs' Inst 1
+  start at a bass guitar's low E (28).
 - A shortened clip can be lengthened again: Trim Clip's End reaches the
   clip's whole length, found in its own folder. A clip from a folder other
   than the one on the pads used its shortened end as its length (or a

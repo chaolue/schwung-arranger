@@ -49,41 +49,41 @@ check(/Pattern/.test(t) && /Approach/.test(t), "Bass: Pattern and Approach: " + 
 check(!/Strum/.test(t) && !/Inversion/.test(t), "Bass: no Strum, no Inversion");
 check(/Vel Follow/.test(t) && /Chance/.test(t) && /100%/.test(t), "Vel Follow and Chance (100%) for any voicing");
 
-/* Voicing (row 3): Bass -> Chord. */
-jog(3); click(); jog(1); click();
+/* Voicing (row 4, after Enabled Octave Lowest-Note Follow): Bass -> Chord. */
+jog(4); click(); jog(1); click();
 t = menuText();
 check(/Chord/.test(t) && /Strum/.test(t) && /Strum Dir/.test(t) && /Inversion/.test(t), "Chord: Strum, Strum Dir, Inversion: " + t);
 check(!/Pattern/.test(t) && !/Approach/.test(t), "Chord: no Pattern or Approach");
 
-/* Strum: row 5 for Chord (Enabled Octave Follow Voicing Inversion Strum). */
-jog(5); click(); jog(6); click();
+/* Strum: row 6 for Chord (Enabled Octave Lowest-Note Follow Voicing Inversion Strum). */
+jog(6); click(); jog(6); click();
 t = menuText();
 check(/30ms/.test(t), "Strum turns in 5 ms steps: " + t);
 
-/* Voicing -> Arp; Pattern (row 4) up to Random. */
-jog(3); click(); jog(1); click();
+/* Voicing -> Arp; Pattern (row 5) up to Random. */
+jog(4); click(); jog(1); click();
 t = menuText();
 check(/Arp/.test(t) && /Pattern/.test(t) && /Up/.test(t), "Arp: a Pattern, Up by default: " + t);
 check(!/Strum/.test(t) && !/Approach/.test(t), "Arp: no Strum or Approach");
-jog(4); click(); jog(3); click();
+jog(5); click(); jog(3); click();
 /* Vel Follow toggles on a click; Chance (the last row) down to 50%. */
 jog(30); jog(-1); click();    /* Vel Follow */
 jog(1); click(); jog(-10); click();
 t = menuText();
 check(/Random/.test(t) && /50%/.test(t), "Random arp, Chance 50%: " + t);
 check(!/Rate/.test(t), "Arp following the kick: no Rate (the hits are its rhythm)");
-/* Follow Note (row 2) down to Off: the Arp runs at its Rate, 1/8 by default. */
-jog(2); click(); jog(-40); click();
+/* Follow Note (row 3) down to Off: the Arp runs at its Rate, 1/8 by default. */
+jog(3); click(); jog(-40); click();
 t = menuText();
 check(/Rate/.test(t) && /1\/8/.test(t), "Follow Note Off: a Rate row, 1/8: " + t);
-/* Rate (row 5, after Pattern) up two: 1/8T, 1/16. */
-jog(5); click(); jog(2); click();
+/* Rate (row 6, after Pattern) up two: 1/8T, 1/16. */
+jog(6); click(); jog(2); click();
 t = menuText();
 check(/1\/16/.test(t), "Rate 1/16: " + t);
 check(/Range/.test(t) && /1 Oct/.test(t) && /Vel Range/.test(t), "Arp: Range (1 Oct) and Vel Range rows: " + t);
-/* Range (row 6) to 2 Oct; Vel Range (row 7) to 30%; Pattern (row 4) from
+/* Range (row 7) to 2 Oct; Vel Range (row 8) to 30%; Pattern (row 5) from
  * Random on to Pedal. */
-jog(6); click(); jog(1); click();
+jog(7); click(); jog(1); click();
 jog(1); click(); jog(3); click();
 jog(-3); click(); jog(4); click();
 t = menuText();
@@ -117,6 +117,14 @@ check(d2.voicing === "arp" && d2.follow_note === 0 && d2.octave === 4 && M.instV
       d2.note_gap === 0.0625 && !d2.enabled && M.noteGapLabel(d2.note_gap) === "1/16",
       "Inst 2 default: an arp an octave up at 1/16, Note Gap 1/16, off: " + JSON.stringify(d2));
 check(d3.voicing === "chord" && d3.octave === 4 && d3.note_gap === 0.125, "Pads unchanged");
+check(d1.low_note === 28, "Inst 1's Lowest Note: a bass guitar's low E (28)");
+const v2 = M.instVariety(d2);
+check(v2.pattern === 2 && v2.arp_range === 2 && d2.velocity === 80, "Inst 2's arp: Up-Down over 2 octaves, velocity 80: " + JSON.stringify(v2));
+/* The engine gets the Lowest Note, and each instrument its own Schwung chain. */
+const eng = JSON.parse(M.toEngineSongJson({ name: "D", source_folder: "", sections: [], instruments: [d1, d2, d3] }));
+check(eng.instruments[0].low_note === 28 && eng.instruments[1].low_note === 0, "the engine gets each Lowest Note: " + eng.instruments.map(i => i.low_note));
+check(eng.instruments.every(i => i.output === "schwung") && eng.instruments.map(i => i.channel).join() !== "1,1,1",
+      "Inst 1, Inst 2 and the Pads on their own Schwung channels: " + eng.instruments.map(i => i.output + " " + i.channel));
 
 console.log(`${passes} passed, ${failures} failed`);
 process.exit(failures ? 1 : 0);
