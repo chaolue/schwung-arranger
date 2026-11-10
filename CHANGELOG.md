@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.0 (2026-11-10)
 
 ### Song Builder
 - A shortened clip can be lengthened again: Trim Clip's End reaches the

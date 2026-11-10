@@ -8,7 +8,7 @@
  * confirmed from the logs (see init()/playCurrentSong()) instead of guessing
  * whether a new file actually loaded. Keep the DSP dsp_build_version in
  * arranger_engine.c in sync so both sides are verifiable. */
-const UI_BUILD_VERSION = "arranger-ui-0.6.0";
+const UI_BUILD_VERSION = "arranger-ui-1.0.0";
 
 /* Lit white buttons at full brightness (127). Schwung's WhiteLedBright is 124. */
 const WhiteLedFull = 127;
@@ -7842,7 +7842,7 @@ function headerFitChars(title, avail) {
 }
 
 function drawRoot() {
-    drawMenuHeader("Arranger", headerRightWithBattery("v0.6"));
+    drawMenuHeader("Arranger", headerRightWithBattery("v1.0"));
     drawHeaderBattery();
     drawMenuList({
         labelX: 3,
