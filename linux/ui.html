@@ -1,0 +1,676 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Arranger</title>
+<style>
+:root {
+    --bg: #f4f3ef; --card: #fff; --ink: #1c1c1a; --dim: #6b6a64; --line: #d9d7cf;
+    --accent: #1f6feb; --accent-ink: #fff; --play: #1a7f37; --bad: #c62828; --hi: #fff4c2;
+}
+@media (prefers-color-scheme: dark) {
+    :root { --bg: #171716; --card: #222220; --ink: #ecebe6; --dim: #9c9a92; --line: #3a3936;
+        --accent: #58a6ff; --accent-ink: #0b1520; --play: #56d364; --bad: #ff7b72; --hi: #4a4215; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.4 system-ui, sans-serif; }
+button, input, select { font: inherit; color: inherit; }
+button { background: var(--card); border: 1px solid var(--line); border-radius: 5px; padding: 4px 10px; cursor: pointer; }
+button:hover { border-color: var(--accent); }
+button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+button.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+button.small { padding: 1px 7px; }
+button:disabled { opacity: .4; cursor: default; }
+input, select { background: var(--card); border: 1px solid var(--line); border-radius: 4px; padding: 3px 6px; }
+input[type=number] { width: 5em; }
+input.bad { border-color: var(--bad); outline: 1px solid var(--bad); }
+label { color: var(--dim); font-size: 12px; display: inline-flex; flex-direction: column; gap: 2px; }
+label.row { flex-direction: row; align-items: center; gap: 5px; font-size: 13px; color: var(--ink); }
+header { position: sticky; top: 0; z-index: 5; background: var(--card); border-bottom: 1px solid var(--line);
+    padding: 8px 14px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+header .gap { flex: 1; }
+#pos { font-variant-numeric: tabular-nums; min-width: 15em; color: var(--dim); }
+#pos.playing { color: var(--play); font-weight: 600; }
+#msg { padding: 6px 14px; color: var(--bad); }
+#msg:empty { display: none; }
+main { display: flex; gap: 14px; padding: 14px; align-items: flex-start; }
+#song { flex: 1; min-width: 0; }
+#library { width: 330px; flex: none; position: sticky; top: 60px; max-height: calc(100vh - 80px); display: flex; flex-direction: column; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; }
+.card.playing { border-color: var(--play); box-shadow: 0 0 0 1px var(--play); }
+.card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--dim); margin: 10px 0 4px; }
+.fields { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; }
+.sechead { display: flex; gap: 6px; align-items: center; }
+.sechead input.name { font-weight: 600; font-size: 15px; flex: 1; min-width: 6em; }
+.sechead .bars { color: var(--dim); white-space: nowrap; }
+table { border-collapse: collapse; width: 100%; }
+td, th { padding: 2px 4px; text-align: left; }
+th { font-weight: 400; font-size: 12px; color: var(--dim); }
+td.clip { overflow-wrap: anywhere; }
+td.clip small { color: var(--dim); display: block; }
+td.tools { white-space: nowrap; text-align: right; }
+.chords { display: flex; flex-wrap: wrap; gap: 4px; }
+.chords .bar { display: flex; flex-direction: column; width: 84px; }
+.chords .bar span { font-size: 11px; color: var(--dim); }
+.chords .bar input { width: 100%; }
+.chords .bar.now input { background: var(--hi); }
+.items { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 3px 0; }
+.items .track { width: 4.5em; color: var(--dim); }
+.items input.txt { width: 17em; }
+.items input[type=number] { width: 4em; }
+.hint { color: var(--dim); font-size: 12px; margin: 4px 0; }
+.insts { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 12px; }
+.inst { border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
+.inst.off .fields { opacity: .45; }
+#clips { overflow: auto; flex: 1; min-height: 100px; margin-top: 8px; }
+#clips .clip { display: flex; gap: 6px; align-items: center; padding: 2px 0; border-bottom: 1px solid var(--line); }
+#clips .clip .n { flex: 1; overflow-wrap: anywhere; }
+#clips .clip .b { color: var(--dim); white-space: nowrap; }
+dialog { background: var(--card); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; max-width: 560px; }
+dialog h3 { margin-top: 0; }
+@media (max-width: 900px) { main { flex-direction: column; } #library { width: 100%; position: static; max-height: 60vh; } }
+</style>
+</head>
+<body>
+<header>
+    <select id="songs" title="Songs"></select>
+    <button id="new">New</button>
+    <button id="save" class="primary">Save</button>
+    <button id="saveas">Save as…</button>
+    <button id="delete">Delete</button>
+    <span class="gap"></span>
+    <button id="play" title="Play from the top (Space)">▶ Play</button>
+    <button id="stop">■ Stop</button>
+    <button id="loop">Loop</button>
+    <button id="click">Click</button>
+    <span id="pos">stopped</span>
+    <span class="gap"></span>
+    <button id="settings">MIDI…</button>
+</header>
+<div id="msg"></div>
+<main>
+    <div id="song"></div>
+    <div id="library" class="card">
+        <strong>MIDI library</strong>
+        <div class="hint" id="target">Clips are added to the section you last touched.</div>
+        <select id="folders"></select>
+        <div id="clips"></div>
+        <div class="hint"><button id="rescan" class="small">Rescan</button> <span id="libpath"></span></div>
+    </div>
+</main>
+
+<dialog id="dlg"></dialog>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+
+/* h("div", {class: "x", onclick: f}, child, ...) */
+function h(tag, attrs, ...kids) {
+    const el = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs || {})) {
+        if (v === null || v === undefined || v === false) continue;
+        if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+        else if (k === "value") el.value = v;
+        else if (k === "checked" || k === "disabled" || k === "selected") el[k] = !!v;
+        else el.setAttribute(k, v === true ? "" : v);
+    }
+    for (const kid of kids.flat()) if (kid !== null && kid !== undefined && kid !== false) el.append(kid);
+    return el;
+}
+
+/* Replace an element's children; lists are flattened, nulls skipped. */
+function fill(el, ...kids) {
+    el.replaceChildren(...kids.flat().filter(k => k !== null && k !== undefined && k !== false));
+}
+
+async function call(method, path, body) {
+    const res = await fetch(path, method === "GET" ? {} : {
+        method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}),
+    });
+    const out = await res.json().catch(() => ({ error: res.statusText }));
+    if (!res.ok || out.error) throw new Error(out.error || res.statusText);
+    return out;
+}
+function say(text) { $("msg").textContent = text || ""; }
+async function attempt(fn) {
+    try { say(""); return await fn(); } catch (e) { say(e.message); return null; }
+}
+
+let K = null;            /* constants from ui.js */
+let status = null;       /* settings, ports, songs */
+let file = null;         /* the open song's file name, null = never saved */
+let song = null;
+let bars = [];           /* each section's length in bars */
+let dirty = false;
+let loop = false;
+let target = 0;          /* the section library clips go to */
+let folders = [];
+let playingSection = -1, playingBar = -1;
+
+function touch() { dirty = true; $("save").textContent = "Save *"; }
+function clean() { dirty = false; $("save").textContent = "Save"; }
+
+/* ---- chords as text ---- */
+
+function chordText(c) {
+    if (!c) return "";
+    let s;
+    if (c.none) s = "N.C.";
+    else {
+        const q = K.qualities.find(x => x.id === c.quality);
+        s = (c.root || "C") + (q ? q.label : "");
+        if (c.bass && c.bass !== c.root) s += "/" + c.bass;
+    }
+    if (typeof c.beat === "number" && c.beat > 1) s += "@" + c.beat;
+    return s;
+}
+function barText(entry) {
+    if (!entry) return "";
+    return (Array.isArray(entry) ? entry : [entry]).filter(Boolean)
+        .slice().sort((a, b) => (a.beat || 1) - (b.beat || 1)).map(chordText).join(" ");
+}
+/* "Am7", "C/E", "G7 C@3", "N.C." -> a bar's entry; undefined if not a chord. */
+function parseBar(text) {
+    const out = [];
+    for (const tok of text.trim().split(/\s+/).filter(Boolean)) {
+        const m = /^(.*?)(?:@(\d+(?:\.5)?))?$/.exec(tok);
+        const beat = m[2] ? parseFloat(m[2]) : 1;
+        if (beat < 1 || beat >= (song.time_sig_num || 4) + 1) return undefined;
+        let c;
+        if (/^(n\.?c\.?|x)$/i.test(m[1])) c = { none: true };
+        else {
+            const p = /^([A-G](?:#|b)?)([^/]*)(?:\/([A-G](?:#|b)?))?$/.exec(m[1]);
+            if (!p || !K.notes.includes(p[1]) || (p[3] && !K.notes.includes(p[3]))) return undefined;
+            const q = K.qualities.find(x => x.label === p[2]) || K.qualities.find(x => x.id === p[2]) ||
+                (p[2] === "M" ? K.qualities[0] : null);
+            if (!q) return undefined;
+            c = { root: p[1], quality: q.id, bass: p[3] || "" };
+        }
+        if (beat !== 1) { c.beat = beat; if (beat % 1) c.adv = true; }
+        out.push(c);
+    }
+    out.sort((a, b) => (a.beat || 1) - (b.beat || 1));
+    if (!out.length) return null;
+    return out.length === 1 && !out[0].beat ? out[0] : out;
+}
+
+/* ---- items (instrument and click changes inside a section) as text ---- */
+
+const TRACKS = ["Inst 1", "Inst 2", "Pads", "Click"];
+function itemList(sec, t) {
+    if (t === 3) { if (!Array.isArray(sec.click)) sec.click = []; return sec.click; }
+    if (!Array.isArray(sec.inst)) sec.inst = [];
+    for (let k = 0; k <= t; k++) if (!Array.isArray(sec.inst[k])) sec.inst[k] = [];
+    return sec.inst[t];
+}
+function itemFields(t) { return t === 3 ? ["volume"] : K.item_fields; }
+function itemText(it, t) {
+    return itemFields(t).filter(f => it[f] !== null && it[f] !== undefined)
+        .map(f => (f === "mute" && it[f] === true) ? "mute" : f + "=" + it[f]).join(" ");
+}
+function parseItem(text, t) {
+    const out = {};
+    for (const tok of text.trim().split(/\s+/).filter(Boolean)) {
+        const eq = tok.indexOf("=");
+        const key = eq < 0 ? tok : tok.slice(0, eq);
+        const raw = eq < 0 ? "true" : tok.slice(eq + 1);
+        if (!itemFields(t).includes(key)) return null;
+        if (raw === "true" || raw === "false") out[key] = raw === "true";
+        else if (key === "voicing") { if (!K.voicings.includes(raw)) return null; out[key] = raw; }
+        else if (raw !== "" && isFinite(Number(raw))) out[key] = Number(raw);
+        else return null;
+    }
+    return out;
+}
+
+/* ---- rendering ---- */
+
+function numField(label, obj, key, opts = {}) {
+    const input = h("input", { type: "number", value: obj[key] ?? opts.dflt ?? 0, min: opts.min, max: opts.max, step: opts.step || 1,
+        onchange: (e) => {
+            let v = parseFloat(e.target.value);
+            if (!isFinite(v)) v = opts.dflt ?? 0;
+            if (opts.min !== undefined) v = Math.max(opts.min, v);
+            if (opts.max !== undefined) v = Math.min(opts.max, v);
+            obj[key] = v; e.target.value = v; touch();
+            if (opts.after) opts.after(v);
+        } });
+    return h("label", { title: opts.title }, label, input);
+}
+function selField(label, obj, key, options, opts = {}) {
+    const cur = obj[key] ?? opts.dflt;
+    const sel = h("select", { onchange: (e) => {
+        const o = options[e.target.selectedIndex];
+        obj[key] = o.value; touch();
+        if (opts.after) opts.after(o.value);
+    } }, options.map(o => h("option", { selected: o.value === cur }, o.label)));
+    return h("label", {}, label, sel);
+}
+
+function render() {
+    const root = $("song");
+    root.replaceChildren();
+    if (!song) { root.append(h("div", { class: "card" }, "No song open. Pick one above, or New.")); return; }
+    if (target >= song.sections.length) target = Math.max(0, song.sections.length - 1);
+
+    root.append(h("div", { class: "card" }, h("div", { class: "fields" },
+        h("label", {}, "Name", h("input", { value: song.name, size: 28, onchange: (e) => { song.name = e.target.value || "Untitled"; touch(); } })),
+        numField("Tempo", song, "tempo_bpm", { min: 20, max: 300, dflt: 120, after: (v) => call("POST", "/api/tempo", { bpm: v }).catch(() => {}) }),
+        numField("Beats", song, "time_sig_num", { min: 1, max: 16, dflt: 4, after: refreshBars }),
+        selField("per", song, "time_sig_den", [2, 4, 8, 16].map(v => ({ value: v, label: "1/" + v })), { dflt: 4 }),
+        h("label", {}, "Key", h("select", { title: "Changing the key moves the chords with it", onchange: (e) => transpose(K.keys[e.target.selectedIndex]) },
+            K.keys.map(k => h("option", { selected: k === song.key }, k)))),
+        h("label", { title: "Where this song's clips are looked up in the MIDI library" }, "Library folder",
+            h("input", { value: song.source_folder || "", size: 34, onchange: (e) => { song.source_folder = e.target.value.trim(); touch(); } })),
+    )));
+
+    song.sections.forEach((sec, si) => root.append(renderSection(sec, si)));
+    root.append(h("div", { style: "margin-bottom:12px" }, h("button", { onclick: () => {
+        song.sections.push({ name: "Section", clips: [], chords: [] });
+        target = song.sections.length - 1; touch(); normalize();
+    } }, "+ Section")));
+    root.append(renderInstruments());
+    showTarget();
+}
+
+function renderSection(sec, si) {
+    const card = h("div", { class: "card" + (si === playingSection ? " playing" : ""), "data-sec": si,
+        onfocusin: () => { if (target !== si) { target = si; showTarget(); } } });
+    const move = (d) => { const a = song.sections; [a[si], a[si + d]] = [a[si + d], a[si]]; target = si + d; touch(); normalize(); };
+    card.append(h("div", { class: "sechead" },
+        h("span", {}, (si + 1) + "."),
+        h("input", { class: "name", value: sec.name, onchange: (e) => { sec.name = e.target.value || "Section"; touch(); showTarget(); } }),
+        h("span", { class: "bars" }, barsLabel(si)),
+        h("button", { class: "small", title: "Play from this section", onclick: () => play(si) }, "▶"),
+        h("button", { class: "small", title: "Move up", disabled: si === 0, onclick: () => move(-1) }, "↑"),
+        h("button", { class: "small", title: "Move down", disabled: si === song.sections.length - 1, onclick: () => move(1) }, "↓"),
+        h("button", { class: "small", title: "Duplicate", onclick: () => {
+            const copy = JSON.parse(JSON.stringify(sec)); delete copy.id;
+            song.sections.splice(si + 1, 0, copy); touch(); normalize();
+        } }, "⧉"),
+        h("button", { class: "small", title: "Delete section", onclick: () => {
+            if (!confirm('Delete section "' + sec.name + '"?')) return;
+            song.sections.splice(si, 1); touch(); normalize();
+        } }, "✕"),
+    ));
+
+    /* drums */
+    card.append(h("h2", {}, "Drums"));
+    if (sec.clips.length) {
+        const rows = sec.clips.map((c, ci) => {
+            const shift = (d) => { [sec.clips[ci], sec.clips[ci + d]] = [sec.clips[ci + d], sec.clips[ci]]; touch(); render(); };
+            const num = (key, min, max, step, toView, fromView) => h("input", { type: "number", min, max, step, value: toView(c[key]),
+                onchange: (e) => {
+                    let v = parseFloat(e.target.value); if (!isFinite(v)) v = toView(c[key]);
+                    v = Math.max(min, Math.min(max, v)); e.target.value = v;
+                    c[key] = fromView(v);
+                    if (c.end_bar <= c.start_bar) { c.end_bar = c.start_bar + 1; render(); }
+                    touch(); refreshBars();
+                } });
+            const id = (v) => v;
+            return h("tr", {},
+                h("td", { class: "clip" }, c.placeholder ? "(empty)" : c.source.replace(/\.midi?$/i, ""),
+                    c.source_folder ? h("small", {}, c.source_folder) : null),
+                h("td", {}, num("start_bar", 1, 256, 1, v => (v || 0) + 1, v => Math.round(v) - 1)),
+                h("td", {}, num("end_bar", 1, 256, 1, id, v => Math.round(v))),
+                h("td", {}, num("velocity_scale", 0, 200, 5, v => Math.round((v ?? 1) * 100), v => v / 100)),
+                h("td", {}, num("speed", 0.25, 4, 0.25, v => v || 1, id)),
+                h("td", { class: "tools" },
+                    h("button", { class: "small", disabled: ci === 0, onclick: () => shift(-1) }, "↑"),
+                    h("button", { class: "small", disabled: ci === sec.clips.length - 1, onclick: () => shift(1) }, "↓"),
+                    h("button", { class: "small", title: "Duplicate", onclick: () => { sec.clips.splice(ci + 1, 0, JSON.parse(JSON.stringify(c))); touch(); normalize(); } }, "⧉"),
+                    h("button", { class: "small", title: "Remove", onclick: () => { sec.clips.splice(ci, 1); touch(); normalize(); } }, "✕")),
+            );
+        });
+        card.append(h("table", {}, h("tr", {}, ["Clip", "From bar", "To bar", "Velocity %", "Speed", ""].map(t => h("th", {}, t))), rows));
+    } else {
+        card.append(h("div", { class: "hint" }, "No clips yet: pick one from the MIDI library with +."));
+    }
+
+    /* chords */
+    card.append(h("h2", {}, "Chords"));
+    card.append(renderChords(sec, si));
+
+    /* items */
+    const changes = h("details", { open: TRACKS.some((_, t) => itemListPeek(sec, t).length) },
+        h("summary", { class: "hint" }, "Instrument and click changes inside this section"));
+    TRACKS.forEach((name, t) => {
+        itemListPeek(sec, t).forEach((it, ii) => {
+            const txt = h("input", { class: "txt", value: itemText(it, t), onchange: (e) => {
+                const parsed = parseItem(e.target.value, t);
+                e.target.classList.toggle("bad", !parsed);
+                if (!parsed) return;
+                for (const f of itemFields(t)) delete it[f];
+                Object.assign(it, parsed); touch();
+            } });
+            changes.append(h("div", { class: "items" },
+                h("span", { class: "track" }, name),
+                "bar", h("input", { type: "number", min: 1, max: 256, value: (it.bar || 0) + 1, onchange: (e) => { it.bar = Math.max(0, (parseInt(e.target.value, 10) || 1) - 1); touch(); } }),
+                "beat", h("input", { type: "number", min: 1, max: 16, step: 0.5, value: it.beat || 1, onchange: (e) => {
+                    const b = parseFloat(e.target.value) || 1;
+                    if (b > 1) it.beat = b; else delete it.beat;
+                    if (b % 1) it.adv = true; else delete it.adv;
+                    touch();
+                } }),
+                txt,
+                h("button", { class: "small", onclick: () => { itemList(sec, t).splice(ii, 1); touch(); render(); } }, "✕")));
+        });
+    });
+    changes.append(h("div", { class: "items" }, TRACKS.map((name, t) => h("button", { class: "small", onclick: () => {
+        itemList(sec, t).push(t === 3 ? { bar: 0, volume: 100 } : { bar: 0, mute: true }); touch(); render();
+    } }, "+ " + name)),
+        h("span", { class: "hint" }, "e.g.  mute   mute=false   octave=2 voicing=chord   volume=60 (click)")));
+    card.append(changes);
+    return card;
+}
+function itemListPeek(sec, t) {
+    const l = t === 3 ? sec.click : (Array.isArray(sec.inst) ? sec.inst[t] : null);
+    return Array.isArray(l) ? l : [];
+}
+
+function barsLabel(si) {
+    const b = bars[si] || 0;
+    return (+b.toFixed(2)) + (b === 1 ? " bar" : " bars");
+}
+
+function renderChords(sec, si) {
+    const n = Math.max(1, Math.ceil(bars[si] || 0));
+    const box = h("div", { class: "chords", "data-chords": si });
+    for (let b = 0; b < n; b++) {
+        box.append(h("div", { class: "bar" + (si === playingSection && b === playingBar ? " now" : ""), "data-bar": b },
+            h("span", {}, b + 1),
+            h("input", { value: barText(sec.chords && sec.chords[b]), placeholder: "–",
+                title: "A chord (Am7, C/E, N.C.), several with beats (G7 C@3), or empty to hold the last",
+                onchange: (e) => {
+                    const entry = parseBar(e.target.value);
+                    e.target.classList.toggle("bad", entry === undefined);
+                    if (entry === undefined) return;
+                    if (!Array.isArray(sec.chords)) sec.chords = [];
+                    while (sec.chords.length <= b) sec.chords.push(null);
+                    sec.chords[b] = entry;
+                    e.target.value = barText(entry);
+                    touch();
+                } })));
+    }
+    return box;
+}
+
+function renderInstruments() {
+    const card = h("div", { class: "card" }, h("strong", {}, "Instruments"),
+        h("div", { class: "hint" }, "They play the chords above. Channels: MIDI… (top right)."));
+    const grid = h("div", { class: "insts" });
+    const names = ["Inst 1 (bass)", "Inst 2 (keys)", "Pads"];
+    if (!Array.isArray(song.instruments)) song.instruments = [];
+    for (let i = 0; i < 3; i++) {
+        if (!song.instruments[i]) song.instruments[i] = JSON.parse(JSON.stringify(K.default_instruments[i]));
+        const inst = song.instruments[i];
+        const pads = i === 2;
+        const voicing = pads ? "chord" : (inst.voicing || "bass");
+        const d = K.default_instruments[i];
+        const box = h("div", { class: "inst" + (inst.enabled ? "" : " off") });
+        box.append(h("label", { class: "row" }, h("input", { type: "checkbox", checked: inst.enabled, onchange: (e) => { inst.enabled = e.target.checked; touch(); render(); } }),
+            h("strong", {}, names[i]), h("span", { class: "hint" }, "ch " + status.settings.inst_channels[i])));
+        const f = h("div", { class: "fields" });
+        if (!pads) f.append(selField("Voicing", inst, "voicing", K.voicings.map(v => ({ value: v, label: v })), { dflt: "bass", after: render }));
+        f.append(numField("Octave", inst, "octave", { min: -1, max: 8, dflt: d.octave }));
+        if (!pads) f.append(numField("Follow note", inst, "follow_note", { min: 0, max: 127, dflt: 0, title: "Play with this drum note (36 = kick); 0 = on the chord changes" }));
+        if (voicing !== "bass") f.append(selField("Inversion", inst, "inversion",
+            ["Root", "1st", "2nd", "3rd", "Auto"].map((l, v) => ({ value: v, label: l })), { dflt: K.inversion_auto }));
+        f.append(selField("Note gap", inst, "note_gap",
+            [[0, "Off"], [0.0625, "1/16"], [0.125, "1/8"], [0.25, "1/4"], [0.5, "1/2"], [1, "1 beat"]].map(([value, label]) => ({ value, label })), { dflt: 0.25 }));
+        f.append(numField("Velocity", inst, "velocity", { min: 1, max: 127, dflt: 100 }));
+        if (voicing !== "chord") {
+            const list = voicing === "arp" ? K.arp_patterns : K.bass_patterns;
+            f.append(selField("Pattern", inst, "pattern", list.map((l, v) => ({ value: v, label: l })), { dflt: 0 }));
+        }
+        if (voicing === "arp") {
+            f.append(selField("Arp rate", inst, "arp_rate", K.arp_rates.map(v => ({ value: v, label: v + " / beat" })), { dflt: 2 }));
+            f.append(numField("Arp range", inst, "arp_range", { min: 1, max: 3, dflt: 1 }));
+            f.append(numField("Arp accent", inst, "arp_vel", { min: 0, max: 90, step: 10, dflt: 0 }));
+        }
+        if (voicing === "bass") f.append(numField("Approach", inst, "approach", { min: 0, max: 3, dflt: 0 }));
+        if (voicing === "chord") {
+            f.append(numField("Strum ms", inst, "strum", { min: 0, max: 100, step: 5, dflt: 0 }));
+            f.append(selField("Strum", inst, "strum_dir", ["Up", "Down", "Alternate"].map((l, v) => ({ value: v, label: l })), { dflt: 0 }));
+        }
+        f.append(numField("Chance %", inst, "chance", { min: 1, max: 100, dflt: 100 }));
+        f.append(numField("Lowest note", inst, "low_note", { min: 0, max: 127, dflt: 0, title: "Notes below it play octaves up; 0 = off" }));
+        f.append(h("label", { class: "row" }, h("input", { type: "checkbox", checked: !!inst.vel_follow, onchange: (e) => { inst.vel_follow = e.target.checked; touch(); } }), "Velocity follows drum"));
+        box.append(f);
+        grid.append(box);
+    }
+    card.append(grid);
+    return card;
+}
+
+function showTarget() {
+    const sec = song && song.sections[target];
+    $("target").textContent = sec ? 'Clips are added to: ' + (target + 1) + '. ' + sec.name : "Open a song to add clips.";
+}
+
+/* ---- keeping in step with ui.js ---- */
+
+async function adopt(desc) { song = desc.song; bars = desc.bars; render(); }
+/* After a structural change: the song as ui.js fills it in. */
+async function normalize() {
+    const d = await attempt(() => call("POST", "/api/describe", { song }));
+    if (d) await adopt(d);
+}
+/* After a length change: just the bar counts and chord rows. */
+async function refreshBars() {
+    const d = await attempt(() => call("POST", "/api/describe", { song }));
+    if (!d) return;
+    bars = d.bars;
+    document.querySelectorAll("[data-sec]").forEach((card) => {
+        const si = +card.dataset.sec;
+        card.querySelector(".bars").textContent = barsLabel(si);
+        const old = card.querySelector("[data-chords]");
+        if (old && !old.contains(document.activeElement)) old.replaceWith(renderChords(song.sections[si], si));
+    });
+}
+async function transpose(key) {
+    const d = await attempt(() => call("POST", "/api/transpose", { song, key }));
+    if (d) { touch(); await adopt(d); }
+}
+
+/* ---- songs ---- */
+
+function fillSongs() {
+    const sel = $("songs");
+    fill(sel, h("option", { value: "" }, file ? "" : (song ? "(unsaved song)" : "Open a song…")),
+        status.songs.map(s => h("option", { value: s.file, selected: s.file === file }, s.name)));
+    if (!file) sel.selectedIndex = 0;
+}
+async function refreshStatus() { status = await call("GET", "/api/status"); fillSongs(); showToggles(); }
+function leaveOk() { return !dirty || confirm("Discard the unsaved changes to this song?"); }
+
+async function openSong(name) {
+    const d = await attempt(() => call("GET", "/api/song?file=" + encodeURIComponent(name)));
+    if (!d) return;
+    file = d.file; target = 0; clean(); await adopt(d); fillSongs(); selectFolder(song.source_folder);
+    localStorage.setItem("arranger.last", file);
+}
+async function save(asNew) {
+    if (!song) return;
+    if (asNew) {
+        const name = prompt("Save as (song name):", song.name + (file ? " copy" : ""));
+        if (!name) return;
+        song.name = name; delete song.id;
+    }
+    const d = await attempt(() => call("POST", "/api/save", { file: asNew ? null : file, song }));
+    if (!d) return;
+    file = d.file; clean(); await adopt(d); await refreshStatus();
+    localStorage.setItem("arranger.last", file);
+}
+
+$("songs").onchange = (e) => {
+    const v = e.target.value;
+    if (!v || !leaveOk()) { fillSongs(); return; }
+    openSong(v);
+};
+$("new").onclick = async () => {
+    if (!leaveOk()) return;
+    const f = folders[$("folders").selectedIndex];
+    const name = prompt("New song name:" + (f ? "\n(its library folder: " + f.path + ")" : ""), f ? f.name : "New Song");
+    if (!name) return;
+    const d = await attempt(() => call("POST", "/api/new", { name, source_folder: f ? f.path : "" }));
+    if (!d) return;
+    file = null; target = 0; await adopt(d); touch(); fillSongs();
+};
+$("save").onclick = () => save(false);
+$("saveas").onclick = () => save(true);
+$("delete").onclick = async () => {
+    if (!file || !confirm('Delete "' + song.name + '"? (A backup is kept in Songs/.backups.)')) return;
+    if (!await attempt(() => call("POST", "/api/delete", { file }))) return;
+    file = null; song = null; clean(); render(); await refreshStatus();
+};
+
+/* ---- transport ---- */
+
+async function play(section) {
+    if (!song) return;
+    await attempt(() => call("POST", "/api/play", { song, section: section || 0, loop }));
+}
+function showToggles() {
+    $("loop").classList.toggle("on", loop);
+    $("click").classList.toggle("on", !!status.click);
+}
+$("play").onclick = () => play(0);
+$("stop").onclick = () => attempt(() => call("POST", "/api/panic"));
+$("loop").onclick = () => { loop = !loop; showToggles(); call("POST", "/api/loop", { loop }).catch(() => {}); };
+$("click").onclick = async () => { status.click = !status.click; showToggles(); await attempt(() => call("POST", "/api/click", { on: status.click })); };
+document.addEventListener("keydown", (e) => {
+    if (e.code !== "Space" || /^(INPUT|SELECT|BUTTON|TEXTAREA|SUMMARY)$/.test(e.target.tagName)) return;
+    e.preventDefault();
+    if ($("pos").classList.contains("playing")) $("stop").click(); else play(target);
+});
+
+async function poll() {
+    try {
+        const p = await call("GET", "/api/position");
+        const el = $("pos");
+        el.classList.toggle("playing", p.running);
+        const sec = p.running ? p.section : -1, bar = p.running ? p.bar - 1 : -1;
+        el.textContent = !p.running ? "stopped"
+            : (p.section >= 0 ? (p.section + 1) + ". " + p.section_name + "   " : "") + "bar " + p.bar + "." + p.beat + "   " + Math.round(p.bpm) + " BPM";
+        if (sec !== playingSection || bar !== playingBar) {
+            playingSection = sec; playingBar = bar;
+            document.querySelectorAll("[data-sec]").forEach(c => c.classList.toggle("playing", +c.dataset.sec === sec));
+            document.querySelectorAll("[data-chords] .bar").forEach(b =>
+                b.classList.toggle("now", +b.parentElement.dataset.chords === sec && +b.dataset.bar === bar));
+        }
+    } catch (e) { $("pos").textContent = "not connected"; }
+    setTimeout(poll, 150);
+}
+
+/* ---- library ---- */
+
+function fillFolders(data) {
+    folders = data.folders;
+    $("libpath").textContent = folders.length ? folders.length + " folders in " + data.library : "Nothing in " + data.library + " yet: put MIDI drum-clip folders there.";
+    const groups = new Map();
+    for (const f of folders) { if (!groups.has(f.category)) groups.set(f.category, []); groups.get(f.category).push(f); }
+    const sel = $("folders");
+    sel.replaceChildren();
+    /* One option per folder, in list order, so selectedIndex is the folder. */
+    for (const f of folders) sel.append(h("option", {}, f.category ? f.category + " / " + f.name : f.name));
+    if (song) selectFolder(song.source_folder); else loadClips();
+}
+function selectFolder(pathName) {
+    const i = folders.findIndex(f => f.path === pathName || f.name === pathName);
+    if (i >= 0) $("folders").selectedIndex = i;
+    loadClips();
+}
+async function loadClips() {
+    const box = $("clips");
+    const f = folders[$("folders").selectedIndex];
+    box.replaceChildren();
+    if (!f) return;
+    const d = await attempt(() => call("GET", "/api/clips?index=" + f.index));
+    if (!d) return;
+    for (const c of d.clips) {
+        box.append(h("div", { class: "clip" },
+            h("button", { class: "small", title: "Add to the section", onclick: () => addClip(f, c) }, "+"),
+            h("button", { class: "small", title: "Listen (looped; Stop to end)", onclick: () => attempt(() => call("POST", "/api/audition", {
+                source_folder: f.path, source: c.source, bars: c.bars,
+                tempo_bpm: song ? song.tempo_bpm : 120, time_sig_num: song ? song.time_sig_num : 4, time_sig_den: song ? song.time_sig_den : 4 })) }, "▶"),
+            h("span", { class: "n" }, c.source.replace(/\.midi?$/i, "")),
+            h("span", { class: "b" }, c.bars + (c.bars === 1 ? " bar" : " bars"))));
+    }
+    if (!d.clips.length) box.append(h("div", { class: "hint" }, "No clips in this folder."));
+}
+function addClip(f, c) {
+    if (!song) { say("Open or create a song first."); return; }
+    if (!song.sections.length) song.sections.push({ name: "Section", clips: [], chords: [] });
+    const clip = { source: c.source, start_bar: 0, end_bar: c.bars };
+    if (!song.source_folder) song.source_folder = f.path;
+    else if (f.path !== song.source_folder) clip.source_folder = f.path;
+    song.sections[target].clips.push(clip);
+    touch(); normalize();
+}
+$("folders").onchange = loadClips;
+$("rescan").onclick = async () => { const d = await attempt(() => call("POST", "/api/rescan")); if (d) fillFolders(d); };
+
+/* ---- MIDI settings ---- */
+
+$("settings").onclick = () => {
+    const s = JSON.parse(JSON.stringify(status.settings));
+    const dlg = $("dlg");
+    const ports = [{ id: "", label: "Automatic (the first found)" }].concat(status.ports);
+    if (s.port && !ports.some(p => p.id === s.port)) ports.push({ id: s.port, label: s.port });
+    const custom = h("input", { size: 30, placeholder: "/dev/snd/midiC1D0", value: s.port });
+    const sel = h("select", { onchange: (e) => { s.port = ports[e.target.selectedIndex].id; custom.value = s.port; } },
+        ports.map(p => h("option", { selected: p.id === s.port }, p.label)));
+    custom.onchange = () => { s.port = custom.value.trim(); };
+    const ch = (label, get, put) => h("label", {}, label, h("input", { type: "number", min: 1, max: 16, value: get(),
+        onchange: (e) => put(Math.max(1, Math.min(16, parseInt(e.target.value, 10) || 1))) }));
+    fill(dlg,
+        h("h3", {}, "MIDI output"),
+        status.port_error ? h("p", { style: "color:var(--bad)" }, status.port_error) : null,
+        h("p", { class: "hint" }, "Now: " + (status.port || "none found")),
+        h("div", { class: "fields" }, h("label", {}, "Output", sel), h("label", {}, "or a device path", custom)),
+        h("h3", { style: "margin-top:14px" }, "Channels"),
+        h("div", { class: "fields" },
+            ch("Drums", () => s.drums_channel, v => { s.drums_channel = v; }),
+            ch("Inst 1", () => s.inst_channels[0], v => { s.inst_channels[0] = v; }),
+            ch("Inst 2", () => s.inst_channels[1], v => { s.inst_channels[1] = v; }),
+            ch("Pads", () => s.inst_channels[2], v => { s.inst_channels[2] = v; }),
+            ch("Click", () => s.click_channel, v => { s.click_channel = v; })),
+        h("h3", { style: "margin-top:14px" }, "Click and clock"),
+        h("div", { class: "fields" },
+            numField("Click volume", s, "click_volume", { min: 0, max: 100 }),
+            numField("Accent note", s, "click_accent_note", { min: 0, max: 127 }),
+            numField("Normal note", s, "click_normal_note", { min: 0, max: 127 }),
+            h("label", { class: "row" }, h("input", { type: "checkbox", checked: s.clock, onchange: (e) => { s.clock = e.target.checked; } }), "Send MIDI clock")),
+        h("p", { style: "text-align:right;margin-bottom:0" },
+            h("button", { onclick: () => dlg.close() }, "Cancel"), " ",
+            h("button", { class: "primary", onclick: async () => {
+                const wasDirty = dirty;
+                const st = await attempt(() => call("POST", "/api/settings", s));
+                if (!wasDirty) clean();
+                dlg.close();
+                if (st) { status = st; showToggles(); render(); if (st.port_error) say("MIDI output: " + st.port_error); }
+            } }, "Apply")));
+    dlg.showModal();
+};
+
+window.addEventListener("beforeunload", (e) => { if (dirty) { e.preventDefault(); e.returnValue = ""; } });
+
+(async function start() {
+    const init = await attempt(() => call("GET", "/api/init"));
+    if (!init) return;
+    K = init.constants; status = init;
+    fillSongs(); showToggles(); render();
+    if (init.port_error) say("MIDI output: " + init.port_error);
+    else if (!init.port) say("No MIDI output found: plug in a MIDI interface, or choose one under MIDI…");
+    const last = localStorage.getItem("arranger.last");
+    if (last && status.songs.some(s => s.file === last)) await openSong(last);
+    const lib = await attempt(() => call("GET", "/api/folders"));
+    if (lib) fillFolders(lib);
+    poll();
+})();
+</script>
+</body>
+</html>

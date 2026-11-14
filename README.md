@@ -87,6 +87,13 @@ clips from the "Song 13 4-4 120 BPM" folder of Groove Monkee's GM Rock 2 pack,
 which is not in the repo — point `ARRANGER_TEST_LIBRARY` at a library holding
 it, or they are reported as skipped.
 
+## On Linux, without a Move
+
+`linux/arranger` plays and edits song files on a Linux PC, sending MIDI to an
+output of the PC: `linux/arranger ui` for a small editor in the browser,
+`linux/arranger play <song>` in a terminal. See
+[linux/README.md](./linux/README.md).
+
 ## Upgrading from 0.5
 
 Songs open as before. Their per-bar instrument mutes and settings are turned

@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Linux
+- `linux/arranger`: play and edit song files on a Linux PC, without a Move,
+  with MIDI going to an output of the PC -- an editor in the browser
+  (`linux/arranger ui`) and a terminal player (`linux/arranger play`). It
+  runs the same engine and song code as the module. See linux/README.md.
+
 ## 1.0.0 (2026-11-10)
 
 ### Song Builder

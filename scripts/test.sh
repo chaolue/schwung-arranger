@@ -31,6 +31,8 @@ for suite in "$TMP"/run*.mjs; do
     echo "== $(basename "$suite")"
     node "$suite" || status=1
 done
+echo "== tests/linux"
+node "$REPO_ROOT/tests/linux/run.mjs" || status=1
 echo "== tests/dsp"
 "$REPO_ROOT/tests/dsp/run.sh" || status=1
 exit $status
